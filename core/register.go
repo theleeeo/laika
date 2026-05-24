@@ -34,23 +34,11 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 	}
 
 	// Determine which parents are affected.
-	for _, rCfg := range idx.resources {
-		if rCfg.Resource == n.ResourceType {
-			continue
-		}
-
-		if !rCfg.HasRelationTo(n.ResourceType) {
-			continue
-		}
-
-		// TODO: Get all parents in one go, no matter the type.
-		parents, err := idx.st.GetParentResourcesOfType(ctx, model.Resource{Type: n.ResourceType, Id: n.ResourceID}, rCfg.Resource)
-		if err != nil {
-			return fmt.Errorf("getting parents: %w", err)
-		}
-
-		roots = append(roots, parents...)
+	parents, err := idx.st.GetParentResources(ctx, res)
+	if err != nil {
+		return fmt.Errorf("getting parents: %w", err)
 	}
+	roots = append(roots, parents...)
 
 	slog.Info("registering change",
 		"resource_type", n.ResourceType,
