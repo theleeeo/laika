@@ -32,8 +32,9 @@ func TestRebuild_EmptySelectors(t *testing.T) {
 	idx := New(Config{Resources: testResources()})
 
 	err := idx.Rebuild(context.Background(), nil)
-	var invalidArg *InvalidArgumentError
-	if !errors.As(err, &invalidArg) {
+
+	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
+	if !ok {
 		t.Fatalf("expected InvalidArgumentError, got %v", err)
 	}
 	if invalidArg.Msg != "at least one selector is required" {
@@ -58,8 +59,8 @@ func TestRebuild_InvalidVersion(t *testing.T) {
 	err := idx.Rebuild(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{99}},
 	})
-	var invalidArg *InvalidArgumentError
-	if !errors.As(err, &invalidArg) {
+	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
+	if !ok {
 		t.Fatalf("expected InvalidArgumentError, got %v", err)
 	}
 	if invalidArg.Msg != `resource "product" has no version 99` {
@@ -84,17 +85,24 @@ func TestRebuild_MultiVersionValidation(t *testing.T) {
 	err := idx.Rebuild(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{3}},
 	})
-	var invalidArg *InvalidArgumentError
-	if !errors.As(err, &invalidArg) {
-		t.Fatalf("expected InvalidArgumentError for invalid version, got %v", err)
+	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
+	if !ok {
+		t.Fatalf("expected InvalidArgumentError, got %v", err)
+	}
+	if invalidArg.Msg != `resource "product" has no version 3` {
+		t.Fatalf("unexpected message: %q", invalidArg.Msg)
 	}
 
 	// Mix of valid and invalid versions: should still fail.
 	err = idx.Rebuild(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{1, 99}},
 	})
-	if !errors.As(err, &invalidArg) {
-		t.Fatalf("expected InvalidArgumentError for mixed versions, got %v", err)
+	invalidArg, ok = errors.AsType[*InvalidArgumentError](err)
+	if !ok {
+		t.Fatalf("expected InvalidArgumentError, got %v", err)
+	}
+	if invalidArg.Msg != `resource "product" has no version 99` {
+		t.Fatalf("unexpected message: %q", invalidArg.Msg)
 	}
 }
 

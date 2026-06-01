@@ -82,8 +82,7 @@ func mapAppError(err error) error {
 	if errors.Is(err, core.ErrStaleVersion) {
 		return status.Error(codes.FailedPrecondition, "stale version")
 	}
-	var invalidArgsErr *core.InvalidArgumentError
-	if errors.As(err, &invalidArgsErr) {
+	if invalidArgsErr, ok := errors.AsType[*core.InvalidArgumentError](err); ok {
 		return status.Error(codes.InvalidArgument, invalidArgsErr.Msg)
 	}
 	return status.Error(codes.Internal, err.Error())

@@ -67,8 +67,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("resource_config_path", "resources.yml")
 
 	if err := v.ReadInConfig(); err != nil {
-		var notFound viper.ConfigFileNotFoundError
-		if !errors.As(err, &notFound) && !errors.Is(err, os.ErrNotExist) {
+		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {
 			return appConfig{}, fmt.Errorf("read app config: %w", err)
 		}
 	}
