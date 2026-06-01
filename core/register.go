@@ -4,9 +4,36 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/theleeeo/indexer/model"
 )
+
+func groupResourceIDsByType(roots []model.Resource) map[string][]string {
+	idsByType := make(map[string][]string, len(roots))
+	seenByType := make(map[string]map[string]struct{}, len(roots))
+
+	for _, root := range roots {
+		seenIDs, ok := seenByType[root.Type]
+		if !ok {
+			seenIDs = make(map[string]struct{})
+			seenByType[root.Type] = seenIDs
+		}
+
+		if _, alreadySeen := seenIDs[root.Id]; alreadySeen {
+			continue
+		}
+
+		seenIDs[root.Id] = struct{}{}
+		idsByType[root.Type] = append(idsByType[root.Type], root.Id)
+	}
+
+	for resourceType := range idsByType {
+		sort.Strings(idsByType[resourceType])
+	}
+
+	return idsByType
+}
 
 // RegisterChange handles a single change notification from a source service.
 // It determines which root search documents are affected and enqueues
@@ -47,26 +74,38 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 		"affected_roots", len(roots),
 	)
 
-	for _, root := range roots {
-		// If this is a delete of a root resource itself, enqueue a delete job.
-		if n.Kind == ChangeDeleted && root.Type == n.ResourceType && root.Id == n.ResourceID {
-			if _, err := idx.river.Insert(ctx, DeleteArgs{
-				ResourceType: root.Type,
-				ResourceID:   root.Id,
-				Metadata:     n.Metadata,
-			}, nil); err != nil {
-				return fmt.Errorf("enqueueing delete for root %s|%s: %w", root.Type, root.Id, err)
-			}
+	idsByType := groupResourceIDsByType(roots)
+
+	if n.Kind == ChangeDeleted {
+		if _, err := idx.river.Insert(ctx, DeleteArgs{
+			ResourceType: n.ResourceType,
+			ResourceID:   n.ResourceID,
+			Metadata:     n.Metadata,
+		}, nil); err != nil {
+			return fmt.Errorf("enqueueing delete for root %s|%s: %w", n.ResourceType, n.ResourceID, err)
+		}
+
+		delete(idsByType, n.ResourceType)
+	}
+
+	resourceTypes := make([]string, 0, len(idsByType))
+	for resourceType := range idsByType {
+		resourceTypes = append(resourceTypes, resourceType)
+	}
+	sort.Strings(resourceTypes)
+
+	for _, resourceType := range resourceTypes {
+		resourceIDs := idsByType[resourceType]
+		if len(resourceIDs) == 0 {
 			continue
 		}
 
-		// TODO: Group per resource type
 		if _, err := idx.river.Insert(ctx, BuildArgs{
-			ResourceType: root.Type,
-			ResourceIds:  []string{root.Id},
+			ResourceType: resourceType,
+			ResourceIds:  resourceIDs,
 			Metadata:     n.Metadata,
 		}, nil); err != nil {
-			return fmt.Errorf("enqueueing rebuild for root %s|%s: %w", root.Type, root.Id, err)
+			return fmt.Errorf("enqueueing rebuild for root type %s with %d ids: %w", resourceType, len(resourceIDs), err)
 		}
 	}
 
