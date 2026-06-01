@@ -4,36 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 
 	"github.com/theleeeo/indexer/model"
 )
-
-func groupResourceIDsByType(roots []model.Resource) map[string][]string {
-	idsByType := make(map[string][]string, len(roots))
-	seenByType := make(map[string]map[string]struct{}, len(roots))
-
-	for _, root := range roots {
-		seenIDs, ok := seenByType[root.Type]
-		if !ok {
-			seenIDs = make(map[string]struct{})
-			seenByType[root.Type] = seenIDs
-		}
-
-		if _, alreadySeen := seenIDs[root.Id]; alreadySeen {
-			continue
-		}
-
-		seenIDs[root.Id] = struct{}{}
-		idsByType[root.Type] = append(idsByType[root.Type], root.Id)
-	}
-
-	for resourceType := range idsByType {
-		sort.Strings(idsByType[resourceType])
-	}
-
-	return idsByType
-}
 
 // RegisterChange handles a single change notification from a source service.
 // It determines which root search documents are affected and enqueues
@@ -55,26 +28,21 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 		}
 	}
 
-	roots := []model.Resource{
-		// The resource itself is always affected
-		{Type: n.ResourceType, Id: n.ResourceID},
-	}
-
 	// Determine which parents are affected.
 	parents, err := idx.st.GetParentResources(ctx, res)
 	if err != nil {
 		return fmt.Errorf("getting parents: %w", err)
 	}
-	roots = append(roots, parents...)
 
 	slog.Info("registering change",
 		"resource_type", n.ResourceType,
 		"resource_id", n.ResourceID,
 		"kind", n.Kind.String(),
-		"affected_roots", len(roots),
+		"affected_parents", len(parents),
 	)
 
-	idsByType := groupResourceIDsByType(roots)
+	roots := make([]model.Resource, 0, len(parents)+1)
+	roots = append(roots, parents...)
 
 	if n.Kind == ChangeDeleted {
 		if _, err := idx.river.Insert(ctx, DeleteArgs{
@@ -84,22 +52,13 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 		}, nil); err != nil {
 			return fmt.Errorf("enqueueing delete for root %s|%s: %w", n.ResourceType, n.ResourceID, err)
 		}
-
-		delete(idsByType, n.ResourceType)
+	} else {
+		roots = append(roots, res)
 	}
 
-	resourceTypes := make([]string, 0, len(idsByType))
-	for resourceType := range idsByType {
-		resourceTypes = append(resourceTypes, resourceType)
-	}
-	sort.Strings(resourceTypes)
+	idsByType := groupResourceIDsByType(roots)
 
-	for _, resourceType := range resourceTypes {
-		resourceIDs := idsByType[resourceType]
-		if len(resourceIDs) == 0 {
-			continue
-		}
-
+	for resourceType, resourceIDs := range idsByType {
 		if _, err := idx.river.Insert(ctx, BuildArgs{
 			ResourceType: resourceType,
 			ResourceIds:  resourceIDs,
@@ -110,4 +69,14 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 	}
 
 	return nil
+}
+
+func groupResourceIDsByType(roots []model.Resource) map[string][]string {
+	idsByType := make(map[string][]string, len(roots))
+
+	for _, root := range roots {
+		idsByType[root.Type] = append(idsByType[root.Type], root.Id)
+	}
+
+	return idsByType
 }
