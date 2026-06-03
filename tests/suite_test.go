@@ -39,6 +39,12 @@ type FakeProvider struct {
 	mu        sync.Mutex
 	resources map[string]map[string]any   // "type|id" -> data
 	relations map[string][]map[string]any // "type|key" -> []data
+	fetchGates map[string]*fetchGate
+}
+
+type fetchGate struct {
+	reached chan struct{}
+	release chan struct{}
 }
 
 // ListResources implements [source.Provider].
@@ -71,14 +77,48 @@ func NewFakeProvider() *FakeProvider {
 	return &FakeProvider{
 		resources: make(map[string]map[string]any),
 		relations: make(map[string][]map[string]any),
+		fetchGates: make(map[string]*fetchGate),
 	}
 }
 
 func (f *FakeProvider) Clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for token, gate := range f.fetchGates {
+		close(gate.release)
+		delete(f.fetchGates, token)
+	}
 	f.resources = make(map[string]map[string]any)
 	f.relations = make(map[string][]map[string]any)
+}
+
+// SetFetchGate blocks matching FetchResource calls until ReleaseFetchGate is
+// called for the same token. It returns a channel that is closed when the
+// first matching fetch reaches the gate.
+func (f *FakeProvider) SetFetchGate(token string) <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	gate := &fetchGate{
+		reached: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	f.fetchGates[token] = gate
+
+	return gate.reached
+}
+
+func (f *FakeProvider) ReleaseFetchGate(token string) {
+	f.mu.Lock()
+	gate, ok := f.fetchGates[token]
+	if ok {
+		delete(f.fetchGates, token)
+	}
+	f.mu.Unlock()
+
+	if ok {
+		close(gate.release)
+	}
 }
 
 func (f *FakeProvider) SetResource(resourceType, resourceID string, data map[string]any) {
@@ -104,13 +144,44 @@ func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, relat
 }
 
 func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
+	if token := params.Metadata["test_fetch_gate"]; token != "" {
+		gateResourceType := params.Metadata["test_fetch_gate_resource"]
+		if gateResourceType == "" || gateResourceType == params.ResourceType {
+			f.mu.Lock()
+			gate := f.fetchGates[token]
+			f.mu.Unlock()
+
+			if gate != nil {
+				select {
+				case <-gate.reached:
+				default:
+					close(gate.reached)
+				}
+				<-gate.release
+			}
+		}
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	data, ok := f.resources[params.ResourceType+"|"+params.ResourceID]
 	if !ok {
 		return source.FetchResourceResult{}, nil
 	}
-	return source.FetchResourceResult{Data: data}, nil
+
+	cloned := make(map[string]any, len(data))
+	for k, v := range data {
+		cloned[k] = v
+	}
+
+	if overrideField1 := params.Metadata["test_override_field1"]; overrideField1 != "" {
+		cloned["field1"] = overrideField1
+	}
+	if overrideF1 := params.Metadata["test_override_f1"]; overrideF1 != "" {
+		cloned["f1"] = overrideF1
+	}
+
+	return source.FetchResourceResult{Data: cloned}, nil
 }
 
 func (f *FakeProvider) FetchRelated(_ context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {

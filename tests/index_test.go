@@ -1,6 +1,10 @@
 package tests
 
 import (
+	"errors"
+	"sync"
+	"time"
+
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/gen/search/v1"
 )
@@ -690,4 +694,369 @@ func (t *TestSuite) Test_VersionControl() {
 		t.Require().False(t.resourceTracked("a", "1"))
 		t.worker.Drain(t.T().Context())
 	})
+}
+
+func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{
+		"id":     "1",
+		"field1": "v1",
+	})
+
+	err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeCreated,
+		Version:      1,
+	})
+	t.Require().NoError(err)
+	t.worker.Drain(t.T().Context())
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+
+		t.fakeProvider.SetResource("a", "1", map[string]any{
+			"id":     "1",
+			"field1": "v2_stale",
+		})
+
+		errs <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a",
+			ResourceID:   "1",
+			Kind:         core.ChangeUpdated,
+			Version:      2,
+		})
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+
+		t.fakeProvider.SetResource("a", "1", map[string]any{
+			"id":     "1",
+			"field1": "v3_latest",
+		})
+
+		errs <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a",
+			ResourceID:   "1",
+			Kind:         core.ChangeUpdated,
+			Version:      3,
+		})
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for registerErr := range errs {
+		if registerErr == nil {
+			continue
+		}
+		t.Require().True(errors.Is(registerErr, core.ErrStaleVersion), "unexpected register error: %v", registerErr)
+	}
+
+	// Keep source at latest value before workers fetch the document.
+	t.fakeProvider.SetResource("a", "1", map[string]any{
+		"id":     "1",
+		"field1": "v3_latest",
+	})
+
+	t.worker.Drain(t.T().Context())
+
+	t.Require().Equal(int64(3), t.resourceVersion("a", "1"))
+
+	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v3_latest",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1)
+	t.Require().Equal("1", resp.Hits[0].Id)
+
+	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v2_stale",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleResp.Hits, 0)
+}
+
+func (t *TestSuite) Test_ConcurrentRequests_MultipleVersions_ConvergeToLatest() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{
+		"id":     "1",
+		"field1": "v1",
+	})
+
+	err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeCreated,
+		Version:      1,
+	})
+	t.Require().NoError(err)
+	t.worker.Drain(t.T().Context())
+
+	const maxVersion = 10
+	start := make(chan struct{})
+	errs := make(chan error, maxVersion-1)
+	var wg sync.WaitGroup
+
+	for v := int64(2); v <= maxVersion; v++ {
+		version := v
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			t.fakeProvider.SetResource("a", "1", map[string]any{
+				"id":     "1",
+				"field1": "v_concurrent",
+			})
+
+			errs <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+				ResourceType: "a",
+				ResourceID:   "1",
+				Kind:         core.ChangeUpdated,
+				Version:      version,
+			})
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for registerErr := range errs {
+		if registerErr == nil {
+			continue
+		}
+		t.Require().True(errors.Is(registerErr, core.ErrStaleVersion), "unexpected register error: %v", registerErr)
+	}
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{
+		"id":     "1",
+		"field1": "v10_latest",
+	})
+
+	err = t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeUpdated,
+		Version:      maxVersion + 1,
+	})
+	t.Require().NoError(err)
+
+	t.worker.Drain(t.T().Context())
+
+	t.Require().Equal(int64(maxVersion+1), t.resourceVersion("a", "1"))
+
+	latestResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v10_latest",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(latestResp.Hits, 1)
+	t.Require().Equal("1", latestResp.Hits[0].Id)
+
+	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v_concurrent",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleResp.Hits, 0)
+}
+
+func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverwriteNewer() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "v1_base"})
+
+	err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeCreated,
+		Version:      1,
+	})
+	t.Require().NoError(err)
+	t.worker.Drain(t.T().Context())
+
+	gateReached := t.fakeProvider.SetFetchGate("old-a-build")
+
+	oldErrCh := make(chan error, 1)
+	go func() {
+		oldErrCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a",
+			ResourceID:   "1",
+			Kind:         core.ChangeUpdated,
+			Version:      2,
+			Metadata: map[string]string{
+				"test_fetch_gate":          "old-a-build",
+				"test_fetch_gate_resource": "a",
+				"test_override_field1":     "v2_old",
+			},
+		})
+	}()
+
+	select {
+	case <-gateReached:
+	case <-time.After(10 * time.Second):
+		t.FailNow("timed out waiting for blocked old a build to reach gate")
+	}
+
+	err = t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeUpdated,
+		Version:      3,
+		Metadata: map[string]string{
+			"test_override_field1": "v3_new",
+		},
+	})
+	t.Require().NoError(err)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		resp, searchErr := t.idx.Search(t.T().Context(), &search.SearchRequest{
+			Resource: "a",
+			Query:    "v3_new",
+		})
+		t.Require().NoError(searchErr)
+		if len(resp.Hits) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.FailNow("timed out waiting for newer a build to be indexed")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	t.fakeProvider.ReleaseFetchGate("old-a-build")
+
+	oldErr := <-oldErrCh
+	t.Require().NoError(oldErr)
+
+	t.worker.Drain(t.T().Context())
+
+	t.Require().Equal(int64(3), t.resourceVersion("a", "1"))
+
+	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v3_new",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1)
+
+	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "a",
+		Query:    "v2_old",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleResp.Hits, 0)
+}
+
+func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdatesConverge() {
+	t.setResourceConfig(RelatedResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_base"})
+	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_base"})
+	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "c_base"})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_base"}})
+	t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "b_base"}})
+
+	for _, n := range []core.Notification{
+		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+		{ResourceType: "b", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+		{ResourceType: "c", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+	} {
+		err := t.idx.RegisterChange(t.T().Context(), n)
+		t.Require().NoError(err)
+	}
+	t.worker.Drain(t.T().Context())
+
+	start := make(chan struct{})
+	errCh := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a",
+			ResourceID:   "1",
+			Kind:         core.ChangeUpdated,
+			Version:      2,
+			Metadata: map[string]string{
+				"test_override_f1": "c_from_a",
+			},
+		})
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "b",
+			ResourceID:   "1",
+			Kind:         core.ChangeUpdated,
+			Version:      2,
+			Metadata: map[string]string{
+				"test_override_f1": "c_from_b",
+			},
+		})
+	}()
+
+	close(start)
+	wg.Wait()
+	close(errCh)
+
+	for registerErr := range errCh {
+		t.Require().NoError(registerErr)
+	}
+
+	err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeUpdated,
+		Version:      3,
+		Metadata: map[string]string{
+			"test_override_f1": "c_latest",
+		},
+	})
+	t.Require().NoError(err)
+
+	t.worker.Drain(t.T().Context())
+
+	latestResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "c",
+		Query:    "c_latest",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(latestResp.Hits, 1)
+
+	staleRespA, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "c",
+		Query:    "c_from_a",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleRespA.Hits, 0)
+
+	staleRespB, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "c",
+		Query:    "c_from_b",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleRespB.Hits, 0)
 }
