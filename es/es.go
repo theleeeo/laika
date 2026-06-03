@@ -26,11 +26,15 @@ func New(client *elasticsearch.Client, withRefresh bool) *Client {
 	return &Client{es: client, withRefresh: withRefresh}
 }
 
-func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any) error {
+func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, version int64) error {
 	now := time.Now()
 	defer func() {
 		slog.Info("upserted doc", "docID", docID, "index", indexAlias, "duration", time.Since(now))
 	}()
+
+	if version <= 0 {
+		return fmt.Errorf("invalid external version %d for %s/%s", version, indexAlias, docID)
+	}
 
 	body, err := json.Marshal(doc)
 	if err != nil {
@@ -48,6 +52,8 @@ func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any) 
 		c.es.Index.WithDocumentID(docID),
 		c.es.Index.WithContext(ctx),
 		c.es.Index.WithRefresh(refresh),
+		c.es.Index.WithVersion(int(version)),
+		c.es.Index.WithVersionType("external_gte"),
 	)
 	if err != nil {
 		return err
@@ -90,9 +96,10 @@ func (c *Client) Delete(ctx context.Context, indexAlias, docID string) error {
 }
 
 type BulkItem struct {
-	Index string
-	ID    string
-	Doc   any
+	Index   string
+	ID      string
+	Doc     any
+	Version int64
 }
 
 func (c *Client) BulkUpsert(ctx context.Context, items []BulkItem) error {
@@ -104,7 +111,16 @@ func (c *Client) BulkUpsert(ctx context.Context, items []BulkItem) error {
 	enc := jsontext.NewEncoder(&buf)
 
 	for _, it := range items {
-		meta := map[string]any{"index": map[string]any{"_index": it.Index, "_id": it.ID}}
+		if it.Version <= 0 {
+			return fmt.Errorf("invalid external version %d for %s/%s", it.Version, it.Index, it.ID)
+		}
+
+		meta := map[string]any{"index": map[string]any{
+			"_index":       it.Index,
+			"_id":          it.ID,
+			"version":      it.Version,
+			"version_type": "external_gte",
+		}}
 		if err := json.MarshalEncode(enc, meta); err != nil {
 			return fmt.Errorf("marshal index meta: %w", err)
 		}

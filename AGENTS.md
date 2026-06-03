@@ -15,7 +15,7 @@ External microservice
 server/ — translates proto → core.Notification
        ▼
 core/Indexer.RegisterChange
-       │  UpsertResource(version) / DeleteResource → Postgres (resources table)
+  │  UpsertResource(version) / DeleteResource → Postgres (resources table)
        │    └─ version>0: conditional upsert rejects stale versions (ErrStaleVersion)
        │  AffectedRoots ←                         ← Postgres (relations table)
        │  riverClient.Insert(RebuildArgs/DeleteArgs)   → River (river_job table)
@@ -24,13 +24,15 @@ River Client workers (core/RebuildWorker, DeleteWorker, FullRebuildWorker)
        ▼
 core/Indexer.Build (unified build entry point)
        │  If ResourceIDs given: buildOne per ID
+  │    ├─ NextRebuildCounter per root → Postgres (resources.build_idx)
        │    ├─ plan.Execute per version → provider.FetchResource (gRPC → ProviderService, metadata)
        │    ├─ delete-detection: if source returns nil → handleDelete
-       │    ├─ es.Client.Upsert        → Elasticsearch
+  │    ├─ es.Client.Upsert(external_gte version=build_idx) → Elasticsearch
        │    └─ store.AddChildResources  → Postgres (relations)
        │  If ResourceIDs empty: buildAll (stream all)
+  │    ├─ NextRebuildCounter per root → Postgres (resources.build_idx)
        │    ├─ plan.Execute with ResourceID="" per version → provider.ListResources (paginated)
-       │    ├─ es.Client.BulkUpsert     → Elasticsearch
+  │    ├─ es.Client.BulkUpsert(external_gte version=build_idx) → Elasticsearch
        │    └─ store.AddChildResources  → Postgres (relations)
        ▼
       Done
@@ -62,7 +64,7 @@ Key types: `Config`, `VersionConfig`, `RelationConfig`, `FieldConfig`, `KeyConfi
 
 ### `store/`
 
-Postgres relation graph. Tracks known resource instances (`resources` table with an optional monotonic `version` column for optimistic concurrency) and directed parent→child dependency edges (`relations` table). The relation graph is the mechanism by which `AffectedRoots` discovers all root documents that embed a changed resource and must be reindexed. `UpsertResource(ctx, resource, version)` performs a conditional insert/update when version > 0, returning `ErrStaleVersion` if the stored version is already >= the provided one; version 0 means "no version control".
+Postgres relation graph. Tracks known resource instances (`resources` table with monotonic counters) and directed parent→child dependency edges (`relations` table). The relation graph is the mechanism by which `AffectedRoots` discovers all root documents that embed a changed resource and must be reindexed. `UpsertResource(ctx, resource, version)` performs source-side conditional insert/update when version > 0, returning `ErrStaleVersion` if the stored version is already >= the provided one; version 0 means "no version control". `NextRebuildCounter(ctx, resource)` atomically increments `resources.build_idx` and returns it; this value is used as ES external OCC version for rebuild writes.
 
 Key types: `PostgresStore`, `Relation`.  
 Schema: [store/pg_schema.sql](store/pg_schema.sql).
@@ -120,7 +122,7 @@ Central orchestrator (`Indexer` struct).
 
 ### `es/`
 
-Elasticsearch client wrapper (`Client`). Methods: `Upsert`, `Delete`, `BulkUpsert`, `Get`, `Search`. The `Search` method composes a bool query with optional `multi_match` full-text, `term`/`terms` filter clauses, and sort.
+Elasticsearch client wrapper (`Client`). Methods: `Upsert`, `Delete`, `BulkUpsert`, `Get`, `Search`. Rebuild writes (`Upsert`/`BulkUpsert`) use ES optimistic concurrency with `version_type=external_gte`, where the version comes from `resources.build_idx`. The `Search` method composes a bool query with optional `multi_match` full-text, `term`/`terms` filter clauses, and sort.
 
 `GenerateMapping` / `GenerateMappings` — derives ES index mappings from `resource.Config` (relations with cardinality `"one"` → ES `object`; otherwise → `nested`).
 

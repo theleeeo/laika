@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS resources (
 	type VARCHAR NOT NULL,
 	id VARCHAR NOT NULL,
 	version BIGINT NOT NULL DEFAULT 0,
+	build_idx BIGINT NOT NULL DEFAULT 0,
 	UNIQUE (type, id)
 );
 

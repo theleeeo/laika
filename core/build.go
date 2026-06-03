@@ -23,27 +23,37 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		return fmt.Errorf("no plans for resource type %q", params.ResourceType)
 	}
 
-	return idx.buildByIDs(ctx, logger, plans, params)
-}
-
-func (idx *Indexer) buildByIDs(ctx context.Context, logger *slog.Logger, plans []projection.Plan, params BuildArgs) error {
 	var failed int
 	for _, id := range params.ResourceIds {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata); err != nil {
+
+		occVersion, err := idx.st.NextRebuildCounter(ctx, model.Resource{Type: params.ResourceType, Id: id})
+		if err != nil {
+			logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+			failed++
+			continue
+		}
+
+		// TODO: Build multiple documents in a batch.
+		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, occVersion); err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 		}
 	}
+
 	if failed > 0 {
 		logger.Warn("build complete with failures", slog.Int("total", len(params.ResourceIds)), slog.Int("failed", failed))
 	}
 	return nil
 }
 
-func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string) error {
+func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion int64) error {
+	if occVersion <= 0 {
+		return fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
+	}
+
 	if err := idx.st.RemoveResource(ctx, model.Resource{Type: resourceType, Id: resourceID}); err != nil {
 		return fmt.Errorf("removing relations: %w", err)
 	}
@@ -82,7 +92,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		allRelations = append(allRelations, result.Relations...)
 
 		indexName := es.IndexName(resourceType, plan.Version)
-		if err := idx.es.Upsert(ctx, indexName, resourceID, result.Doc); err != nil {
+		if err := idx.es.Upsert(ctx, indexName, resourceID, result.Doc, occVersion); err != nil {
 			return fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
 		}
 	}
@@ -107,6 +117,7 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 
 	resourceRelations := make(map[string][]model.Resource)
 	cleaned := make(map[string]bool)
+	occVersions := make(map[string]int64)
 
 	var items []es.BulkItem
 	var failed int
@@ -135,15 +146,26 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 						failed++
 						continue
 					}
+
+					occVersion, err := idx.st.NextRebuildCounter(ctx, doc.Root)
+					if err != nil {
+						logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+						failed++
+						continue
+					}
+
+					occVersions[id] = occVersion
 					cleaned[id] = true
 				}
 
 				resourceRelations[id] = append(resourceRelations[id], doc.Relations...)
+				occVersion := occVersions[id]
 
 				items = append(items, es.BulkItem{
-					Index: es.IndexName(params.ResourceType, plan.Version),
-					ID:    id,
-					Doc:   doc.Doc,
+					Index:   es.IndexName(params.ResourceType, plan.Version),
+					ID:      id,
+					Doc:     doc.Doc,
+					Version: occVersion,
 				})
 			}
 		}

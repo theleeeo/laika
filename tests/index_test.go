@@ -340,6 +340,7 @@ func (t *TestSuite) Test_ChildUpdate_Rebuilds_Parent() {
 	})
 	t.Require().NoError(err)
 	t.worker.Drain(t.T().Context())
+	t.Require().Equal(int64(1), t.resourceRebuildCounter("c", "1"))
 
 	// Now update a/1 at the source.
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "aval_updated"})
@@ -352,6 +353,8 @@ func (t *TestSuite) Test_ChildUpdate_Rebuilds_Parent() {
 	})
 	t.Require().NoError(err)
 	t.worker.Drain(t.T().Context())
+	t.Require().Equal(int64(1), t.resourceRebuildCounter("a", "1"))
+	t.Require().Equal(int64(2), t.resourceRebuildCounter("c", "1"))
 
 	t.Run("verify c sees updated a data", func() {
 		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
@@ -563,6 +566,18 @@ func (t *TestSuite) resourceVersion(resourceType, resourceID string) int64 {
 	return version
 }
 
+func (t *TestSuite) resourceRebuildCounter(resourceType, resourceID string) int64 {
+	var counter int64
+	err := t.pool.QueryRow(t.T().Context(),
+		`SELECT build_idx FROM resources WHERE type=$1 AND id=$2`,
+		resourceType, resourceID,
+	).Scan(&counter)
+	if err != nil {
+		return 0
+	}
+	return counter
+}
+
 func (t *TestSuite) Test_VersionControl() {
 	t.setResourceConfig(DefaultResourceConfig)
 
@@ -582,6 +597,7 @@ func (t *TestSuite) Test_VersionControl() {
 		t.Require().True(t.resourceTracked("a", "1"))
 		t.Require().Equal(int64(1), t.resourceVersion("a", "1"))
 		t.worker.Drain(t.T().Context())
+		t.Require().Equal(int64(1), t.resourceRebuildCounter("a", "1"))
 	})
 
 	t.Run("update with version=2 succeeds", func() {
@@ -599,6 +615,7 @@ func (t *TestSuite) Test_VersionControl() {
 		t.Require().NoError(err)
 		t.Require().Equal(int64(2), t.resourceVersion("a", "1"))
 		t.worker.Drain(t.T().Context())
+		t.Require().Equal(int64(2), t.resourceRebuildCounter("a", "1"))
 
 		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
 			Resource: "a", Query: "v2_data",
@@ -632,6 +649,7 @@ func (t *TestSuite) Test_VersionControl() {
 			Version:      2,
 		})
 		t.Require().ErrorIs(err, core.ErrStaleVersion)
+		t.Require().Equal(int64(2), t.resourceRebuildCounter("a", "1"))
 	})
 
 	t.Run("update with version=0 skips check and succeeds", func() {
@@ -650,6 +668,7 @@ func (t *TestSuite) Test_VersionControl() {
 		// Version in DB should remain 2 (version=0 does DO NOTHING on conflict).
 		t.Require().Equal(int64(2), t.resourceVersion("a", "1"))
 		t.worker.Drain(t.T().Context())
+		t.Require().Equal(int64(3), t.resourceRebuildCounter("a", "1"))
 
 		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
 			Resource: "a", Query: "no_version_data",

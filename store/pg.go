@@ -6,17 +6,8 @@ import (
 	"github.com/theleeeo/indexer/model"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
-
-type batchSender interface {
-	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
-}
-
-type executor interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-}
 
 type PostgresStore struct {
 	pool *pgxpool.Pool
@@ -26,12 +17,7 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
-// AddRelations upserts relation rows.
 func (s *PostgresStore) AddRelations(ctx context.Context, relations []Relation) error {
-	return s.addRelationsBatch(ctx, s.pool, relations)
-}
-
-func (s *PostgresStore) addRelationsBatch(ctx context.Context, sender batchSender, relations []Relation) error {
 	if len(relations) == 0 {
 		return nil
 	}
@@ -46,21 +32,12 @@ func (s *PostgresStore) addRelationsBatch(ctx context.Context, sender batchSende
 		)
 	}
 
-	br := sender.SendBatch(ctx, batch)
+	br := s.pool.SendBatch(ctx, batch)
 	if err := br.Close(); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-// DeleteRelation removes a single relation row.
-func (s *PostgresStore) DeleteRelation(ctx context.Context, relation Relation) error {
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM relations WHERE resource=$1 AND resource_id=$2 AND related_resource=$3 AND related_resource_id=$4`,
-		relation.Parent.Type, relation.Parent.Id, relation.Child.Type, relation.Child.Id,
-	)
-	return err
 }
 
 func (s *PostgresStore) GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error) {
@@ -107,34 +84,8 @@ func (s *PostgresStore) GetChildResources(ctx context.Context, parentResource mo
 	return children, nil
 }
 
-func (s *PostgresStore) GetChildResourcesOfType(ctx context.Context, parentResource model.Resource, childType string) ([]model.Resource, error) {
-	rows, err := s.pool.Query(
-		ctx,
-		`SELECT related_resource_id FROM relations WHERE resource=$1 AND resource_id=$2 AND related_resource=$3`,
-		parentResource.Type, parentResource.Id, childType,
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var children []model.Resource
-	for rows.Next() {
-		var childResourceId string
-		if err := rows.Scan(&childResourceId); err != nil {
-			return nil, err
-		}
-		children = append(children, model.Resource{Type: childType, Id: childResourceId})
-	}
-	return children, nil
-}
-
 func (s *PostgresStore) RemoveResource(ctx context.Context, resource model.Resource) error {
-	return s.removeResource(ctx, s.pool, resource)
-}
-
-func (s *PostgresStore) removeResource(ctx context.Context, sender executor, resource model.Resource) error {
-	_, err := sender.Exec(
+	_, err := s.pool.Exec(
 		ctx,
 		`DELETE FROM relations WHERE resource=$1 AND resource_id=$2`,
 		resource.Type, resource.Id,
@@ -151,6 +102,26 @@ func (s *PostgresStore) AddChildResources(ctx context.Context, parent model.Reso
 		})
 	}
 	return s.AddRelations(ctx, relations)
+}
+
+// NextRebuildCounter atomically increments and returns the rebuild counter for
+// a root resource. The returned value is used as the ES external version for
+// OCC so older writes are rejected.
+func (s *PostgresStore) NextRebuildCounter(ctx context.Context, resource model.Resource) (int64, error) {
+	var counter int64
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO resources (type, id, build_idx)
+		 VALUES ($1, $2, 1)
+		 ON CONFLICT (type, id) DO UPDATE
+		 SET build_idx = resources.build_idx + 1
+		 RETURNING build_idx`,
+		resource.Type, resource.Id,
+	).Scan(&counter)
+	if err != nil {
+		return 0, err
+	}
+
+	return counter, nil
 }
 
 // UpsertResource inserts or updates the resource in the resources table.
