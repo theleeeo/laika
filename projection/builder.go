@@ -23,7 +23,7 @@ type BuildDoc struct {
 	Doc      map[string]any
 	Resolved map[string][]map[string]any
 
-	Relations []model.Resource
+	Relations []model.VersionedResource
 }
 
 // TODO: NewPlan builder

@@ -48,7 +48,13 @@ type RootResource struct {
 
 type FetchRelatedResult struct {
 	// The related resources that were found for the given key.
-	Related []map[string]any
+	Related []RelatedResource
+}
+
+// RelatedResource is a single related resource returned by FetchRelated.
+type RelatedResource struct {
+	Data    map[string]any
+	Version int64 // 0 means provider does not supply version for this resource.
 }
 
 type ListResourcesParams struct {

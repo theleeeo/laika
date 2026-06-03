@@ -63,9 +63,13 @@ func (p *GRPCProvider) FetchRelated(ctx context.Context, params FetchRelatedPara
 	if err != nil {
 		return FetchRelatedResult{}, err
 	}
-	result := make([]map[string]any, len(resp.Data))
+	result := make([]RelatedResource, len(resp.Data))
 	for i, s := range resp.Data {
-		result[i] = s.AsMap()
+		rr := RelatedResource{Data: s.AsMap()}
+		if i < len(resp.Versions) {
+			rr.Version = resp.Versions[i]
+		}
+		result[i] = rr
 	}
 	return FetchRelatedResult{Related: result}, nil
 }

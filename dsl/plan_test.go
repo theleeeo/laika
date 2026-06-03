@@ -60,7 +60,11 @@ func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelate
 	if !ok {
 		return source.FetchRelatedResult{}, nil
 	}
-	return source.FetchRelatedResult{Related: data}, nil
+	rr := make([]source.RelatedResource, len(data))
+	for i, d := range data {
+		rr[i] = source.RelatedResource{Data: d}
+	}
+	return source.FetchRelatedResult{Related: rr}, nil
 }
 
 func (m *mockProvider) ListResources(_ context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {

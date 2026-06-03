@@ -57,5 +57,5 @@ func (f *relationFetcher) Fetch(parent projection.BuildDoc) (any, error) {
 // fetchedRelation holds the raw data returned by a relation fetch.
 type fetchedRelation struct {
 	ResourceType string
-	Related      []map[string]any
+	Related      []source.RelatedResource
 }

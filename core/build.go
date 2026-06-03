@@ -58,7 +58,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return fmt.Errorf("removing relations: %w", err)
 	}
 
-	var allRelations []model.Resource
+	var allRelations []model.VersionedResource
 
 	for _, plan := range plans {
 		if plan.Executer == nil {
@@ -97,11 +97,43 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		}
 	}
 
+	// Persist relation edges (unversioned — just the resource identity).
+	plainRelations := make([]model.Resource, len(allRelations))
+	for i, r := range allRelations {
+		plainRelations[i] = r.Resource
+	}
 	if err := idx.st.AddChildResources(ctx,
 		model.Resource{Type: resourceType, Id: resourceID},
-		allRelations,
+		plainRelations,
 	); err != nil {
 		return fmt.Errorf("persist relations for %s/%s: %w", resourceType, resourceID, err)
+	}
+
+	// Drift check.
+	//
+	// Compare the version we observed from the provider for each child against
+	// the version currently stored in the resources table (written by
+	// RegisterChange). If a child's stored version is higher than what we
+	// fetched, a concurrent update occurred while our edge was missing and the
+	// parent fanout could not reach us. Re-enqueue to converge.
+	if len(allRelations) > 0 {
+		drift, err := idx.st.AnyResourceVersionDrifted(ctx, allRelations)
+		if err != nil {
+			return fmt.Errorf("drift check for %s/%s: %w", resourceType, resourceID, err)
+		}
+		if drift {
+			slog.Info("child drift detected, re-enqueueing build",
+				slog.String("type", resourceType),
+				slog.String("id", resourceID),
+			)
+			if _, err := idx.river.Insert(ctx, BuildArgs{
+				ResourceType: resourceType,
+				ResourceIds:  []string{resourceID},
+				Metadata:     metadata,
+			}, nil); err != nil {
+				return fmt.Errorf("re-enqueue after drift for %s/%s: %w", resourceType, resourceID, err)
+			}
+		}
 	}
 
 	return nil
@@ -115,7 +147,7 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 		return fmt.Errorf("no plans for resource type %q", params.ResourceType)
 	}
 
-	resourceRelations := make(map[string][]model.Resource)
+	resourceRelations := make(map[string][]model.VersionedResource)
 	cleaned := make(map[string]bool)
 	occVersions := make(map[string]int64)
 
@@ -176,7 +208,11 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 	}
 
 	for id, rels := range resourceRelations {
-		if err := idx.st.AddChildResources(ctx, model.Resource{Type: params.ResourceType, Id: id}, rels); err != nil {
+		plain := make([]model.Resource, len(rels))
+		for i, r := range rels {
+			plain[i] = r.Resource
+		}
+		if err := idx.st.AddChildResources(ctx, model.Resource{Type: params.ResourceType, Id: id}, plain); err != nil {
 			logger.Warn("failed to persist relations", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 		}

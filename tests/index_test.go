@@ -1060,3 +1060,89 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	t.Require().NoError(err)
 	t.Require().Len(staleRespB.Hits, 0)
 }
+
+// Test_RaceCondition_ChildUpdatedDuringParentBuild reproduces the race where a
+// child resource is updated while a parent rebuild is in flight, after the
+// parent's old relation edge has been removed and before the new one is
+// persisted. RegisterChange for the child sees no parent edge to fan out to,
+// so without drift detection the parent would index permanently-stale child
+// data. The drift check in buildOne re-enqueues the parent on detection.
+func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
+	t.setResourceConfig(RelatedResourceConfig)
+
+	// Initial graph: c/1 -> a/1, c/1 -> b/1.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v1"})
+	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_v1"})
+	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "c_v1"})
+	// Use versioned relations so drift detection can compare observed vs stored.
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_v1"}}, []int64{1})
+	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "b_v1"}}, []int64{1})
+
+	for _, n := range []core.Notification{
+		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+		{ResourceType: "b", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+		{ResourceType: "c", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
+	} {
+		t.Require().NoError(t.idx.RegisterChange(t.T().Context(), n))
+	}
+	t.worker.Drain(t.T().Context())
+
+	// Pause c's build inside FetchRelated for the "a" child.
+	gateReached := t.fakeProvider.SetFetchGate("c-related-a")
+
+	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "c",
+		ResourceID:   "1",
+		Kind:         core.ChangeUpdated,
+		Version:      2,
+		Metadata: map[string]string{
+			"test_related_gate":          "c-related-a",
+			"test_related_gate_resource": "a",
+		},
+	}))
+
+	select {
+	case <-gateReached:
+	case <-time.After(10 * time.Second):
+		t.FailNow("timed out waiting for c build to reach related-fetch gate")
+	}
+
+	// While c is paused holding the snapshot of a at version 1, advance a to
+	// version 2 in the source and notify. The c->a edge was already removed at
+	// the start of c's build, so this notification finds no parents and cannot
+	// fan out to c.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v2"})
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_v2"}}, []int64{2})
+
+	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a",
+		ResourceID:   "1",
+		Kind:         core.ChangeUpdated,
+		Version:      2,
+	}))
+
+	// Release: c finishes writing the stale doc, then drift detection compares
+	// observed version (1) vs stored version (2) and re-enqueues c.
+	t.fakeProvider.ReleaseFetchGate("c-related-a")
+	t.worker.Drain(t.T().Context())
+
+	// c must converge to the latest a data.
+	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "c",
+		Query:    "a_v2",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1)
+	t.Require().Equal("1", resp.Hits[0].Id)
+
+	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		Resource: "c",
+		Query:    "a_v1",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(staleResp.Hits, 0)
+
+	// c was rebuilt at least twice: once originally, once after concurrent
+	// update was detected via drift.
+	t.Require().GreaterOrEqual(t.resourceRebuildCounter("c", "1"), int64(3))
+}

@@ -87,20 +87,27 @@ func buildRelationSubPlan(
 		}
 
 		for _, r := range fr.Related {
-			if id, ok := r["id"]; ok {
+			if id, ok := r.Data["id"]; ok {
 				if idStr, ok := id.(string); ok {
-					parentDoc.Relations = append(parentDoc.Relations, model.Resource{Type: fr.ResourceType, Id: idStr})
+					parentDoc.Relations = append(parentDoc.Relations, model.VersionedResource{
+						Resource: model.Resource{Type: fr.ResourceType, Id: idStr},
+						Version:  r.Version,
+					})
 				}
 			}
 		}
 
 		// Update the resolved map so downstream relations can reference this data.
-		parentDoc.Resolved[rel.Resource] = fr.Related
+		resolvedData := make([]map[string]any, len(fr.Related))
+		for i, r := range fr.Related {
+			resolvedData[i] = r.Data
+		}
+		parentDoc.Resolved[rel.Resource] = resolvedData
 
 		subResources := make([]map[string]any, 0, len(fr.Related))
 		for _, r := range fr.Related {
-			filtered := filterFields(r, rel.Fields)
-			if id, ok := r["id"]; ok {
+			filtered := filterFields(r.Data, rel.Fields)
+			if id, ok := r.Data["id"]; ok {
 				filtered["id"] = id
 			}
 			subResources = append(subResources, filtered)

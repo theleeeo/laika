@@ -299,8 +299,12 @@ func (x *RootResource) GetId() string {
 }
 
 type FetchRelatedResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Data          []*structpb.Struct     `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Data  []*structpb.Struct     `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
+	// Per-resource versions aligned with data. When populated, data[i] has
+	// version versions[i] at the source. Empty means the provider does not
+	// support per-resource versioning for this call.
+	Versions      []int64 `protobuf:"varint,2,rep,packed,name=versions,proto3" json:"versions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -338,6 +342,13 @@ func (*FetchRelatedResponse) Descriptor() ([]byte, []int) {
 func (x *FetchRelatedResponse) GetData() []*structpb.Struct {
 	if x != nil {
 		return x.Data
+	}
+	return nil
+}
+
+func (x *FetchRelatedResponse) GetVersions() []int64 {
+	if x != nil {
+		return x.Versions
 	}
 	return nil
 }
@@ -542,9 +553,10 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"2\n" +
 	"\fRootResource\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x0e\n" +
-	"\x02id\x18\x02 \x01(\tR\x02id\"C\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\"_\n" +
 	"\x14FetchRelatedResponse\x12+\n" +
-	"\x04data\x18\x01 \x03(\v2\x17.google.protobuf.StructR\x04data\"\x81\x02\n" +
+	"\x04data\x18\x01 \x03(\v2\x17.google.protobuf.StructR\x04data\x12\x1a\n" +
+	"\bversions\x18\x02 \x03(\x03R\bversions\"\x81\x02\n" +
 	"\x14ListResourcesRequest\x12#\n" +
 	"\rresource_type\x18\x01 \x01(\tR\fresourceType\x12\x1d\n" +
 	"\n" +

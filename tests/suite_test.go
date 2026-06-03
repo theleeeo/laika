@@ -36,9 +36,9 @@ import (
 
 // FakeProvider is a test source.Provider that serves data from in-memory maps.
 type FakeProvider struct {
-	mu        sync.Mutex
-	resources map[string]map[string]any   // "type|id" -> data
-	relations map[string][]map[string]any // "type|key" -> []data
+	mu         sync.Mutex
+	resources  map[string]map[string]any           // "type|id" -> data
+	relations  map[string][]source.RelatedResource // "type|key" -> []RelatedResource
 	fetchGates map[string]*fetchGate
 }
 
@@ -75,8 +75,8 @@ func (f *FakeProvider) ListResources(ctx context.Context, params source.ListReso
 
 func NewFakeProvider() *FakeProvider {
 	return &FakeProvider{
-		resources: make(map[string]map[string]any),
-		relations: make(map[string][]map[string]any),
+		resources:  make(map[string]map[string]any),
+		relations:  make(map[string][]source.RelatedResource),
 		fetchGates: make(map[string]*fetchGate),
 	}
 }
@@ -89,7 +89,7 @@ func (f *FakeProvider) Clear() {
 		delete(f.fetchGates, token)
 	}
 	f.resources = make(map[string]map[string]any)
-	f.relations = make(map[string][]map[string]any)
+	f.relations = make(map[string][]source.RelatedResource)
 }
 
 // SetFetchGate blocks matching FetchResource calls until ReleaseFetchGate is
@@ -140,7 +140,31 @@ func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, relat
 	for _, v := range keyValues {
 		key += "|" + v
 	}
-	f.relations[key] = related
+	rr := make([]source.RelatedResource, len(related))
+	for i, d := range related {
+		rr[i] = source.RelatedResource{Data: d}
+	}
+	f.relations[key] = rr
+}
+
+// SetRelatedVersioned is like SetRelated but assigns an explicit version per
+// resource. versions[i] corresponds to related[i].
+func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []string, related []map[string]any, versions []int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := resourceType
+	for _, v := range keyValues {
+		key += "|" + v
+	}
+	rr := make([]source.RelatedResource, len(related))
+	for i, d := range related {
+		var ver int64
+		if i < len(versions) {
+			ver = versions[i]
+		}
+		rr[i] = source.RelatedResource{Data: d, Version: ver}
+	}
+	f.relations[key] = rr
 }
 
 func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
@@ -185,15 +209,46 @@ func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResou
 }
 
 func (f *FakeProvider) FetchRelated(_ context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
+	// Snapshot the relation data and resolve a possible gate under the lock,
+	// then release it before blocking on the gate. Snapshot semantics let
+	// tests advance the source data (and resources.version) while the call
+	// is paused — modelling a build that fetched stale child data.
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	// Build lookup key by joining all field values in order.
 	key := params.ResourceType + "|" + params.Key.Value
 	data, ok := f.relations[key]
+	var snapshot []source.RelatedResource
+	if ok {
+		snapshot = make([]source.RelatedResource, len(data))
+		for i, d := range data {
+			cloned := make(map[string]any, len(d.Data))
+			for k, v := range d.Data {
+				cloned[k] = v
+			}
+			snapshot[i] = source.RelatedResource{Data: cloned, Version: d.Version}
+		}
+	}
+	var gate *fetchGate
+	if token := params.Metadata["test_related_gate"]; token != "" {
+		gateResource := params.Metadata["test_related_gate_resource"]
+		if gateResource == "" || gateResource == params.ResourceType {
+			gate = f.fetchGates[token]
+		}
+	}
+	f.mu.Unlock()
+
+	if gate != nil {
+		select {
+		case <-gate.reached:
+		default:
+			close(gate.reached)
+		}
+		<-gate.release
+	}
+
 	if !ok {
 		return source.FetchRelatedResult{}, nil
 	}
-	return source.FetchRelatedResult{Related: data}, nil
+	return source.FetchRelatedResult{Related: snapshot}, nil
 }
 
 type TestSuite struct {
