@@ -1,242 +1,67 @@
-# Indexer — Agent Guidelines
+# Indexer - Agent Guide (Compact)
 
 ## Purpose
 
-`github.com/theleeeo/indexer` is a **generic search-index synchronisation engine**. It bridges arbitrary backend microservices (via pluggable gRPC "Provider" plugins) with an Elasticsearch cluster, keeping search indices fresh as data changes. External services notify it via gRPC when resources change; the indexer determines which denormalised ES documents are affected, rebuilds them, and writes them to ES. A [River](https://riverqueue.com)-backed Postgres job queue provides at-least-once processing.
+`github.com/theleeeo/indexer` keeps Elasticsearch documents in sync with upstream service data.
 
-The core parts of the library are also available to be used as a library for users who need more control over all requests and handling of the resources.
+- Input: gRPC change notifications.
+- Source of truth for dependency impact: Postgres relation graph.
+- Execution: River jobs (`rebuild`, `delete`, `full_rebuild`).
+- Output: versioned ES upserts/deletes.
 
-### Data Flow
+## Core Flow
 
-```
-External microservice
-  │  NotifyChange / NotifyChangeBatch  (gRPC → IndexService, optional metadata + version)
-       ▼
-server/ — translates proto → core.Notification
-       ▼
-core/Indexer.RegisterChange
-  │  UpsertResource(version) / DeleteResource → Postgres (resources table)
-       │    └─ version>0: conditional upsert rejects stale versions (ErrStaleVersion)
-       │  AffectedRoots ←                         ← Postgres (relations table)
-       │  riverClient.Insert(RebuildArgs/DeleteArgs)   → River (river_job table)
-       ▼
-River Client workers (core/RebuildWorker, DeleteWorker, FullRebuildWorker)
-       ▼
-core/Indexer.Build (unified build entry point)
-       │  If ResourceIDs given: buildOne per ID
-  │    ├─ NextRebuildCounter per root → Postgres (resources.build_idx)
-       │    ├─ plan.Execute per version → provider.FetchResource (gRPC → ProviderService, metadata)
-       │    ├─ delete-detection: if source returns nil → handleDelete
-  │    ├─ es.Client.Upsert(external_gte version=build_idx) → Elasticsearch
-       │    └─ store.AddChildResources  → Postgres (relations)
-       │  If ResourceIDs empty: buildAll (stream all)
-  │    ├─ NextRebuildCounter per root → Postgres (resources.build_idx)
-       │    ├─ plan.Execute with ResourceID="" per version → provider.ListResources (paginated)
-  │    ├─ es.Client.BulkUpsert(external_gte version=build_idx) → Elasticsearch
-       │    └─ store.AddChildResources  → Postgres (relations)
-       ▼
-      Done
+1. `server` translates gRPC requests into `core.Notification`.
+2. `core.Indexer.RegisterChange` updates `store` and finds affected roots.
+3. `core` enqueues River jobs.
+4. Workers call `Indexer.Build`.
+5. Build fetches data through `source.Provider`, writes ES, updates relations.
 
-Full rebuild path:
-Client → server/IndexerServer.Rebuild → core/Indexer.Rebuild
-       │  Validate selectors
-       │  riverClient.Insert(FullRebuildArgs) → River
-       ▼
-core/FullRebuildWorker → Indexer.Build(ResourceIDs from selector)
+Search path: `server/SearcherServer` -> `core.Indexer.Search` -> `es.Client.Search`.
 
-Search path:
-Client → server/SearcherServer → core/Indexer.Search → es/Client.Search → Elasticsearch
-```
+## Key Packages
 
----
+- `core/`: orchestration, workers, rebuild/search entry points.
+- `projection/`: build denormalized root documents and resolve affected roots.
+- `store/`: Postgres resource state + parent/child relation graph.
+- `resource/`: resource/version DSL (`resources.yml`) + validation.
+- `source/`: provider interface + gRPC provider implementation.
+- `es/`: ES CRUD/search client + mapping generation.
+- `server/`: thin gRPC adapters.
 
-## Architecture: Package Reference
+## Critical Invariants
 
-### `model/`
+- Distributed-safe behavior is required; assume multiple indexer instances.
+- No per-resource serialization guarantee; concurrent rebuilds can happen.
+- Rebuild writes use ES OCC with `external_gte` and `resources.build_idx`.
+- `Version > 0` in notifications enables stale-version rejection.
+- Relation graph drives reindex fanout (`AffectedRoots`), not static config lookups.
+- `BuildRequest.ResourceID == ""` means full listing mode (`ListResources` with pagination).
 
-Single shared identity type: `Resource{Type, Id}` used across all layers as the universal key for a resource instance.
+## Config and Interfaces
 
-### `resource/`
+- App config: `indexer.yml` (override with `APP_CONFIG_PATH`).
+- Resource DSL: `resources.yml` (override with `RESOURCE_CONFIG_PATH`).
+- Provider plugin: gRPC `ProviderService`.
+- Generated protobuf code is under `gen/` (refresh with `buf generate`).
 
-YAML DSL and runtime config. `Config` describes one resource via its `Versions []VersionConfig` slice, where each `VersionConfig` holds a `Version int`, `[]FieldConfig`, and `[]RelationConfig` specifying how to hydrate related resources (which fields to pull, cardinality, key sources). `ReadVersion int` indicates which version the read alias points to. Utility methods: `SortedVersions()`, `GetVersion(v)`, `ReadVersionConfig()`, `HasRelationTo(type)`. `Validate()` checks for inter-resource consistency (no cycles, valid field references). Config path defaults to `resources.yml` and can be set via app config file or `RESOURCE_CONFIG_PATH` env override.
-
-Key types: `Config`, `VersionConfig`, `RelationConfig`, `FieldConfig`, `KeyConfig`.
-
-### `store/`
-
-Postgres relation graph. Tracks known resource instances (`resources` table with monotonic counters) and directed parent→child dependency edges (`relations` table). The relation graph is the mechanism by which `AffectedRoots` discovers all root documents that embed a changed resource and must be reindexed. `UpsertResource(ctx, resource, version)` performs source-side conditional insert/update when version > 0, returning `ErrStaleVersion` if the stored version is already >= the provided one; version 0 means "no version control". `NextRebuildCounter(ctx, resource)` atomically increments `resources.build_idx` and returns it; this value is used as ES external OCC version for rebuild writes.
-
-Key types: `PostgresStore`, `Relation`.  
-Schema: [store/pg_schema.sql](store/pg_schema.sql).
-
-### Job queue
-
-The indexer uses [River](https://riverqueue.com) (`github.com/riverqueue/river`) as its durable Postgres job queue. Job args + workers live in [core/worker.go](core/worker.go):
-
-- `RebuildArgs` / `RebuildWorker` — incremental root rebuild.
-- `DeleteArgs` / `DeleteWorker` — delete a root document from ES and remove relations.
-- `FullRebuildArgs` / `FullRebuildWorker` — full rebuild of a resource type, optionally scoped to specific IDs and/or versions.
-
-There is **no per-resource serialization guarantee**: concurrent rebuilds of the same root can run in parallel. ES upserts are idempotent, and `store.AddChildResources` converges relation state. Callers should expect eventual consistency under bursts.
-
-River's schema is applied at startup via `rivermigrate` — there is no local SQL schema file to apply manually. Use [riverui](https://github.com/riverqueue/riverui) or River's own Go API for operational inspection (listing, counts, error summaries).
-
-### `source/`
-
-Inbound and outbound data contracts.
-
-- `Notification{ResourceType, ResourceID, Kind, Metadata, Version}` — what changed (`ChangeCreated`, `ChangeUpdated`, `ChangeDeleted`) plus arbitrary caller-provided key-value context. Lives in `core/notification.go`. `Version` (int64) enables optimistic concurrency: non-zero triggers conditional upsert; zero means unconditional.
-- `Provider` interface — `FetchResource`, `FetchRelated`, and `ListResources`. All live data retrieval goes through this boundary.
-- `GRPCProvider` — implements `Provider` by calling a remote `ProviderService` plugin.
-- `ListResourcesParams` / `ListResourcesResult` / `ListedResource` — paginated listing types for full rebuilds.
-
-### `aggregation/`
-
-Generic streaming pipeline primitives.
-
-- `RootPlan` — fetches a root resource with pagination support, streams results.
-- `SubPlan` — wraps a parent plan, calls a sub-fetcher per parent item, merges results. All stages run concurrently over channels.
-
-### `projection/`
-
-Builds denormalised ES documents for a root resource.
-
-- `Builder.Build(ctx, type, id)` — runs the full pipeline (root + all relations in topological order), persists relation edges to PG, returns a `map[string]any` document ready for ES.
-- `Builder.AffectedRoots(ctx, type, id)` — traverses PG to find all root resources that embed the changed resource.
-- `BuildPlansFromConfig` — constructs the ordered plan chain (RootPlan → SubPlan per relation) from `resource.Config`.
-
-Key types: `Builder`, `BuildDoc`.
-
-### `core/`
-
-Central orchestrator (`Indexer` struct).
-
-- `RegisterChange` — inbound change handler: updates PG (with optimistic version control when `Version > 0`), finds affected roots, enqueues jobs. Returns `ErrStaleVersion` if the notification's version is not strictly greater than the stored one.
-- `Build(ctx, BuildParams)` — unified build entry point. When `ResourceIDs` is non-empty, builds each resource individually with delete-detection and relation tracking (`buildOne`). When empty, streams all resources via the plan's `ListResources` pagination and bulk-upserts to ES (`buildAll`).
-- `handleDelete` — deletes a root document from ES across all versions and removes relation edges from PG.
-- `Rebuild` — validates selectors, enqueues one `FullRebuildArgs` River job per `ResourceSelector`.
-- `RegisterWorkers(workers, idx)` — registers the three River workers (`rebuild`, `delete`, `full_rebuild`) against a `river.Workers` registry so callers can pass it to `river.NewClient`.
-- `SetRiverClient(client)` — assigns the River client used to enqueue jobs. Needed because workers reference the `Indexer`, so the client is created after the `Indexer` and wired back in.
-- `Search` — validates resource type, caps pagination, delegates to ES.
-- `GetCapabilities` — returns the search capabilities (available resources, filterable fields, supported operations) derived from the resource configs.
-
-### `es/`
-
-Elasticsearch client wrapper (`Client`). Methods: `Upsert`, `Delete`, `BulkUpsert`, `Get`, `Search`. Rebuild writes (`Upsert`/`BulkUpsert`) use ES optimistic concurrency with `version_type=external_gte`, where the version comes from `resources.build_idx`. The `Search` method composes a bool query with optional `multi_match` full-text, `term`/`terms` filter clauses, and sort.
-
-`GenerateMapping` / `GenerateMappings` — derives ES index mappings from `resource.Config` (relations with cardinality `"one"` → ES `object`; otherwise → `nested`).
-
-### `server/`
-
-gRPC server adapters (thin protocol translation only, no business logic).
-
-- `IndexerServer` — implements `IndexService`: translates proto → `source.Notification`, calls `core.Indexer.RegisterChange`. Also handles the `Rebuild` RPC.
-- `SearcherServer` — implements `SearchService`: delegates to `core.Indexer.Search` and `core.Indexer.GetCapabilities`.
-
-### `cmd/indexer/`
-
-Main binary. Loads runtime settings from an app config file (`indexer.yml` by default, or `APP_CONFIG_PATH`) with env var overrides:
-
-| Env var                       | Purpose                                         |
-| ----------------------------- | ----------------------------------------------- |
-| `APP_CONFIG_PATH`             | Path to app config file (default `indexer.yml`) |
-| `RESOURCE_CONFIG_PATH`        | Path to `resources.yml`                         |
-| `ES_ADDRS`                    | Elasticsearch addresses                         |
-| `ES_USERNAME` / `ES_PASSWORD` | ES credentials                                  |
-| `PG_ADDR`                     | Postgres connection string                      |
-| `PROVIDER_ADDR`               | gRPC address of the provider plugin             |
-| `GRPC_ADDR`                   | Listening address (default `:9000`)             |
-
-### `cmd/gen-mapping/`
-
-CLI tool. Reads resource config, generates ES index mappings, and optionally `PUT`s them to a live cluster (`-apply` flag).
-
----
-
-## gRPC Services
-
-| Proto                              | Service                              | Key Messages                                                                                                                                                                                                                             |
-| ---------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `proto/index/v1/index.proto`       | `IndexService` (inbound)             | `ChangeNotification{kind, resource_type, resource_id, metadata, version}`, `RebuildRequest{repeated ResourceSelector}`, `RebuildResponse`                                                                                                |
-| `proto/provider/v1/provider.proto` | `ProviderService` (plugin, outbound) | `FetchResourceRequest{..., metadata}` / `Response`, `FetchRelatedRequest{..., metadata}` / `Response`, `ListResourcesRequest{..., metadata}` / `Response` (data as `google.protobuf.Struct`)                                             |
-| `proto/search/v1/search.proto`     | `SearchService`                      | `SearchRequest{resource, query, filters, page, page_size, sort}`, `SearchResponse{total, hits}`, `GetCapabilitiesRequest`, `GetCapabilitiesResponse{resources: []{resource, fields: []{field, type, filter_ops, searchable, sortable}}}` |
-
-Generated code lives in `gen/`. Regenerate with `buf generate`.
-
----
-
-## Resource Config DSL
-
-Resources are defined in `resources.yml`. Each entry in the flat `resources:` list defines a single version of a resource type. Multiple entries with the same `type` but different `version` numbers define multiple versions (for zero-downtime schema migrations). The `readVersion` field controls which version the read alias points to.
-
-```yaml
-resources:
-  - type: myResource
-    version: 1
-    readVersion: 1
-    fields:
-      - name: title
-        type: text
-        query:
-          search: true # included in multi_match full-text search
-      - name: status
-    relations:
-      - resource: otherResource
-        cardinality: one # "one" → ES object, anything else → ES nested
-        key:
-          source: myResource # which resolved resource holds the FK
-          field: other_id # field name in source doc
-        fields:
-          - name: label
-
-  - type: myResource
-    version: 2
-    fields:
-      fields:
-        - name: title
-          type: text
-        - name: status
-        - name: newField
-      relations:
-        - resource: otherResource
-          cardinality: one
-          key:
-            source: myResource
-            field: other_id
-          fields:
-            - name: label
-```
-
-Key chaining: a relation's `key.source` may reference another relation's resource name, enabling `A → B → C` fetch chains processed in topological order.
-
----
-
-## Build & Test
+## Commands
 
 ```bash
-# Run the main binary
+# required for this repo
 GOEXPERIMENT=jsonv2 go run ./cmd/indexer
 
-# Generate ES mappings
+# mapping generation
 go run ./cmd/gen-mapping -config resources.yml
 
-# Regenerate proto bindings
+# regenerate protobuf bindings
 buf generate
 
-# Run tests (uses testcontainers — requires Docker)
-go test ./...
+# tests (Docker required for testcontainers)
+GOEXPERIMENT=jsonv2 go test ./...
 ```
 
-> **Important:** All builds require `GOEXPERIMENT=jsonv2` because the codebase uses `encoding/json/v2`.
+## Change Rules
 
----
-
-## Conventions
-
-- **No per-resource serialization:** rebuilds of the same root may run concurrently under bursts. ES upserts are idempotent and `store.AddChildResources` converges; callers should expect eventual consistency. If strict ordering is needed later, add an advisory-lock guard inside the rebuild worker or use River's `UniqueOpts`.
-- **Relation graph is the source of truth for "what to reindex":** when a child resource changes, `AffectedRoots` is the mechanism for finding parent documents — not a config lookup.
-- **ES mappings are derived from config:** use `gen-mapping` after changing resource configs; do not hand-edit ES mappings.
-- **BuildRequest conventions:** `BuildRequest.ResourceID == ""` triggers "get all" mode in the root plan fetcher, which calls `provider.ListResources` with pagination. A non-empty `ResourceID` fetches a single resource.
-- Always modify the AGENTS.md file if anything is changed that would cause anything currently written to be incorrect.
-- **Runs distributed** All implementations must work even when this application/library in running as multiple instances.
-- All additions or changes must be reflected in the tests. No feature can be untested.
+- Update this file when architecture/behavior changes make it inaccurate.
+- Any feature or behavior change must include tests.
