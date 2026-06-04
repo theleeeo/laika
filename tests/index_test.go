@@ -1127,8 +1127,19 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.fakeProvider.ReleaseFetchGate("c-related-a")
 	t.worker.Drain(t.T().Context())
 
-	// c must converge to the latest a data.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	// c must converge to the latest a relation data.
+	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1)
+	t.Require().Equal("1", resp.Hits[0].Id)
+
+	aRels := resp.Hits[0].Source.Fields["a"].GetListValue().GetValues()
+	t.Require().Len(aRels, 1)
+	t.Require().Equal("1", aRels[0].GetStructValue().Fields["id"].GetStringValue())
+	t.Require().Equal("a_v2", aRels[0].GetStructValue().Fields["f1"].GetStringValue())
+
+	// Search for new A field works
+	resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{
 		Resource: "c",
 		Query:    "a_v2",
 	})
@@ -1136,6 +1147,7 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.Require().Len(resp.Hits, 1)
 	t.Require().Equal("1", resp.Hits[0].Id)
 
+	// Search for old A field does not work
 	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
 		Resource: "c",
 		Query:    "a_v1",

@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/gen/search/v1"
@@ -29,10 +31,17 @@ func (idx *Indexer) Search(ctx context.Context, req *search.SearchRequest) (*sea
 		req.Page = 0
 	}
 
-	res, err := idx.es.Search(ctx, req, es.AliasName(r.Resource), r.ReadVersionConfig().GetSearchableFields())
+	// fmt.Println("r.ReadVersionConfig().GetSearchableFields()", r.ReadVersionConfig().GetSearchableFields())
+	// fmt.Println("req", req)
+	res, err := idx.es.Search(ctx, req, es.AliasName(r.Resource), r.ReadVersionConfig())
 	if err != nil {
 		return nil, err
 	}
+	b, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal search response: %w", err)
+	}
+	fmt.Printf("raw search response: %s\n", b)
 
 	return res, nil
 }

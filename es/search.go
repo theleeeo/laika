@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/theleeeo/indexer/gen/search/v1"
+	"github.com/theleeeo/indexer/resource"
 
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
-func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAlias string, searchFields []string) (*search.SearchResponse, error) {
+func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAlias string, vc *resource.VersionConfig) (*search.SearchResponse, error) {
 	boolQ := map[string]any{
 		"must":   []any{},
 		"filter": []any{},
@@ -26,12 +27,7 @@ func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAli
 
 	// Full-text query (optional)
 	if req.Query != "" {
-		boolQ["must"] = append(boolQ["must"].([]any), map[string]any{
-			"multi_match": map[string]any{
-				"query":  req.Query,
-				"fields": searchFields,
-			},
-		})
+		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query, vc))
 	}
 
 	// Structured filters
@@ -76,6 +72,8 @@ func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAli
 	if err != nil {
 		return nil, err
 	}
+
+	fmt.Printf("ES search request body: %s\n", b)
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -123,6 +121,7 @@ func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAli
 		score, _ := m["_score"].(float64)
 		src, _ := m["_source"].(map[string]any)
 
+		// TODO: If we json unmarshal into a real type and not a map[string]any this will be handled automatically by the structpb UnmarshalJSON
 		st, err := structpb.NewStruct(src)
 		if err != nil {
 			// if struct conversion fails, skip rather than fail the whole query
@@ -136,6 +135,70 @@ func (c *Client) Search(ctx context.Context, req *search.SearchRequest, indexAli
 	}
 
 	return out, nil
+}
+
+// buildFullTextQuery constructs the ES query clause for a free-text search
+// string against a version config. Top-level (object) relation fields are
+// included in a single multi_match; nested relation fields each get their own
+// nested query. All clauses are combined with bool.should so a document
+// matches when any clause matches.
+func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
+	var shouldClauses []any
+
+	// Flat fields under the "fields" object.
+	var flatFields []string
+	for _, f := range vc.Fields {
+		if f.Query.Search == nil || *f.Query.Search {
+			flatFields = append(flatFields, "fields."+f.Name)
+		}
+	}
+	if len(flatFields) > 0 {
+		shouldClauses = append(shouldClauses, map[string]any{
+			"multi_match": map[string]any{
+				"query":  query,
+				"fields": flatFields,
+			},
+		})
+	}
+
+	// Relation fields — nested relations need a nested query wrapper.
+	for _, rel := range vc.Relations {
+		var relFields []string
+		for _, f := range rel.Fields {
+			if f.Query.Search == nil || *f.Query.Search {
+				relFields = append(relFields, rel.Resource+"."+f.Name)
+			}
+		}
+		if len(relFields) == 0 {
+			continue
+		}
+		mm := map[string]any{
+			"multi_match": map[string]any{
+				"query":  query,
+				"fields": relFields,
+			},
+		}
+		if rel.IsMany() {
+			shouldClauses = append(shouldClauses, map[string]any{
+				"nested": map[string]any{
+					"path":  rel.Resource,
+					"query": mm,
+				},
+			})
+		} else {
+			shouldClauses = append(shouldClauses, mm)
+		}
+	}
+
+	if len(shouldClauses) == 1 {
+		return shouldClauses[0]
+	}
+	return map[string]any{
+		"bool": map[string]any{
+			"should":               shouldClauses,
+			"minimum_should_match": 1,
+		},
+	}
 }
 
 func buildFilterClause(f *search.Filter) (any, error) {
