@@ -146,9 +146,8 @@ func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, relat
 	f.relations[key] = rr
 }
 
-// SetRelatedVersioned is like SetRelated but assigns an explicit version per
-// resource. versions[i] corresponds to related[i].
-func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []string, related []map[string]any, versions []int64) {
+// SetRelatedVersioned stores related resources with per-item version data.
+func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []string, related []source.RelatedResource) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key := resourceType
@@ -157,11 +156,11 @@ func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []stri
 	}
 	rr := make([]source.RelatedResource, len(related))
 	for i, d := range related {
-		var ver int64
-		if i < len(versions) {
-			ver = versions[i]
+		cloned := make(map[string]any, len(d.Data))
+		for k, v := range d.Data {
+			cloned[k] = v
 		}
-		rr[i] = source.RelatedResource{Data: d, Version: ver}
+		rr[i] = source.RelatedResource{Data: cloned, Version: d.Version}
 	}
 	f.relations[key] = rr
 }

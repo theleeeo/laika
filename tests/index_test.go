@@ -7,6 +7,7 @@ import (
 
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/gen/search/v1"
+	"github.com/theleeeo/indexer/source"
 )
 
 // resourceTracked reports whether (resourceType, resourceID) is present in the
@@ -1075,8 +1076,8 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_v1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "c_v1"})
 	// Use versioned relations so drift detection can compare observed vs stored.
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_v1"}}, []int64{1})
-	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "b_v1"}}, []int64{1})
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{Data: map[string]any{"id": "1", "f1": "a_v1"}, Version: 1}})
+	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{Data: map[string]any{"id": "1", "f1": "b_v1"}, Version: 1}})
 
 	for _, n := range []core.Notification{
 		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
@@ -1112,7 +1113,7 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	// the start of c's build, so this notification finds no parents and cannot
 	// fan out to c.
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v2"})
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_v2"}}, []int64{2})
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{Data: map[string]any{"id": "1", "f1": "a_v2"}, Version: 2}})
 
 	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
 		ResourceType: "a",
