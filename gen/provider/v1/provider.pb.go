@@ -299,14 +299,10 @@ func (x *RootResource) GetId() string {
 }
 
 type FetchRelatedResponse struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	Data  []*structpb.Struct     `protobuf:"bytes,1,rep,name=data,proto3" json:"data,omitempty"`
-	// Per-resource versions aligned with data. When populated, data[i] has
-	// version versions[i] at the source. Empty means the provider does not
-	// support per-resource versioning for this call.
-	Versions      []int64 `protobuf:"varint,2,rep,packed,name=versions,proto3" json:"versions,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	RelatedResources []*RelatedResource     `protobuf:"bytes,1,rep,name=related_resources,json=relatedResources,proto3" json:"related_resources,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *FetchRelatedResponse) Reset() {
@@ -339,18 +335,63 @@ func (*FetchRelatedResponse) Descriptor() ([]byte, []int) {
 	return file_provider_v1_provider_proto_rawDescGZIP(), []int{5}
 }
 
-func (x *FetchRelatedResponse) GetData() []*structpb.Struct {
+func (x *FetchRelatedResponse) GetRelatedResources() []*RelatedResource {
+	if x != nil {
+		return x.RelatedResources
+	}
+	return nil
+}
+
+type RelatedResource struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          *structpb.Struct       `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelatedResource) Reset() {
+	*x = RelatedResource{}
+	mi := &file_provider_v1_provider_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelatedResource) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelatedResource) ProtoMessage() {}
+
+func (x *RelatedResource) ProtoReflect() protoreflect.Message {
+	mi := &file_provider_v1_provider_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelatedResource.ProtoReflect.Descriptor instead.
+func (*RelatedResource) Descriptor() ([]byte, []int) {
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *RelatedResource) GetData() *structpb.Struct {
 	if x != nil {
 		return x.Data
 	}
 	return nil
 }
 
-func (x *FetchRelatedResponse) GetVersions() []int64 {
+func (x *RelatedResource) GetVersion() int64 {
 	if x != nil {
-		return x.Versions
+		return x.Version
 	}
-	return nil
+	return 0
 }
 
 type ListResourcesRequest struct {
@@ -365,7 +406,7 @@ type ListResourcesRequest struct {
 
 func (x *ListResourcesRequest) Reset() {
 	*x = ListResourcesRequest{}
-	mi := &file_provider_v1_provider_proto_msgTypes[6]
+	mi := &file_provider_v1_provider_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -377,7 +418,7 @@ func (x *ListResourcesRequest) String() string {
 func (*ListResourcesRequest) ProtoMessage() {}
 
 func (x *ListResourcesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_provider_v1_provider_proto_msgTypes[6]
+	mi := &file_provider_v1_provider_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -390,7 +431,7 @@ func (x *ListResourcesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResourcesRequest.ProtoReflect.Descriptor instead.
 func (*ListResourcesRequest) Descriptor() ([]byte, []int) {
-	return file_provider_v1_provider_proto_rawDescGZIP(), []int{6}
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ListResourcesRequest) GetResourceType() string {
@@ -431,7 +472,7 @@ type ListResourcesResponse struct {
 
 func (x *ListResourcesResponse) Reset() {
 	*x = ListResourcesResponse{}
-	mi := &file_provider_v1_provider_proto_msgTypes[7]
+	mi := &file_provider_v1_provider_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -443,7 +484,7 @@ func (x *ListResourcesResponse) String() string {
 func (*ListResourcesResponse) ProtoMessage() {}
 
 func (x *ListResourcesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_provider_v1_provider_proto_msgTypes[7]
+	mi := &file_provider_v1_provider_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -456,7 +497,7 @@ func (x *ListResourcesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResourcesResponse.ProtoReflect.Descriptor instead.
 func (*ListResourcesResponse) Descriptor() ([]byte, []int) {
-	return file_provider_v1_provider_proto_rawDescGZIP(), []int{7}
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ListResourcesResponse) GetResources() []*ResourceItem {
@@ -483,7 +524,7 @@ type ResourceItem struct {
 
 func (x *ResourceItem) Reset() {
 	*x = ResourceItem{}
-	mi := &file_provider_v1_provider_proto_msgTypes[8]
+	mi := &file_provider_v1_provider_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -495,7 +536,7 @@ func (x *ResourceItem) String() string {
 func (*ResourceItem) ProtoMessage() {}
 
 func (x *ResourceItem) ProtoReflect() protoreflect.Message {
-	mi := &file_provider_v1_provider_proto_msgTypes[8]
+	mi := &file_provider_v1_provider_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -508,7 +549,7 @@ func (x *ResourceItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceItem.ProtoReflect.Descriptor instead.
 func (*ResourceItem) Descriptor() ([]byte, []int) {
-	return file_provider_v1_provider_proto_rawDescGZIP(), []int{8}
+	return file_provider_v1_provider_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ResourceItem) GetResourceId() string {
@@ -553,10 +594,12 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value\"2\n" +
 	"\fRootResource\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x0e\n" +
-	"\x02id\x18\x02 \x01(\tR\x02id\"_\n" +
-	"\x14FetchRelatedResponse\x12+\n" +
-	"\x04data\x18\x01 \x03(\v2\x17.google.protobuf.StructR\x04data\x12\x1a\n" +
-	"\bversions\x18\x02 \x03(\x03R\bversions\"\x81\x02\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\"a\n" +
+	"\x14FetchRelatedResponse\x12I\n" +
+	"\x11related_resources\x18\x01 \x03(\v2\x1c.provider.v1.RelatedResourceR\x10relatedResources\"X\n" +
+	"\x0fRelatedResource\x12+\n" +
+	"\x04data\x18\x01 \x01(\v2\x17.google.protobuf.StructR\x04data\x12\x18\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\"\x81\x02\n" +
 	"\x14ListResourcesRequest\x12#\n" +
 	"\rresource_type\x18\x01 \x01(\tR\fresourceType\x12\x1d\n" +
 	"\n" +
@@ -591,7 +634,7 @@ func file_provider_v1_provider_proto_rawDescGZIP() []byte {
 	return file_provider_v1_provider_proto_rawDescData
 }
 
-var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_provider_v1_provider_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_provider_v1_provider_proto_goTypes = []any{
 	(*FetchResourceRequest)(nil),  // 0: provider.v1.FetchResourceRequest
 	(*FetchResourceResponse)(nil), // 1: provider.v1.FetchResourceResponse
@@ -599,35 +642,37 @@ var file_provider_v1_provider_proto_goTypes = []any{
 	(*ResourceKey)(nil),           // 3: provider.v1.ResourceKey
 	(*RootResource)(nil),          // 4: provider.v1.RootResource
 	(*FetchRelatedResponse)(nil),  // 5: provider.v1.FetchRelatedResponse
-	(*ListResourcesRequest)(nil),  // 6: provider.v1.ListResourcesRequest
-	(*ListResourcesResponse)(nil), // 7: provider.v1.ListResourcesResponse
-	(*ResourceItem)(nil),          // 8: provider.v1.ResourceItem
-	nil,                           // 9: provider.v1.FetchResourceRequest.MetadataEntry
-	nil,                           // 10: provider.v1.FetchRelatedRequest.MetadataEntry
-	nil,                           // 11: provider.v1.ListResourcesRequest.MetadataEntry
-	(*structpb.Struct)(nil),       // 12: google.protobuf.Struct
+	(*RelatedResource)(nil),       // 6: provider.v1.RelatedResource
+	(*ListResourcesRequest)(nil),  // 7: provider.v1.ListResourcesRequest
+	(*ListResourcesResponse)(nil), // 8: provider.v1.ListResourcesResponse
+	(*ResourceItem)(nil),          // 9: provider.v1.ResourceItem
+	nil,                           // 10: provider.v1.FetchResourceRequest.MetadataEntry
+	nil,                           // 11: provider.v1.FetchRelatedRequest.MetadataEntry
+	nil,                           // 12: provider.v1.ListResourcesRequest.MetadataEntry
+	(*structpb.Struct)(nil),       // 13: google.protobuf.Struct
 }
 var file_provider_v1_provider_proto_depIdxs = []int32{
-	9,  // 0: provider.v1.FetchResourceRequest.metadata:type_name -> provider.v1.FetchResourceRequest.MetadataEntry
-	12, // 1: provider.v1.FetchResourceResponse.data:type_name -> google.protobuf.Struct
+	10, // 0: provider.v1.FetchResourceRequest.metadata:type_name -> provider.v1.FetchResourceRequest.MetadataEntry
+	13, // 1: provider.v1.FetchResourceResponse.data:type_name -> google.protobuf.Struct
 	3,  // 2: provider.v1.FetchRelatedRequest.key:type_name -> provider.v1.ResourceKey
 	4,  // 3: provider.v1.FetchRelatedRequest.root_resource:type_name -> provider.v1.RootResource
-	10, // 4: provider.v1.FetchRelatedRequest.metadata:type_name -> provider.v1.FetchRelatedRequest.MetadataEntry
-	12, // 5: provider.v1.FetchRelatedResponse.data:type_name -> google.protobuf.Struct
-	11, // 6: provider.v1.ListResourcesRequest.metadata:type_name -> provider.v1.ListResourcesRequest.MetadataEntry
-	8,  // 7: provider.v1.ListResourcesResponse.resources:type_name -> provider.v1.ResourceItem
-	12, // 8: provider.v1.ResourceItem.data:type_name -> google.protobuf.Struct
-	0,  // 9: provider.v1.ProviderService.FetchResource:input_type -> provider.v1.FetchResourceRequest
-	2,  // 10: provider.v1.ProviderService.FetchRelated:input_type -> provider.v1.FetchRelatedRequest
-	6,  // 11: provider.v1.ProviderService.ListResources:input_type -> provider.v1.ListResourcesRequest
-	1,  // 12: provider.v1.ProviderService.FetchResource:output_type -> provider.v1.FetchResourceResponse
-	5,  // 13: provider.v1.ProviderService.FetchRelated:output_type -> provider.v1.FetchRelatedResponse
-	7,  // 14: provider.v1.ProviderService.ListResources:output_type -> provider.v1.ListResourcesResponse
-	12, // [12:15] is the sub-list for method output_type
-	9,  // [9:12] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	11, // 4: provider.v1.FetchRelatedRequest.metadata:type_name -> provider.v1.FetchRelatedRequest.MetadataEntry
+	6,  // 5: provider.v1.FetchRelatedResponse.related_resources:type_name -> provider.v1.RelatedResource
+	13, // 6: provider.v1.RelatedResource.data:type_name -> google.protobuf.Struct
+	12, // 7: provider.v1.ListResourcesRequest.metadata:type_name -> provider.v1.ListResourcesRequest.MetadataEntry
+	9,  // 8: provider.v1.ListResourcesResponse.resources:type_name -> provider.v1.ResourceItem
+	13, // 9: provider.v1.ResourceItem.data:type_name -> google.protobuf.Struct
+	0,  // 10: provider.v1.ProviderService.FetchResource:input_type -> provider.v1.FetchResourceRequest
+	2,  // 11: provider.v1.ProviderService.FetchRelated:input_type -> provider.v1.FetchRelatedRequest
+	7,  // 12: provider.v1.ProviderService.ListResources:input_type -> provider.v1.ListResourcesRequest
+	1,  // 13: provider.v1.ProviderService.FetchResource:output_type -> provider.v1.FetchResourceResponse
+	5,  // 14: provider.v1.ProviderService.FetchRelated:output_type -> provider.v1.FetchRelatedResponse
+	8,  // 15: provider.v1.ProviderService.ListResources:output_type -> provider.v1.ListResourcesResponse
+	13, // [13:16] is the sub-list for method output_type
+	10, // [10:13] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_provider_v1_provider_proto_init() }
@@ -641,7 +686,7 @@ func file_provider_v1_provider_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_provider_v1_provider_proto_rawDesc), len(file_provider_v1_provider_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

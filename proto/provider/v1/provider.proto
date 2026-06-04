@@ -47,12 +47,11 @@ message RootResource {
   string id = 2;
 }
 
-message FetchRelatedResponse {
-  repeated google.protobuf.Struct data = 1;
-  // Per-resource versions aligned with data. When populated, data[i] has
-  // version versions[i] at the source. Empty means the provider does not
-  // support per-resource versioning for this call.
-  repeated int64 versions = 2;
+message FetchRelatedResponse { repeated RelatedResource related_resources = 1; }
+
+message RelatedResource {
+  google.protobuf.Struct data = 1;
+  int64 version = 2;
 }
 
 message ListResourcesRequest {

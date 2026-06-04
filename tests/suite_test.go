@@ -23,7 +23,6 @@ import (
 	"github.com/theleeeo/indexer/store"
 
 	"github.com/elastic/go-elasticsearch/v8"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -466,7 +465,7 @@ func (t *TestSuite) SetupSuite() {
 
 	// Apply River migrations.
 	riverDriver := riverpgxv5.New(dbpool)
-	migrator, err := rivermigrate.New[pgx.Tx](riverDriver, nil)
+	migrator, err := rivermigrate.New(riverDriver, nil)
 	if err != nil {
 		t.T().Fatalf("failed to create river migrator: %v", err)
 	}
