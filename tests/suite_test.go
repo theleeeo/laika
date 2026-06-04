@@ -509,6 +509,14 @@ func (t *TestSuite) SetupSuite() {
 }
 
 func (t *TestSuite) TearDownSuite() {
+	t.cancelWorker()
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := t.worker.client.Stop(stopCtx); err != nil {
+		log.Printf("failed to stop river client: %s", err)
+	}
+
 	if err := testcontainers.TerminateContainer(t.esContainer); err != nil {
 		log.Printf("failed to terminate elasticsearch container: %s", err)
 	}
@@ -518,17 +526,6 @@ func (t *TestSuite) TearDownSuite() {
 	if err := testcontainers.TerminateContainer(t.pgContainer); err != nil {
 		log.Printf("failed to terminate postgres container: %s", err)
 	}
-
-	t.cancelWorker()
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := t.worker.client.Stop(stopCtx); err != nil {
-		log.Printf("failed to stop river client: %s", err)
-	}
-}
-
-func (t *TestSuite) SetupTest() {
 }
 
 // setResourceConfig rebuilds the aggregation plans from the given resource
