@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/theleeeo/indexer/core/source"
 	"github.com/theleeeo/indexer/projection"
 	"github.com/theleeeo/indexer/resource"
-	"github.com/theleeeo/indexer/source"
 )
 
 // mockProvider is a minimal source.Provider for testing plan execution.

@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/indexer/core/source"
 	"github.com/theleeeo/indexer/dsl"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/resource"
-	"github.com/theleeeo/indexer/source"
 	"github.com/theleeeo/indexer/store"
 
 	"github.com/elastic/go-elasticsearch/v8"

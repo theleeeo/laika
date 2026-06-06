@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/indexer/core/source"
 	"github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/source"
 )
 
 // resourceTracked reports whether (resourceType, resourceID) is present in the
