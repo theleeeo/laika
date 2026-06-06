@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/theleeeo/indexer/aggregation"
 	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/indexer/pkg/aggregation"
 	"github.com/theleeeo/indexer/projection"
 	"github.com/theleeeo/indexer/resource"
 	"github.com/theleeeo/indexer/source"
