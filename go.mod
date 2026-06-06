@@ -13,7 +13,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/elasticsearch v0.40.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.40.0
-	github.com/theleeeo/indexer/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6
+	github.com/theleeeo/indexer/aggregation v0.0.0-20260606115642-72edb519ca64
 	google.golang.org/grpc v1.75.1
 	google.golang.org/protobuf v1.36.10
 )
