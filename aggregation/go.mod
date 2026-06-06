@@ -1,4 +1,4 @@
-module github.com/theleeeo/indexer/pkg/aggregation
+module github.com/theleeeo/indexer/aggregation
 
 go 1.26.1
 
