@@ -20,7 +20,7 @@ import (
 	"github.com/theleeeo/indexer/dsl"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/resource"
-	"github.com/theleeeo/indexer/store"
+	"github.com/theleeeo/indexer/storage/postgres"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -267,7 +267,7 @@ type TestSuite struct {
 	worker       *riverDrainer
 
 	fakeProvider *FakeProvider
-	st           *store.PostgresStore
+	st           *postgres.Store
 }
 
 var DefaultResourceConfig = resource.Configs{
@@ -474,7 +474,7 @@ func (t *TestSuite) SetupSuite() {
 		t.T().Fatalf("failed to apply river migrations: %v", err)
 	}
 
-	t.st = store.NewPostgresStore(dbpool)
+	t.st = postgres.NewStore(dbpool)
 	t.fakeProvider = NewFakeProvider()
 
 	plans := dsl.BuildPlansFromConfig(t.fakeProvider, DefaultResourceConfig)

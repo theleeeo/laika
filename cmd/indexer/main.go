@@ -18,7 +18,7 @@ import (
 	"github.com/theleeeo/indexer/resource"
 	"github.com/theleeeo/indexer/server"
 	"github.com/theleeeo/indexer/source"
-	"github.com/theleeeo/indexer/store"
+	"github.com/theleeeo/indexer/storage/postgres"
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,7 +75,7 @@ func main() {
 
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 
-	st := store.NewPostgresStore(dbpool)
+	st := postgres.NewStore(dbpool)
 
 	// Apply River migrations before starting the client.
 	riverDriver := riverpgxv5.New(dbpool)

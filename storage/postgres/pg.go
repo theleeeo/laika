@@ -1,24 +1,25 @@
-package store
+package postgres
 
 import (
 	"context"
 	"errors"
 
+	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/model"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type PostgresStore struct {
+type Store struct {
 	pool *pgxpool.Pool
 }
 
-func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{pool: pool}
+func NewStore(pool *pgxpool.Pool) *Store {
+	return &Store{pool: pool}
 }
 
-func (s *PostgresStore) AddRelations(ctx context.Context, relations []Relation) error {
+func (s *Store) AddRelations(ctx context.Context, relations []core.Relation) error {
 	if len(relations) == 0 {
 		return nil
 	}
@@ -41,7 +42,7 @@ func (s *PostgresStore) AddRelations(ctx context.Context, relations []Relation) 
 	return nil
 }
 
-func (s *PostgresStore) GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error) {
+func (s *Store) GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error) {
 	rows, err := s.pool.Query(
 		ctx,
 		`SELECT resource, resource_id FROM relations WHERE related_resource=$1 AND related_resource_id=$2`,
@@ -63,7 +64,7 @@ func (s *PostgresStore) GetParentResources(ctx context.Context, childResource mo
 	return parents, nil
 }
 
-func (s *PostgresStore) GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error) {
+func (s *Store) GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error) {
 	rows, err := s.pool.Query(
 		ctx,
 		`SELECT related_resource, related_resource_id FROM relations WHERE resource=$1 AND resource_id=$2`,
@@ -85,7 +86,7 @@ func (s *PostgresStore) GetChildResources(ctx context.Context, parentResource mo
 	return children, nil
 }
 
-func (s *PostgresStore) RemoveResource(ctx context.Context, resource model.Resource) error {
+func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) error {
 	_, err := s.pool.Exec(
 		ctx,
 		`DELETE FROM relations WHERE resource=$1 AND resource_id=$2`,
@@ -94,10 +95,10 @@ func (s *PostgresStore) RemoveResource(ctx context.Context, resource model.Resou
 	return err
 }
 
-func (s *PostgresStore) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
-	var relations []Relation
+func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
+	var relations []core.Relation
 	for _, child := range childs {
-		relations = append(relations, Relation{
+		relations = append(relations, core.Relation{
 			Parent: parent,
 			Child:  child,
 		})
@@ -108,7 +109,7 @@ func (s *PostgresStore) AddChildResources(ctx context.Context, parent model.Reso
 // NextRebuildCounter atomically increments and returns the rebuild counter for
 // a root resource. The returned value is used as the ES external version for
 // OCC so older writes are rejected.
-func (s *PostgresStore) NextRebuildCounter(ctx context.Context, resource model.Resource) (int64, error) {
+func (s *Store) NextRebuildCounter(ctx context.Context, resource model.Resource) (int64, error) {
 	var counter int64
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO resources (type, id, build_idx)
@@ -130,7 +131,7 @@ func (s *PostgresStore) NextRebuildCounter(ctx context.Context, resource model.R
 // rows are left unchanged). When version > 0, the resource is only inserted or
 // updated if the new version is strictly greater than the stored one; otherwise
 // ErrStaleVersion is returned.
-func (s *PostgresStore) UpsertResource(ctx context.Context, resource model.Resource, version int64) error {
+func (s *Store) UpsertResource(ctx context.Context, resource model.Resource, version int64) error {
 	// TODO: Always require version, set it at a higher level if omitted in the api.
 	if version == 0 {
 		_, err := s.pool.Exec(ctx,
@@ -150,7 +151,7 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, resource model.Resou
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrStaleVersion
+		return core.ErrStaleVersion
 	}
 	return nil
 }
@@ -160,7 +161,7 @@ func (s *PostgresStore) UpsertResource(ctx context.Context, resource model.Resou
 // than the observed version. Resources with ObservedVersion == 0 are skipped
 // (provider didn't supply a version). Resources absent from the table are
 // treated as not-drifted.
-func (s *PostgresStore) AnyResourceVersionDrifted(ctx context.Context, observed []model.VersionedResource) (bool, error) {
+func (s *Store) AnyResourceVersionDrifted(ctx context.Context, observed []model.VersionedResource) (bool, error) {
 	// Filter to those with a known observed version.
 	var types []string
 	var ids []string
@@ -195,7 +196,7 @@ func (s *PostgresStore) AnyResourceVersionDrifted(ctx context.Context, observed 
 }
 
 // DeleteResource removes a resource from the resources table.
-func (s *PostgresStore) DeleteResource(ctx context.Context, resource model.Resource) error {
+func (s *Store) DeleteResource(ctx context.Context, resource model.Resource) error {
 	_, err := s.pool.Exec(ctx,
 		`DELETE FROM resources WHERE type=$1 AND id=$2`,
 		resource.Type, resource.Id,

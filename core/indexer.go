@@ -10,12 +10,14 @@ import (
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/projection"
 	"github.com/theleeeo/indexer/resource"
-	"github.com/theleeeo/indexer/store"
 )
 
 var (
 	ErrUnknownResource = errors.New("unknown resource")
-	ErrStaleVersion    = store.ErrStaleVersion
+
+	// ErrStaleVersion is returned when a resource upsert is rejected because the
+	// provided version is not strictly greater than the currently stored version.
+	ErrStaleVersion = errors.New("stale version")
 )
 
 type InvalidArgumentError struct {
@@ -37,7 +39,7 @@ type Config struct {
 	ES *es.Client
 
 	// Store is the PostgreSQL relation-graph store.
-	Store *store.PostgresStore
+	Store Store
 
 	// RiverClient is the River job queue client for enqueuing rebuild/delete
 	// and full-rebuild jobs. It may be left nil at construction and assigned
@@ -50,7 +52,7 @@ type Config struct {
 // determines which search documents are affected, rebuilds them from
 // authoritative source data, and writes them to Elasticsearch.
 type Indexer struct {
-	st *store.PostgresStore
+	st Store
 	es *es.Client
 
 	plans map[string][]projection.Plan
