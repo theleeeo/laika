@@ -346,6 +346,7 @@ type RelatedResource struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Data          *structpb.Struct       `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
 	Version       int64                  `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
+	ResourceId    string                 `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -392,6 +393,13 @@ func (x *RelatedResource) GetVersion() int64 {
 		return x.Version
 	}
 	return 0
+}
+
+func (x *RelatedResource) GetResourceId() string {
+	if x != nil {
+		return x.ResourceId
+	}
+	return ""
 }
 
 type ListResourcesRequest struct {
@@ -596,10 +604,12 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\"a\n" +
 	"\x14FetchRelatedResponse\x12I\n" +
-	"\x11related_resources\x18\x01 \x03(\v2\x1c.provider.v1.RelatedResourceR\x10relatedResources\"X\n" +
+	"\x11related_resources\x18\x01 \x03(\v2\x1c.provider.v1.RelatedResourceR\x10relatedResources\"y\n" +
 	"\x0fRelatedResource\x12+\n" +
 	"\x04data\x18\x01 \x01(\v2\x17.google.protobuf.StructR\x04data\x12\x18\n" +
-	"\aversion\x18\x02 \x01(\x03R\aversion\"\x81\x02\n" +
+	"\aversion\x18\x02 \x01(\x03R\aversion\x12\x1f\n" +
+	"\vresource_id\x18\x03 \x01(\tR\n" +
+	"resourceId\"\x81\x02\n" +
 	"\x14ListResourcesRequest\x12#\n" +
 	"\rresource_type\x18\x01 \x01(\tR\fresourceType\x12\x1d\n" +
 	"\n" +

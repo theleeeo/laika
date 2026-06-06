@@ -132,6 +132,7 @@ func (f *FakeProvider) DeleteResource(resourceType, resourceID string) {
 	delete(f.resources, resourceType+"|"+resourceID)
 }
 
+// TODO: Remove
 func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, related []map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -141,7 +142,8 @@ func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, relat
 	}
 	rr := make([]source.RelatedResource, len(related))
 	for i, d := range related {
-		rr[i] = source.RelatedResource{Data: d}
+		id, _ := d["id"].(string)
+		rr[i] = source.RelatedResource{ID: id, Data: d}
 	}
 	f.relations[key] = rr
 }
@@ -160,7 +162,7 @@ func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []stri
 		for k, v := range d.Data {
 			cloned[k] = v
 		}
-		rr[i] = source.RelatedResource{Data: cloned, Version: d.Version}
+		rr[i] = source.RelatedResource{ID: d.ID, Data: cloned, Version: d.Version}
 	}
 	f.relations[key] = rr
 }
@@ -222,7 +224,7 @@ func (f *FakeProvider) FetchRelated(_ context.Context, params source.FetchRelate
 			for k, v := range d.Data {
 				cloned[k] = v
 			}
-			snapshot[i] = source.RelatedResource{Data: cloned, Version: d.Version}
+			snapshot[i] = source.RelatedResource{ID: d.ID, Data: cloned, Version: d.Version}
 		}
 	}
 	var gate *fetchGate

@@ -52,6 +52,7 @@ message FetchRelatedResponse { repeated RelatedResource related_resources = 1; }
 message RelatedResource {
   google.protobuf.Struct data = 1;
   int64 version = 2;
+  string resource_id = 3;
 }
 
 message ListResourcesRequest {

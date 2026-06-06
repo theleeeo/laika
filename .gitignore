@@ -3,5 +3,8 @@
 dev/
 tmp/
 
-resources.yml
+*resources.yml
+!example.resources.yml
+
+*indexer.yml
 !example.resources.yml

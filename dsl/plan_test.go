@@ -62,7 +62,8 @@ func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelate
 	}
 	rr := make([]source.RelatedResource, len(data))
 	for i, d := range data {
-		rr[i] = source.RelatedResource{Data: d}
+		id, _ := d["id"].(string)
+		rr[i] = source.RelatedResource{ID: id, Data: d}
 	}
 	return source.FetchRelatedResult{Related: rr}, nil
 }

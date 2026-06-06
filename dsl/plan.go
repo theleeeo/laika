@@ -76,6 +76,7 @@ func buildRelationSubPlan(
 		rel:      rel,
 	}
 
+	// TODO: There are a bunch of things here that can go wrong, like missing id, incorrect types, etc. Handle that better.
 	builder := func(parentDoc projection.BuildDoc, fetchResult any) projection.BuildDoc {
 		if parentDoc.Doc == nil {
 			return parentDoc
@@ -87,14 +88,13 @@ func buildRelationSubPlan(
 		}
 
 		for _, r := range fr.Related {
-			if id, ok := r.Data["id"]; ok {
-				if idStr, ok := id.(string); ok {
-					parentDoc.Relations = append(parentDoc.Relations, model.VersionedResource{
-						Resource: model.Resource{Type: fr.ResourceType, Id: idStr},
-						Version:  r.Version,
-					})
-				}
+			if r.ID == "" {
+				continue
 			}
+			parentDoc.Relations = append(parentDoc.Relations, model.VersionedResource{
+				Resource: model.Resource{Type: fr.ResourceType, Id: r.ID},
+				Version:  r.Version,
+			})
 		}
 
 		// Update the resolved map so downstream relations can reference this data.
@@ -107,8 +107,8 @@ func buildRelationSubPlan(
 		subResources := make([]map[string]any, 0, len(fr.Related))
 		for _, r := range fr.Related {
 			filtered := filterFields(r.Data, rel.Fields)
-			if id, ok := r.Data["id"]; ok {
-				filtered["id"] = id
+			if r.ID != "" {
+				filtered["id"] = r.ID
 			}
 			subResources = append(subResources, filtered)
 		}
