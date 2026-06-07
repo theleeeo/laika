@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/theleeeo/indexer/app/config"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/resource"
 )
@@ -23,7 +24,7 @@ func main() {
 	esPass := flag.String("es-pass", "", "Elasticsearch password")
 	flag.Parse()
 
-	resources, err := loadResourceConfig(*configPath)
+	resources, err := config.LoadConfig(*configPath)
 	if err != nil {
 		log.Fatalf("load resource config: %v", err)
 	}
@@ -137,10 +138,6 @@ func doRequest(method, url string, body []byte, user, pass string) (int, []byte,
 		return resp.StatusCode, nil, err
 	}
 	return resp.StatusCode, respBody, nil
-}
-
-func loadResourceConfig(path string) (resource.Configs, error) {
-	return resource.LoadConfig(path)
 }
 
 // applyAlias creates or updates an ES alias to point to the given index using

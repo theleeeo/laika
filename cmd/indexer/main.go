@@ -10,12 +10,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/theleeeo/indexer/app/config"
 	"github.com/theleeeo/indexer/app/dsl"
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/gen/index/v1"
 	"github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/resource"
 	"github.com/theleeeo/indexer/server"
 	"github.com/theleeeo/indexer/source"
 	"github.com/theleeeo/indexer/storage/postgres"
@@ -40,7 +40,7 @@ func main() {
 		log.Fatalf("load app config: %v", err)
 	}
 
-	resources, err := loadResourceConfig(cfg.ResourceConfigPath)
+	resources, err := config.LoadConfig(cfg.ResourceConfigPath)
 
 	if err != nil {
 		log.Fatalf("load resource config: %v", err)
@@ -176,8 +176,4 @@ func main() {
 	g.GracefulStop()
 
 	wg.Wait()
-}
-
-func loadResourceConfig(path string) (resource.Configs, error) {
-	return resource.LoadConfig(path)
 }

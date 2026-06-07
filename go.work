@@ -1,7 +1,7 @@
 go 1.26.1
 
 use (
-	.
+	. // TODO: Should be removed once the root module is gone.
 	./aggregation
 	./app
 	./storage/postgres

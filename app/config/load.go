@@ -1,15 +1,16 @@
-package resource
+package config
 
 import (
 	"fmt"
 	"os"
 
 	"github.com/goccy/go-yaml"
+	"github.com/theleeeo/indexer/resource"
 )
 
 // LoadConfig reads a resource config file at the given path and returns
 // the parsed Configs with defaults applied.
-func LoadConfig(path string) (Configs, error) {
+func LoadConfig(path string) (resource.Configs, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading file: %w", err)
@@ -27,21 +28,21 @@ type rawFile struct {
 // containing {fields, relations}. For unversioned entries, Fields is
 // a []FieldConfig list and Relations is a sibling key.
 type rawEntry struct {
-	Type        string           `yaml:"type"`
-	Version     int              `yaml:"version,omitempty"`
-	ReadVersion int              `yaml:"readVersion,omitempty"`
-	Fields      any              `yaml:"fields"`
-	Relations   []RelationConfig `yaml:"relations,omitempty"`
+	Type        string                    `yaml:"type"`
+	Version     int                       `yaml:"version,omitempty"`
+	ReadVersion int                       `yaml:"readVersion,omitempty"`
+	Fields      any                       `yaml:"fields"`
+	Relations   []resource.RelationConfig `yaml:"relations,omitempty"`
 }
 
 // ParseConfig parses resource config YAML bytes into Configs.
-func ParseConfig(data []byte) (Configs, error) {
+func ParseConfig(data []byte) (resource.Configs, error) {
 	var raw rawFile
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal yaml: %w", err)
 	}
 
-	configMap := make(map[string]*Config)
+	configMap := make(map[string]*resource.Config)
 	var configOrder []string
 
 	for _, entry := range raw.Resources {
@@ -51,7 +52,7 @@ func ParseConfig(data []byte) (Configs, error) {
 
 		cfg, exists := configMap[entry.Type]
 		if !exists {
-			cfg = &Config{
+			cfg = &resource.Config{
 				Resource: entry.Type,
 			}
 			configMap[entry.Type] = cfg
@@ -82,7 +83,7 @@ func ParseConfig(data []byte) (Configs, error) {
 		cfg.Versions = append(cfg.Versions, *vc)
 	}
 
-	configs := make(Configs, 0, len(configOrder))
+	configs := make(resource.Configs, 0, len(configOrder))
 	for _, name := range configOrder {
 		cfg := configMap[name]
 		cfg.ApplyDefaults()
@@ -99,9 +100,9 @@ func ParseConfig(data []byte) (Configs, error) {
 //
 // For unversioned entries, "fields" is a direct []FieldConfig list and
 // "relations" is a sibling key on the entry.
-func parseEntrySchema(entry rawEntry) (*VersionConfig, error) {
+func parseEntrySchema(entry rawEntry) (*resource.VersionConfig, error) {
 	if entry.Fields == nil {
-		return &VersionConfig{Relations: entry.Relations}, nil
+		return &resource.VersionConfig{Relations: entry.Relations}, nil
 	}
 
 	b, err := yaml.Marshal(entry.Fields)
@@ -111,7 +112,7 @@ func parseEntrySchema(entry rawEntry) (*VersionConfig, error) {
 
 	if entry.Version > 0 {
 		// Versioned: fields is {fields: [...], relations: [...]}
-		var vc VersionConfig
+		var vc resource.VersionConfig
 		if err := yaml.Unmarshal(b, &vc); err != nil {
 			return nil, fmt.Errorf("parse version schema: %w", err)
 		}
@@ -119,11 +120,11 @@ func parseEntrySchema(entry rawEntry) (*VersionConfig, error) {
 	}
 
 	// Unversioned: fields is a direct [...] list
-	var fields []FieldConfig
+	var fields []resource.FieldConfig
 	if err := yaml.Unmarshal(b, &fields); err != nil {
 		return nil, fmt.Errorf("parse fields: %w", err)
 	}
-	return &VersionConfig{
+	return &resource.VersionConfig{
 		Fields:    fields,
 		Relations: entry.Relations,
 	}, nil
