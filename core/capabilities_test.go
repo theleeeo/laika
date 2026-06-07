@@ -3,8 +3,8 @@ package core
 import (
 	"testing"
 
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/resource"
 )
 
 func TestGetCapabilities_Empty(t *testing.T) {

@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/core/source"
 	"github.com/theleeeo/indexer/projection"
-	"github.com/theleeeo/indexer/resource"
 )
 
 // relationFetcher implements aggregation.SubFetcher[BuildDoc].

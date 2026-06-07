@@ -5,7 +5,7 @@ import (
 	"os"
 
 	"github.com/goccy/go-yaml"
-	"github.com/theleeeo/indexer/resource"
+	"github.com/theleeeo/indexer/core/resource"
 )
 
 // LoadConfig reads a resource config file at the given path and returns

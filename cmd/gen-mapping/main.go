@@ -12,8 +12,8 @@ import (
 	"strings"
 
 	"github.com/theleeeo/indexer/app/config"
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/es"
-	"github.com/theleeeo/indexer/resource"
 )
 
 func main() {

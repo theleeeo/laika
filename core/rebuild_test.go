@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/theleeeo/indexer/resource"
+	"github.com/theleeeo/indexer/core/resource"
 )
 
 func testResources() resource.Configs {

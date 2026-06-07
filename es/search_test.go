@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
+	"github.com/theleeeo/indexer/core/resource"
 	searchv1 "github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/resource"
 )
 
 // captureSearch executes Search and returns the decoded JSON body that was

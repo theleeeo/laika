@@ -3,8 +3,8 @@ package core
 import (
 	"fmt"
 
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/resource"
 )
 
 // GetCapabilities returns the search capabilities for all configured resources,

@@ -7,9 +7,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/projection"
-	"github.com/theleeeo/indexer/resource"
 )
 
 var (

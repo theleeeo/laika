@@ -8,8 +8,8 @@ import (
 	"io"
 	"time"
 
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/gen/search/v1"
-	"github.com/theleeeo/indexer/resource"
 
 	"google.golang.org/protobuf/types/known/structpb"
 )

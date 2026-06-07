@@ -17,9 +17,9 @@ import (
 
 	"github.com/theleeeo/indexer/app/dsl"
 	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/core/source"
 	"github.com/theleeeo/indexer/es"
-	"github.com/theleeeo/indexer/resource"
 	"github.com/theleeeo/indexer/storage/postgres"
 
 	"github.com/elastic/go-elasticsearch/v8"
