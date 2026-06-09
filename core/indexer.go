@@ -8,7 +8,6 @@ import (
 	"github.com/riverqueue/river"
 
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/projection"
 )
 
@@ -35,8 +34,8 @@ type Config struct {
 
 	Plans map[string][]projection.Plan
 
-	// ES is the Elasticsearch client for indexing and searching.
-	ES *es.Client
+	// ES is the search backend for indexing and searching.
+	ES SearchBackend
 
 	// Store is the PostgreSQL relation-graph store.
 	Store Store
@@ -53,7 +52,7 @@ type Config struct {
 // authoritative source data, and writes them to Elasticsearch.
 type Indexer struct {
 	st Store
-	es *es.Client
+	es SearchBackend
 
 	plans map[string][]projection.Plan
 

@@ -4,20 +4,14 @@ import (
 	"fmt"
 
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/gen/search/v1"
 )
 
-// GetCapabilities returns the search capabilities for all configured resources,
-// describing available fields, their types, supported filter operations, and
-// whether they are searchable or sortable.
-func (idx *Indexer) GetCapabilities() *search.GetCapabilitiesResponse {
-	resp := &search.GetCapabilitiesResponse{}
+// GetCapabilities returns the search capabilities for all configured resources.
+func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
+	resp := CapabilitiesResponse{}
 
 	for _, rc := range idx.resources {
-		cap := &search.ResourceCapability{
-			Resource: rc.Resource,
-		}
-
+		cap := ResourceCapability{Resource: rc.Resource}
 		vc := rc.ReadVersionConfig()
 
 		for _, f := range vc.Fields {
@@ -36,24 +30,19 @@ func (idx *Indexer) GetCapabilities() *search.GetCapabilitiesResponse {
 	return resp
 }
 
-func fieldCapability(path string, f resource.FieldConfig) *search.FieldCapability {
+func fieldCapability(path string, f resource.FieldConfig) FieldCapability {
 	esType := f.ESType()
 	searchable := f.Query.Search == nil || *f.Query.Search
 
-	fc := &search.FieldCapability{
+	fc := FieldCapability{
 		Field:      path,
 		Type:       esType,
 		Searchable: searchable,
 		Sortable:   esType != "text",
 	}
 
-	// Term-based filters work on keyword, numeric, date, and boolean types.
-	// They do not work reliably on analyzed text fields.
 	if esType != "text" {
-		fc.FilterOps = []search.FilterOp{
-			search.FilterOp_FILTER_OP_EQ,
-			search.FilterOp_FILTER_OP_IN,
-		}
+		fc.FilterOps = []FilterOp{FilterOpEq, FilterOpIn}
 	}
 
 	return fc

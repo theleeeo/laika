@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/model"
 	"github.com/theleeeo/indexer/projection"
 )
@@ -91,7 +90,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 
 		allRelations = append(allRelations, result.Relations...)
 
-		indexName := es.IndexName(resourceType, plan.Version)
+		indexName := IndexName(resourceType, plan.Version)
 		if err := idx.es.Upsert(ctx, indexName, resourceID, result.Doc, occVersion); err != nil {
 			return fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
 		}
@@ -151,7 +150,7 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 	cleaned := make(map[string]bool)
 	occVersions := make(map[string]int64)
 
-	var items []es.BulkItem
+	var items []BulkItem
 	var failed int
 
 	for _, plan := range plans {
@@ -193,8 +192,8 @@ func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
 				resourceRelations[id] = append(resourceRelations[id], doc.Relations...)
 				occVersion := occVersions[id]
 
-				items = append(items, es.BulkItem{
-					Index:   es.IndexName(params.ResourceType, plan.Version),
+				items = append(items, BulkItem{
+					Index:   IndexName(params.ResourceType, plan.Version),
 					ID:      id,
 					Doc:     doc.Doc,
 					Version: occVersion,

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/gen/search/v1"
 )
 
 func TestGetCapabilities_Empty(t *testing.T) {
@@ -48,13 +47,11 @@ func TestGetCapabilities_SingleResource(t *testing.T) {
 	}
 
 	// title — text field
-	title := rc.Fields[0]
-	assertField(t, title, "fields.title", "text", true, false, nil)
+	assertField(t, rc.Fields[0], "fields.title", "text", true, false, nil)
 
 	// status — keyword field (default)
-	status := rc.Fields[1]
-	assertField(t, status, "fields.status", "keyword", true, true,
-		[]search.FilterOp{search.FilterOp_FILTER_OP_EQ, search.FilterOp_FILTER_OP_IN})
+	assertField(t, rc.Fields[1], "fields.status", "keyword", true, true,
+		[]FilterOp{FilterOpEq, FilterOpIn})
 }
 
 func TestGetCapabilities_WithRelations(t *testing.T) {
@@ -90,20 +87,21 @@ func TestGetCapabilities_WithRelations(t *testing.T) {
 	}
 
 	assertField(t, rc.Fields[0], "fields.order_number", "keyword", true, true,
-		[]search.FilterOp{search.FilterOp_FILTER_OP_EQ, search.FilterOp_FILTER_OP_IN})
+		[]FilterOp{FilterOpEq, FilterOpIn})
 	assertField(t, rc.Fields[1], "customer.name", "text", true, false, nil)
 	assertField(t, rc.Fields[2], "customer.tier", "keyword", true, true,
-		[]search.FilterOp{search.FilterOp_FILTER_OP_EQ, search.FilterOp_FILTER_OP_IN})
+		[]FilterOp{FilterOpEq, FilterOpIn})
 }
 
 func TestGetCapabilities_SearchDisabled(t *testing.T) {
+	falseVal := false
 	cfg := &resource.Config{
 		Resource: "item",
 		Versions: []resource.VersionConfig{
 			{
 				Version: 1,
 				Fields: []resource.FieldConfig{
-					{Name: "code", Query: resource.QueryConfig{Search: new(false)}},
+					{Name: "code", Query: resource.QueryConfig{Search: &falseVal}},
 				},
 			},
 		},
@@ -116,7 +114,7 @@ func TestGetCapabilities_SearchDisabled(t *testing.T) {
 	resp := idx.GetCapabilities()
 	f := resp.Resources[0].Fields[0]
 	assertField(t, f, "fields.code", "keyword", false, true,
-		[]search.FilterOp{search.FilterOp_FILTER_OP_EQ, search.FilterOp_FILTER_OP_IN})
+		[]FilterOp{FilterOpEq, FilterOpIn})
 }
 
 func TestGetCapabilities_MultipleResources(t *testing.T) {
@@ -138,10 +136,10 @@ func TestGetCapabilities_MultipleResources(t *testing.T) {
 
 	bField := resp.Resources[1].Fields[0]
 	assertField(t, bField, "fields.y", "integer", true, true,
-		[]search.FilterOp{search.FilterOp_FILTER_OP_EQ, search.FilterOp_FILTER_OP_IN})
+		[]FilterOp{FilterOpEq, FilterOpIn})
 }
 
-func assertField(t *testing.T, f *search.FieldCapability, wantField, wantType string, wantSearchable, wantSortable bool, wantOps []search.FilterOp) {
+func assertField(t *testing.T, f FieldCapability, wantField, wantType string, wantSearchable, wantSortable bool, wantOps []FilterOp) {
 	t.Helper()
 	if f.Field != wantField {
 		t.Errorf("field: got %q, want %q", f.Field, wantField)

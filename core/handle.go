@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/model"
 )
 
@@ -22,7 +21,7 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload) error {
 
 	cfg := idx.resources.Get(p.ResourceType)
 	for _, v := range cfg.SortedVersions() {
-		indexName := es.IndexName(p.ResourceType, v)
+		indexName := IndexName(p.ResourceType, v)
 		if err := idx.es.Delete(ctx, indexName, p.ResourceID); err != nil {
 			return fmt.Errorf("delete %s/%s from %s: %w", p.ResourceType, p.ResourceID, indexName, err)
 		}
