@@ -19,10 +19,10 @@ import (
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/app/source"
-	"github.com/theleeeo/indexer/es"
+	"github.com/theleeeo/indexer/backend/elasticsearch"
 	"github.com/theleeeo/indexer/storage/postgres"
 
-	"github.com/elastic/go-elasticsearch/v8"
+	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -259,7 +259,7 @@ type TestSuite struct {
 
 	pool *pgxpool.Pool
 
-	esClient *elasticsearch.Client
+	esClient *esv8.Client
 
 	idx *core.Indexer
 
@@ -432,7 +432,7 @@ func (t *TestSuite) SetupSuite() {
 		t.FailNow("failed to get elasticsearch endpoint", err)
 	}
 
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, err := esv8.NewClient(esv8.Config{
 		Addresses: []string{esAddr},
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
@@ -482,7 +482,7 @@ func (t *TestSuite) SetupSuite() {
 	t.idx = core.New(core.Config{
 		Plans:     plans,
 		Resources: DefaultResourceConfig,
-		ES:        es.New(esClient, true),
+		ES:        elasticsearch.New(esClient, true),
 		Store:     t.st,
 	})
 
@@ -541,7 +541,7 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 	for _, cfg := range resources {
 		for _, vc := range cfg.Versions {
 			indexName := core.IndexName(cfg.Resource, vc.Version)
-			mapping := es.GenerateMapping(&vc)
+			mapping := elasticsearch.GenerateMapping(&vc)
 			body, err := json.Marshal(mapping)
 			t.Require().NoError(err)
 

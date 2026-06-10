@@ -1,4 +1,4 @@
-package es
+package elasticsearch
 
 import (
 	"bytes"
@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 )
-
 
 // CreateAlias creates an alias pointing to the given index.
 // If the alias already exists pointing elsewhere, it is moved atomically.

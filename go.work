@@ -4,5 +4,6 @@ use (
 	. // TODO: Should be removed once the root module is gone.
 	./aggregation
 	./app
+	./backend/elasticsearch
 	./storage/postgres
 )

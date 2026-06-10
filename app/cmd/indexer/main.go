@@ -13,14 +13,14 @@ import (
 	"github.com/theleeeo/indexer/app/config"
 	"github.com/theleeeo/indexer/app/dsl"
 	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/app/gen/index/v1"
 	"github.com/theleeeo/indexer/app/gen/search/v1"
 	"github.com/theleeeo/indexer/app/server"
 	"github.com/theleeeo/indexer/app/source"
+	"github.com/theleeeo/indexer/backend/elasticsearch"
 	"github.com/theleeeo/indexer/storage/postgres"
 
-	"github.com/elastic/go-elasticsearch/v8"
+	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
@@ -56,7 +56,7 @@ func main() {
 		log.Printf(" - resource %q with %d field/s and %d relation/s", rc.Resource, len(vc.Fields), len(vc.Relations))
 	}
 
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, err := esv8.NewClient(esv8.Config{
 		Addresses: cfg.ES.Addrs,
 		Username:  cfg.ES.Username,
 		Password:  cfg.ES.Password,
@@ -65,7 +65,7 @@ func main() {
 		log.Fatalf("setting up es client: %v", err)
 	}
 
-	esClientImpl := es.New(esClient, false)
+	esClientImpl := elasticsearch.New(esClient, false)
 
 	dbpool, err := pgxpool.New(context.Background(), cfg.PG.Addr)
 	if err != nil {

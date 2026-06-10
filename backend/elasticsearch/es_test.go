@@ -1,4 +1,4 @@
-package es
+package elasticsearch
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 
 	"encoding/json/v2"
 
-	elasticsearch "github.com/elastic/go-elasticsearch/v8"
+	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/theleeeo/indexer/core"
 )
 
@@ -42,7 +42,7 @@ func TestUpsert_UsesExternalVersion(t *testing.T) {
 		}, nil
 	})
 
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, err := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})
@@ -101,7 +101,7 @@ func TestBulkUpsert_UsesExternalVersionPerItem(t *testing.T) {
 		}, nil
 	})
 
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, err := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})

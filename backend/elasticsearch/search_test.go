@@ -1,4 +1,4 @@
-package es
+package elasticsearch
 
 import (
 	"context"
@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	elasticsearch "github.com/elastic/go-elasticsearch/v8"
-	"github.com/theleeeo/indexer/core/resource"
+	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/indexer/core/resource"
 )
 
 // captureSearch executes Search and returns the decoded JSON body that was
@@ -39,7 +39,7 @@ func captureSearch(t *testing.T, req core.SearchRequest, vc *resource.VersionCon
 		}, nil
 	})
 
-	esClient, err := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, err := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})
@@ -554,7 +554,7 @@ func TestSearch_404_ReturnsEmpty(t *testing.T) {
 			Header:     headers,
 		}, nil
 	})
-	esClient, _ := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, _ := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})
@@ -579,7 +579,7 @@ func TestSearch_ErrorResponse_ReturnsError(t *testing.T) {
 			Header:     headers,
 		}, nil
 	})
-	esClient, _ := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, _ := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})
@@ -602,7 +602,7 @@ func TestSearch_HitsDecoded(t *testing.T) {
 			Header:     headers,
 		}, nil
 	})
-	esClient, _ := elasticsearch.NewClient(elasticsearch.Config{
+	esClient, _ := esv8.NewClient(esv8.Config{
 		Addresses: []string{"http://example.invalid"},
 		Transport: rt,
 	})

@@ -1,4 +1,4 @@
-package es
+package elasticsearch
 
 import (
 	"bytes"
@@ -10,20 +10,20 @@ import (
 	"log/slog"
 	"time"
 
-	elasticsearch "github.com/elastic/go-elasticsearch/v8"
+	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/theleeeo/indexer/core"
 )
 
 var ErrNotFound = fmt.Errorf("document not found")
 
 type Client struct {
-	es *elasticsearch.Client
+	es *esv8.Client
 
 	// Temporary solution to control refresh behavior during tests
 	withRefresh bool
 }
 
-func New(client *elasticsearch.Client, withRefresh bool) *Client {
+func New(client *esv8.Client, withRefresh bool) *Client {
 	return &Client{es: client, withRefresh: withRefresh}
 }
 

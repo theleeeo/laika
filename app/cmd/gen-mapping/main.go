@@ -14,7 +14,7 @@ import (
 	"github.com/theleeeo/indexer/app/config"
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/es"
+	"github.com/theleeeo/indexer/backend/elasticsearch"
 )
 
 func main() {
@@ -42,10 +42,10 @@ func main() {
 		}
 		for _, vc := range cfg.Versions {
 			indexName := core.IndexName(cfg.Resource, vc.Version)
-			mappings[indexName] = es.GenerateMapping(&vc)
+			mappings[indexName] = elasticsearch.GenerateMapping(&vc)
 		}
 	} else {
-		mappings = es.GenerateMappings(resources)
+		mappings = elasticsearch.GenerateMappings(resources)
 	}
 
 	if *apply != "" {

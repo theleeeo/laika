@@ -1,4 +1,4 @@
-package es
+package elasticsearch
 
 import (
 	"github.com/theleeeo/indexer/core"
