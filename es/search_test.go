@@ -10,12 +10,12 @@ import (
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
 	"github.com/theleeeo/indexer/core/resource"
-	searchv1 "github.com/theleeeo/indexer/gen/search/v1"
+	"github.com/theleeeo/indexer/core"
 )
 
 // captureSearch executes Search and returns the decoded JSON body that was
 // sent to Elasticsearch, together with the returned response / error.
-func captureSearch(t *testing.T, req *searchv1.SearchRequest, vc *resource.VersionConfig) (body map[string]any, _ *searchv1.SearchResponse, _ error) {
+func captureSearch(t *testing.T, req core.SearchRequest, vc *resource.VersionConfig) (body map[string]any, _ core.SearchResponse, _ error) {
 	t.Helper()
 	var captured map[string]any
 
@@ -112,7 +112,7 @@ func getPath(m map[string]any, keys ...string) any {
 // ---- query body construction tests ----
 
 func TestSearch_NoQuery_EmptyMustAndFilter(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{PageSize: 10}, vcFlatOnly())
+	body, _, err := captureSearch(t, core.SearchRequest{PageSize: 10}, vcFlatOnly())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSearch_NoQuery_EmptyMustAndFilter(t *testing.T) {
 }
 
 func TestSearch_FlatFieldsOnly_MultiMatch(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "hello",
 	}, vcFlatOnly())
@@ -160,7 +160,7 @@ func TestSearch_FlatFieldsOnly_MultiMatch(t *testing.T) {
 
 // Nested relation (IsMany=true) must produce a nested query wrapper.
 func TestSearch_NestedRelation_WrappedInNestedQuery(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "golang",
 	}, vcWithNestedRelation())
@@ -204,7 +204,7 @@ func TestSearch_NestedRelation_WrappedInNestedQuery(t *testing.T) {
 
 // Object relation (IsMany=false / cardinality=one) must NOT be wrapped in nested.
 func TestSearch_ObjectRelation_NotWrappedInNested(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "alice",
 	}, vcWithObjectRelation())
@@ -246,7 +246,7 @@ func TestSearch_SearchDisabledField_ExcludedFromQuery(t *testing.T) {
 		},
 	}
 
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "x",
 	}, vc)
@@ -285,7 +285,7 @@ func TestSearch_NestedRelation_AllFieldsSearchDisabled_NoClause(t *testing.T) {
 		},
 	}
 
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "x",
 	}, vc)
@@ -306,10 +306,10 @@ func TestSearch_NestedRelation_AllFieldsSearchDisabled_NoClause(t *testing.T) {
 // ---- filter tests ----
 
 func TestSearch_Filter_EQ(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_EQ, Value: "active"},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpEq, Value: "active"},
 		},
 	}, vcFlatOnly())
 	if err != nil {
@@ -328,10 +328,10 @@ func TestSearch_Filter_EQ(t *testing.T) {
 }
 
 func TestSearch_Filter_IN(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_IN, Values: []string{"a", "b", "c"}},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpIn, Values: []string{"a", "b", "c"}},
 		},
 	}, vcFlatOnly())
 	if err != nil {
@@ -350,12 +350,12 @@ func TestSearch_Filter_IN(t *testing.T) {
 }
 
 func TestSearch_Filter_Nested(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
+		Filters: []core.Filter{
 			{
 				Field:      "tags.label",
-				Op:         searchv1.FilterOp_FILTER_OP_EQ,
+				Op:         core.FilterOpEq,
 				Value:      "go",
 				NestedPath: "tags",
 			},
@@ -378,10 +378,10 @@ func TestSearch_Filter_Nested(t *testing.T) {
 }
 
 func TestSearch_Filter_EQ_MissingValue_Error(t *testing.T) {
-	_, _, err := captureSearch(t, &searchv1.SearchRequest{
+	_, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_EQ, Value: ""},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpEq, Value: ""},
 		},
 	}, vcFlatOnly())
 	if err == nil {
@@ -390,10 +390,10 @@ func TestSearch_Filter_EQ_MissingValue_Error(t *testing.T) {
 }
 
 func TestSearch_Filter_IN_NoValues_Error(t *testing.T) {
-	_, _, err := captureSearch(t, &searchv1.SearchRequest{
+	_, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_IN, Values: nil},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpIn, Values: nil},
 		},
 	}, vcFlatOnly())
 	if err == nil {
@@ -402,10 +402,10 @@ func TestSearch_Filter_IN_NoValues_Error(t *testing.T) {
 }
 
 func TestSearch_Filter_UnknownOp_Error(t *testing.T) {
-	_, _, err := captureSearch(t, &searchv1.SearchRequest{
+	_, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp(99), Value: "x"},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOp(99), Value: "x"},
 		},
 	}, vcFlatOnly())
 	if err == nil {
@@ -415,11 +415,11 @@ func TestSearch_Filter_UnknownOp_Error(t *testing.T) {
 
 // Nil or empty-field filters should be silently skipped.
 func TestSearch_Filter_NilOrEmptyField_Skipped(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			nil,
-			{Field: "", Op: searchv1.FilterOp_FILTER_OP_EQ, Value: "x"},
+		Filters: []core.Filter{
+			core.Filter{},
+			{Field: "", Op: core.FilterOpEq, Value: "x"},
 		},
 	}, vcFlatOnly())
 	if err != nil {
@@ -434,11 +434,11 @@ func TestSearch_Filter_NilOrEmptyField_Skipped(t *testing.T) {
 
 // Multiple filters should all appear in the filter array.
 func TestSearch_MultipleFilters(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_EQ, Value: "active"},
-			{Field: "fields.name", Op: searchv1.FilterOp_FILTER_OP_IN, Values: []string{"alice", "bob"}},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpEq, Value: "active"},
+			{Field: "fields.name", Op: core.FilterOpIn, Values: []string{"alice", "bob"}},
 		},
 	}, vcFlatOnly())
 	if err != nil {
@@ -453,11 +453,11 @@ func TestSearch_MultipleFilters(t *testing.T) {
 
 // Query + filter must both be present simultaneously.
 func TestSearch_QueryAndFilter_Both(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "hello",
-		Filters: []*searchv1.Filter{
-			{Field: "fields.status", Op: searchv1.FilterOp_FILTER_OP_EQ, Value: "active"},
+		Filters: []core.Filter{
+			{Field: "fields.status", Op: core.FilterOpEq, Value: "active"},
 		},
 	}, vcFlatOnly())
 	if err != nil {
@@ -478,9 +478,9 @@ func TestSearch_QueryAndFilter_Both(t *testing.T) {
 // ---- sort / pagination tests ----
 
 func TestSearch_Sort_AscAndDesc(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Sort: []*searchv1.Sort{
+		Sort: []core.SortOption{
 			{Field: "fields.name", Desc: false},
 			{Field: "fields.status", Desc: true},
 		},
@@ -510,10 +510,9 @@ func TestSearch_Sort_AscAndDesc(t *testing.T) {
 }
 
 func TestSearch_Sort_EmptyField_Skipped(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Sort: []*searchv1.Sort{
-			nil,
+		Sort: []core.SortOption{
 			{Field: ""},
 		},
 	}, vcFlatOnly())
@@ -527,7 +526,7 @@ func TestSearch_Sort_EmptyField_Skipped(t *testing.T) {
 }
 
 func TestSearch_Pagination_FromAndSize(t *testing.T) {
-	body, _, err := captureSearch(t, &searchv1.SearchRequest{
+	body, _, err := captureSearch(t, core.SearchRequest{
 		Page:     3,
 		PageSize: 5,
 	}, vcFlatOnly())
@@ -561,7 +560,7 @@ func TestSearch_404_ReturnsEmpty(t *testing.T) {
 	})
 	c := New(esClient, false)
 
-	resp, err := c.Search(context.Background(), &searchv1.SearchRequest{PageSize: 10}, "missing_idx", vcFlatOnly())
+	resp, err := c.Search(context.Background(), core.SearchRequest{PageSize: 10}, "missing_idx", vcFlatOnly())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -586,7 +585,7 @@ func TestSearch_ErrorResponse_ReturnsError(t *testing.T) {
 	})
 	c := New(esClient, false)
 
-	_, err := c.Search(context.Background(), &searchv1.SearchRequest{PageSize: 10}, "idx", vcFlatOnly())
+	_, err := c.Search(context.Background(), core.SearchRequest{PageSize: 10}, "idx", vcFlatOnly())
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
@@ -609,7 +608,7 @@ func TestSearch_HitsDecoded(t *testing.T) {
 	})
 	c := New(esClient, false)
 
-	resp, err := c.Search(context.Background(), &searchv1.SearchRequest{PageSize: 10}, "idx", vcFlatOnly())
+	resp, err := c.Search(context.Background(), core.SearchRequest{PageSize: 10}, "idx", vcFlatOnly())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -620,13 +619,14 @@ func TestSearch_HitsDecoded(t *testing.T) {
 		t.Fatalf("expected 1 hit, got %d", len(resp.Hits))
 	}
 	hit := resp.Hits[0]
-	if hit.Id != "42" {
-		t.Errorf("expected id=42, got %q", hit.Id)
+	if hit.ID != "42" {
+		t.Errorf("expected id=42, got %q", hit.ID)
 	}
 	if hit.Score != 1.5 {
 		t.Errorf("expected score=1.5, got %f", hit.Score)
 	}
-	if v := hit.Source.Fields["fields"].GetStructValue().Fields["name"].GetStringValue(); v != "alice" {
+	fields, _ := hit.Source["fields"].(map[string]any)
+	if v, _ := fields["name"].(string); v != "alice" {
 		t.Errorf("expected name=alice, got %q", v)
 	}
 }

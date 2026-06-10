@@ -1,6 +1,9 @@
 package es
 
-import "github.com/theleeeo/indexer/core/resource"
+import (
+	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/indexer/core/resource"
+)
 
 // GenerateMapping builds an Elasticsearch index mapping from a version config.
 func GenerateMapping(vc *resource.VersionConfig) map[string]any {
@@ -52,7 +55,7 @@ func GenerateMappings(configs resource.Configs) map[string]map[string]any {
 	result := make(map[string]map[string]any)
 	for _, cfg := range configs {
 		for _, vc := range cfg.Versions {
-			result[IndexName(cfg.Resource, vc.Version)] = GenerateMapping(&vc)
+			result[core.IndexName(cfg.Resource, vc.Version)] = GenerateMapping(&vc)
 		}
 	}
 	return result

@@ -8,26 +8,6 @@ import (
 	"io"
 )
 
-// IndexName returns the concrete versioned index name for a resource and version.
-// Example: IndexName("a", 2) → "a_search_v2"
-func IndexName(resource string, version int) string {
-	return fmt.Sprintf("%s_search_v%d", resource, version)
-}
-
-// AliasName returns the read alias name for a resource.
-// Example: AliasName("a") → "a_search"
-func AliasName(resource string) string {
-	return resource + "_search"
-}
-
-// IndexNames returns the concrete versioned index names for all given versions.
-func IndexNames(resource string, versions []int) []string {
-	names := make([]string, len(versions))
-	for i, v := range versions {
-		names[i] = IndexName(resource, v)
-	}
-	return names
-}
 
 // CreateAlias creates an alias pointing to the given index.
 // If the alias already exists pointing elsewhere, it is moved atomically.

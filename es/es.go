@@ -11,6 +11,7 @@ import (
 	"time"
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
+	"github.com/theleeeo/indexer/core"
 )
 
 var ErrNotFound = fmt.Errorf("document not found")
@@ -95,14 +96,7 @@ func (c *Client) Delete(ctx context.Context, indexAlias, docID string) error {
 	return nil
 }
 
-type BulkItem struct {
-	Index   string
-	ID      string
-	Doc     any
-	Version int64
-}
-
-func (c *Client) BulkUpsert(ctx context.Context, items []BulkItem) error {
+func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) error {
 	if len(items) == 0 {
 		return nil
 	}

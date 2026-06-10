@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 
 	elasticsearch "github.com/elastic/go-elasticsearch/v8"
+	"github.com/theleeeo/indexer/core"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -109,7 +110,7 @@ func TestBulkUpsert_UsesExternalVersionPerItem(t *testing.T) {
 	}
 
 	c := New(esClient, false)
-	err = c.BulkUpsert(context.Background(), []BulkItem{{
+	err = c.BulkUpsert(context.Background(), []core.BulkItem{{
 		Index:   "idx",
 		ID:      "1",
 		Doc:     map[string]any{"id": "1"},
