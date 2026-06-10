@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/theleeeo/indexer/app/config"
-	"github.com/theleeeo/indexer/es"
+	"github.com/theleeeo/indexer/core"
 )
 
 func main() {
@@ -50,8 +50,8 @@ func main() {
 		log.Fatalf("version %d is not in the active versions %v for resource %q", *version, cfg.SortedVersions(), *resourceName)
 	}
 
-	aliasName := es.AliasName(cfg.Resource)
-	targetIndex := es.IndexName(cfg.Resource, *version)
+	aliasName := core.AliasName(cfg.Resource)
+	targetIndex := core.IndexName(cfg.Resource, *version)
 	addr := strings.TrimRight(*esAddr, "/")
 
 	currentIndex, err := getAliasTarget(addr, aliasName, *esUser, *esPass)

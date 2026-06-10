@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/theleeeo/indexer/app/config"
-	"github.com/theleeeo/indexer/es"
+	"github.com/theleeeo/indexer/core"
 )
 
 func main() {
@@ -39,7 +39,7 @@ func main() {
 	}
 
 	addr := strings.TrimRight(*esAddr, "/")
-	aliasName := es.AliasName(cfg.Resource)
+	aliasName := core.AliasName(cfg.Resource)
 
 	aliasTarget, err := getAliasTarget(addr, aliasName, *esUser, *esPass)
 	if err != nil {
@@ -49,7 +49,7 @@ func main() {
 	versions := cfg.SortedVersions()
 	activeIndexes := make(map[string]bool, len(versions))
 	for _, v := range versions {
-		activeIndexes[es.IndexName(cfg.Resource, v)] = true
+		activeIndexes[core.IndexName(cfg.Resource, v)] = true
 	}
 
 	prefix := cfg.Resource + "_search_v"

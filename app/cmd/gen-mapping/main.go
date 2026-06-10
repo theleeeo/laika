@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/theleeeo/indexer/app/config"
+	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/core/resource"
 	"github.com/theleeeo/indexer/es"
 )
@@ -40,7 +41,7 @@ func main() {
 			log.Fatalf("unknown resource %q", *index)
 		}
 		for _, vc := range cfg.Versions {
-			indexName := es.IndexName(cfg.Resource, vc.Version)
+			indexName := core.IndexName(cfg.Resource, vc.Version)
 			mappings[indexName] = es.GenerateMapping(&vc)
 		}
 	} else {
@@ -62,8 +63,8 @@ func main() {
 			targetResources = resource.Configs{resources.Get(*index)}
 		}
 		for _, cfg := range targetResources {
-			aliasName := es.AliasName(cfg.Resource)
-			targetIndex := es.IndexName(cfg.Resource, cfg.ReadVersion)
+			aliasName := core.AliasName(cfg.Resource)
+			targetIndex := core.IndexName(cfg.Resource, cfg.ReadVersion)
 			if err := applyAlias(addr, aliasName, targetIndex, *esUser, *esPass); err != nil {
 				log.Fatalf("apply alias %s -> %s: %v", aliasName, targetIndex, err)
 			}

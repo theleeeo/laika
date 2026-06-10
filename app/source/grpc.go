@@ -4,8 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/theleeeo/indexer/core/source"
-	pb "github.com/theleeeo/indexer/gen/provider/v1"
+	pb "github.com/theleeeo/indexer/app/gen/provider/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -33,22 +32,22 @@ func NewGRPCProvider(addr string) (*GRPCProvider, error) {
 	}, nil
 }
 
-func (p *GRPCProvider) FetchResource(ctx context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
+func (p *GRPCProvider) FetchResource(ctx context.Context, params FetchResourceParams) (FetchResourceResult, error) {
 	resp, err := p.client.FetchResource(ctx, &pb.FetchResourceRequest{
 		ResourceType: params.ResourceType,
 		ResourceId:   params.ResourceID,
 		Metadata:     params.Metadata,
 	})
 	if err != nil {
-		return source.FetchResourceResult{}, err
+		return FetchResourceResult{}, err
 	}
 	if resp.Data == nil {
-		return source.FetchResourceResult{}, nil
+		return FetchResourceResult{}, nil
 	}
-	return source.FetchResourceResult{Data: resp.Data.AsMap()}, nil
+	return FetchResourceResult{Data: resp.Data.AsMap()}, nil
 }
 
-func (p *GRPCProvider) FetchRelated(ctx context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
+func (p *GRPCProvider) FetchRelated(ctx context.Context, params FetchRelatedParams) (FetchRelatedResult, error) {
 	resp, err := p.client.FetchRelated(ctx, &pb.FetchRelatedRequest{
 		ResourceType: params.ResourceType,
 		Key: &pb.ResourceKey{
@@ -62,18 +61,17 @@ func (p *GRPCProvider) FetchRelated(ctx context.Context, params source.FetchRela
 		Metadata: params.Metadata,
 	})
 	if err != nil {
-		return source.FetchRelatedResult{}, err
+		return FetchRelatedResult{}, err
 	}
-	result := make([]source.RelatedResource, len(resp.RelatedResources))
+	result := make([]RelatedResource, len(resp.RelatedResources))
 	for i, s := range resp.RelatedResources {
-		rr := source.RelatedResource{
+		result[i] = RelatedResource{
 			ID:      s.ResourceId,
 			Data:    s.Data.AsMap(),
 			Version: s.Version,
 		}
-		result[i] = rr
 	}
-	return source.FetchRelatedResult{Related: result}, nil
+	return FetchRelatedResult{Related: result}, nil
 }
 
 // Close releases the underlying gRPC connection.
@@ -81,7 +79,7 @@ func (p *GRPCProvider) Close() error {
 	return p.conn.Close()
 }
 
-func (p *GRPCProvider) ListResources(ctx context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {
+func (p *GRPCProvider) ListResources(ctx context.Context, params ListResourcesParams) (ListResourcesResult, error) {
 	resp, err := p.client.ListResources(ctx, &pb.ListResourcesRequest{
 		ResourceType: params.ResourceType,
 		PageToken:    params.PageToken,
@@ -89,21 +87,21 @@ func (p *GRPCProvider) ListResources(ctx context.Context, params source.ListReso
 		Metadata:     params.Metadata,
 	})
 	if err != nil {
-		return source.ListResourcesResult{}, err
+		return ListResourcesResult{}, err
 	}
 
-	resources := make([]source.ListedResource, len(resp.Resources))
+	resources := make([]ListedResource, len(resp.Resources))
 	for i, r := range resp.Resources {
 		var data map[string]any
 		if r.Data != nil {
 			data = r.Data.AsMap()
 		}
-		resources[i] = source.ListedResource{
+		resources[i] = ListedResource{
 			ID:   r.ResourceId,
 			Data: data,
 		}
 	}
-	return source.ListResourcesResult{
+	return ListResourcesResult{
 		Resources:     resources,
 		NextPageToken: resp.NextPageToken,
 	}, nil

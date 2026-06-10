@@ -6,9 +6,23 @@ import (
 	"time"
 
 	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/source"
-	"github.com/theleeeo/indexer/gen/search/v1"
+	"github.com/theleeeo/indexer/app/source"
+	
 )
+
+// sourceList extracts a []any from a hit's Source map.
+func sourceList(src map[string]any, key string) []any {
+	v, _ := src[key].([]any)
+	return v
+}
+
+// fieldStr extracts a string field from an element returned by sourceList.
+func fieldStr(item any, key string) string {
+	m, _ := item.(map[string]any)
+	s, _ := m[key].(string)
+	return s
+}
+
 
 // resourceTracked reports whether (resourceType, resourceID) is present in the
 // resources table.
@@ -58,25 +72,25 @@ func (t *TestSuite) Test_Resource_CRUD_OneIndex() {
 	})
 
 	t.Run("no query or filters", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 2)
-		t.Require().Equal("1", resp.Hits[0].Id)
-		t.Require().Equal("2", resp.Hits[1].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
+		t.Require().Equal("2", resp.Hits[1].ID)
 	})
 
 	t.Run("with query, string value", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a",
 			Query:    "value1",
 		})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
 	})
 
 	t.Run("with query, no matches", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a",
 			Query:    "false",
 		})
@@ -101,13 +115,13 @@ func (t *TestSuite) Test_Resource_CRUD_OneIndex() {
 
 		t.worker.Drain(t.T().Context())
 
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a",
 			Query:    "updated_value",
 		})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
 	})
 
 	t.Run("delete resource", func() {
@@ -122,10 +136,10 @@ func (t *TestSuite) Test_Resource_CRUD_OneIndex() {
 		t.Require().False(t.resourceTracked("a", "1"))
 		t.worker.Drain(t.T().Context())
 
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("2", resp.Hits[0].Id)
+		t.Require().Equal("2", resp.Hits[0].ID)
 	})
 
 	t.Run("delete non-existing resource", func() {
@@ -160,23 +174,23 @@ func (t *TestSuite) Test_Resource_CRUD_MultipleIndices() {
 	})
 
 	t.Run("search in index a", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
 	})
 
 	t.Run("search in index b", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "b"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "b"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("2", resp.Hits[0].Id)
+		t.Require().Equal("2", resp.Hits[0].ID)
 	})
 
 	t.Run("search in non existing index", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c"})
 		t.Require().EqualError(err, "unknown resource")
-		t.Require().Nil(resp)
+		t.Require().Empty(resp.Hits)
 	})
 
 	t.Run("delete resources", func() {
@@ -197,11 +211,11 @@ func (t *TestSuite) Test_Resource_CRUD_MultipleIndices() {
 	})
 
 	t.Run("verify deletions", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 0)
 
-		resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "b"})
+		resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "b"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 0)
 	})
@@ -223,15 +237,15 @@ func (t *TestSuite) Test_Create_WithRelation() {
 		t.Require().NoError(err)
 		t.worker.Drain(t.T().Context())
 
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
 
 		// The "b" field should be a list with one entry.
-		relations := resp.Hits[0].Source.Fields["b"].GetListValue().GetValues()
+		relations := sourceList(resp.Hits[0].Source, "b")
 		t.Require().Len(relations, 1)
-		t.Require().Equal("1", relations[0].GetStructValue().Fields["id"].GetStringValue())
+		t.Require().Equal("1", fieldStr(relations[0], "id"))
 	})
 }
 
@@ -264,13 +278,13 @@ func (t *TestSuite) Test_Create_ParentRelation_Already_Exists() {
 	t.worker.Drain(t.T().Context())
 
 	t.Run("verify relation on parent", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
-		relations := resp.Hits[0].Source.Fields["b"].GetListValue().GetValues()
+		t.Require().Equal("1", resp.Hits[0].ID)
+		relations := sourceList(resp.Hits[0].Source, "b")
 		t.Require().Len(relations, 1)
-		t.Require().Equal("1", relations[0].GetStructValue().Fields["id"].GetStringValue())
+		t.Require().Equal("1", fieldStr(relations[0], "id"))
 	})
 }
 
@@ -309,18 +323,18 @@ func (t *TestSuite) Test_RelatedRelations_FullGraph() {
 	t.worker.Drain(t.T().Context())
 
 	t.Run("verify c has both a and b relations", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
-		t.Require().Equal("1", resp.Hits[0].Id)
+		t.Require().Equal("1", resp.Hits[0].ID)
 
-		aRels := resp.Hits[0].Source.Fields["a"].GetListValue().GetValues()
+		aRels := sourceList(resp.Hits[0].Source, "a")
 		t.Require().Len(aRels, 1)
-		t.Require().Equal("1", aRels[0].GetStructValue().Fields["id"].GetStringValue())
+		t.Require().Equal("1", fieldStr(aRels[0], "id"))
 
-		bRels := resp.Hits[0].Source.Fields["b"].GetListValue().GetValues()
+		bRels := sourceList(resp.Hits[0].Source, "b")
 		t.Require().Len(bRels, 1)
-		t.Require().Equal("1", bRels[0].GetStructValue().Fields["id"].GetStringValue())
+		t.Require().Equal("1", fieldStr(bRels[0], "id"))
 	})
 }
 
@@ -362,13 +376,13 @@ func (t *TestSuite) Test_ChildUpdate_Rebuilds_Parent() {
 	t.Require().Equal(int64(2), t.resourceRebuildCounter("c", "1"))
 
 	t.Run("verify c sees updated a data", func() {
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c"})
 		t.Require().NoError(err)
 		t.Require().Len(resp.Hits, 1)
 
-		aRels := resp.Hits[0].Source.Fields["a"].GetListValue().GetValues()
+		aRels := sourceList(resp.Hits[0].Source, "a")
 		t.Require().Len(aRels, 1)
-		t.Require().Equal("aval_updated", aRels[0].GetStructValue().Fields["f1"].GetStringValue())
+		t.Require().Equal("aval_updated", fieldStr(aRels[0], "f1"))
 	})
 }
 
@@ -406,19 +420,19 @@ func (t *TestSuite) Test_Rebuild_SpecificIDs() {
 	t.worker.Drain(t.T().Context())
 
 	// Resource "1" should have updated data; "2" should be unchanged.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a", Query: "updated1",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("1", resp.Hits[0].Id)
+	t.Require().Equal("1", resp.Hits[0].ID)
 
-	resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a", Query: "original2",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("2", resp.Hits[0].Id)
+	t.Require().Equal("2", resp.Hits[0].ID)
 }
 
 // Test_Rebuild_All triggers a full rebuild of all resources of a type
@@ -458,24 +472,24 @@ func (t *TestSuite) Test_Rebuild_All() {
 	t.worker.Drain(t.T().Context())
 
 	// Both resources should reflect the updated source data.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 2)
 
 	// Verify by searching for the new values.
-	resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a", Query: "rebuilt1",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("1", resp.Hits[0].Id)
+	t.Require().Equal("1", resp.Hits[0].ID)
 
-	resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a", Query: "rebuilt2",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("2", resp.Hits[0].Id)
+	t.Require().Equal("2", resp.Hits[0].ID)
 }
 
 // Test_Rebuild_UnknownResource verifies that rebuilding an unknown resource type
@@ -510,14 +524,14 @@ func (t *TestSuite) Test_Rebuild_WithRelations() {
 	t.worker.Drain(t.T().Context())
 
 	// Verify the relation is populated in the search result.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
 
-	bRels := resp.Hits[0].Source.Fields["b"].GetListValue().GetValues()
+	bRels := sourceList(resp.Hits[0].Source, "b")
 	t.Require().Len(bRels, 1)
-	t.Require().Equal("b1", bRels[0].GetStructValue().Fields["id"].GetStringValue())
-	t.Require().Equal("bval", bRels[0].GetStructValue().Fields["field1"].GetStringValue())
+	t.Require().Equal("b1", fieldStr(bRels[0], "id"))
+	t.Require().Equal("bval", fieldStr(bRels[0], "field1"))
 }
 
 // Test_Rebuild_All_WithRelations verifies that a "rebuild all" via the plan's
@@ -540,13 +554,13 @@ func (t *TestSuite) Test_Rebuild_All_WithRelations() {
 	t.worker.Drain(t.T().Context())
 
 	// Verify.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "a"})
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
 
-	bRels := resp.Hits[0].Source.Fields["b"].GetListValue().GetValues()
+	bRels := sourceList(resp.Hits[0].Source, "b")
 	t.Require().Len(bRels, 1)
-	t.Require().Equal("b1", bRels[0].GetStructValue().Fields["id"].GetStringValue())
+	t.Require().Equal("b1", fieldStr(bRels[0], "id"))
 }
 
 // Test_Rebuild_EmptySelectors verifies that passing no selectors returns an error.
@@ -622,7 +636,7 @@ func (t *TestSuite) Test_VersionControl() {
 		t.worker.Drain(t.T().Context())
 		t.Require().Equal(int64(2), t.resourceRebuildCounter("a", "1"))
 
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a", Query: "v2_data",
 		})
 		t.Require().NoError(err)
@@ -675,7 +689,7 @@ func (t *TestSuite) Test_VersionControl() {
 		t.worker.Drain(t.T().Context())
 		t.Require().Equal(int64(3), t.resourceRebuildCounter("a", "1"))
 
-		resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a", Query: "no_version_data",
 		})
 		t.Require().NoError(err)
@@ -775,15 +789,15 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 
 	t.Require().Equal(int64(3), t.resourceVersion("a", "1"))
 
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v3_latest",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("1", resp.Hits[0].Id)
+	t.Require().Equal("1", resp.Hits[0].ID)
 
-	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v2_stale",
 	})
@@ -862,15 +876,15 @@ func (t *TestSuite) Test_ConcurrentRequests_MultipleVersions_ConvergeToLatest() 
 
 	t.Require().Equal(int64(maxVersion+1), t.resourceVersion("a", "1"))
 
-	latestResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	latestResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v10_latest",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(latestResp.Hits, 1)
-	t.Require().Equal("1", latestResp.Hits[0].Id)
+	t.Require().Equal("1", latestResp.Hits[0].ID)
 
-	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v_concurrent",
 	})
@@ -928,7 +942,7 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		resp, searchErr := t.idx.Search(t.T().Context(), &search.SearchRequest{
+		resp, searchErr := t.idx.Search(t.T().Context(), core.SearchRequest{
 			Resource: "a",
 			Query:    "v3_new",
 		})
@@ -951,14 +965,14 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 
 	t.Require().Equal(int64(3), t.resourceVersion("a", "1"))
 
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v3_new",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
 
-	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v2_old",
 	})
@@ -1040,21 +1054,21 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 
 	t.worker.Drain(t.T().Context())
 
-	latestResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	latestResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "c",
 		Query:    "c_latest",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(latestResp.Hits, 1)
 
-	staleRespA, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleRespA, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "c",
 		Query:    "c_from_a",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(staleRespA.Hits, 0)
 
-	staleRespB, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleRespB, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "c",
 		Query:    "c_from_b",
 	})
@@ -1128,27 +1142,27 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.worker.Drain(t.T().Context())
 
 	// c must converge to the latest a relation data.
-	resp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{Resource: "c"})
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c"})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("1", resp.Hits[0].Id)
+	t.Require().Equal("1", resp.Hits[0].ID)
 
-	aRels := resp.Hits[0].Source.Fields["a"].GetListValue().GetValues()
+	aRels := sourceList(resp.Hits[0].Source, "a")
 	t.Require().Len(aRels, 1)
-	t.Require().Equal("1", aRels[0].GetStructValue().Fields["id"].GetStringValue())
-	t.Require().Equal("a_v2", aRels[0].GetStructValue().Fields["f1"].GetStringValue())
+	t.Require().Equal("1", fieldStr(aRels[0], "id"))
+	t.Require().Equal("a_v2", fieldStr(aRels[0], "f1"))
 
 	// Search for new A field works
-	resp, err = t.idx.Search(t.T().Context(), &search.SearchRequest{
+	resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "c",
 		Query:    "a_v2",
 	})
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
-	t.Require().Equal("1", resp.Hits[0].Id)
+	t.Require().Equal("1", resp.Hits[0].ID)
 
 	// Search for old A field does not work
-	staleResp, err := t.idx.Search(t.T().Context(), &search.SearchRequest{
+	staleResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "c",
 		Query:    "a_v1",
 	})

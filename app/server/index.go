@@ -5,7 +5,7 @@ import (
 	"errors"
 
 	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/gen/index/v1"
+	"github.com/theleeeo/indexer/app/gen/index/v1"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

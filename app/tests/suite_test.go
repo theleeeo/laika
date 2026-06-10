@@ -18,7 +18,7 @@ import (
 	"github.com/theleeeo/indexer/app/dsl"
 	"github.com/theleeeo/indexer/core"
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/core/source"
+	"github.com/theleeeo/indexer/app/source"
 	"github.com/theleeeo/indexer/es"
 	"github.com/theleeeo/indexer/storage/postgres"
 
@@ -455,7 +455,7 @@ func (t *TestSuite) SetupSuite() {
 	}
 	t.pool = dbpool
 
-	appSchema, err := os.ReadFile(filepath.Join("..", "store", "pg_schema.sql"))
+	appSchema, err := os.ReadFile(filepath.Join("..", "..", "storage", "postgres", "pg_schema.sql"))
 	if err != nil {
 		t.T().Fatal(err)
 	}
@@ -540,7 +540,7 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 	// Create versioned indexes and aliases for each resource.
 	for _, cfg := range resources {
 		for _, vc := range cfg.Versions {
-			indexName := es.IndexName(cfg.Resource, vc.Version)
+			indexName := core.IndexName(cfg.Resource, vc.Version)
 			mapping := es.GenerateMapping(&vc)
 			body, err := json.Marshal(mapping)
 			t.Require().NoError(err)
@@ -555,8 +555,8 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 		}
 
 		// Set up read alias.
-		aliasName := es.AliasName(cfg.Resource)
-		targetIndex := es.IndexName(cfg.Resource, cfg.ReadVersion)
+		aliasName := core.AliasName(cfg.Resource)
+		targetIndex := core.IndexName(cfg.Resource, cfg.ReadVersion)
 
 		aliasBody := map[string]any{
 			"actions": []any{

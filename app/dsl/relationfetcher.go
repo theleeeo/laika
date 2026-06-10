@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/core/source"
+	"github.com/theleeeo/indexer/app/source"
 	"github.com/theleeeo/indexer/projection"
 )
 

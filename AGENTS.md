@@ -11,23 +11,30 @@
 
 ## Core Flow
 
-1. `server` translates gRPC requests into `core.Notification`.
+1. `app/server` translates gRPC requests into `core.Notification`.
 2. `core.Indexer.RegisterChange` updates `store` and finds affected roots.
 3. `core` enqueues River jobs.
 4. Workers call `Indexer.Build`.
-5. Build fetches data through `source.Provider`, writes ES, updates relations.
+5. Build executes `projection.Plan` (which calls `source.Provider`), writes ES via `SearchBackend`, updates relations.
 
-Search path: `server/SearcherServer` -> `core.Indexer.Search` -> `es.Client.Search`.
+Search path: `app/server/SearcherServer` -> `core.Indexer.Search` -> `SearchBackend.Search`.
+
+## Module Layout
+
+- Root module (core library): `core/`, `projection/`, `model/`, `core/resource/`, `es/`
+- `./app`: gRPC wiring (`server/`, `source/`, `gen/`), YAML DSL, entry points, integration tests
+- `./aggregation`: aggregation execution library
+- `./storage/postgres`: Postgres Store implementation
 
 ## Key Packages
 
-- `core/`: orchestration, workers, rebuild/search entry points.
-- `projection/`: build denormalized root documents and resolve affected roots.
-- `store/`: Postgres resource state + parent/child relation graph.
-- `resource/`: resource/version DSL (`resources.yml`) + validation.
-- `source/`: provider interface + gRPC provider implementation.
-- `es/`: ES CRUD/search client + mapping generation.
-- `server/`: thin gRPC adapters.
+- `core/`: orchestration, workers, `SearchBackend` interface, `IndexName`/`AliasName`.
+- `projection/`: `Plan` type and `BuildDoc` — aggregation result.
+- `core/resource/`: resource/version DSL types.
+- `es/`: `SearchBackend` implementation + mapping generation.
+- `app/source/`: `Provider` interface + gRPC implementation.
+- `app/server/`: thin gRPC adapters; translates proto ↔ core types.
+- `app/dsl/`: builds `projection.Plan` trees from resource config + Provider.
 
 ## Critical Invariants
 
@@ -35,30 +42,34 @@ Search path: `server/SearcherServer` -> `core.Indexer.Search` -> `es.Client.Sear
 - No per-resource serialization guarantee; concurrent rebuilds can happen.
 - Rebuild writes use ES OCC with `external_gte` and `resources.build_idx`.
 - `Version > 0` in notifications enables stale-version rejection.
-- Relation graph drives reindex fanout (`AffectedRoots`), not static config lookups.
+- Relation graph drives reindex fanout, not static config lookups.
 - `BuildRequest.ResourceID == ""` means full listing mode (`ListResources` with pagination).
+- `core.Indexer` never calls `source.Provider` directly — it only executes plans.
 
 ## Config and Interfaces
 
 - App config: `indexer.yml` (override with `APP_CONFIG_PATH`).
 - Resource DSL: `resources.yml` (override with `RESOURCE_CONFIG_PATH`).
 - Provider plugin: gRPC `ProviderService`.
-- Generated protobuf code is under `gen/` (refresh with `buf generate`).
+- Generated protobuf code is under `app/gen/` (refresh with `buf generate`).
 
 ## Commands
 
 ```bash
-# required for this repo
-GOEXPERIMENT=jsonv2 go run ./cmd/indexer
+# run the app
+GOEXPERIMENT=jsonv2 go run ./app/cmd/indexer
 
 # mapping generation
-go run ./cmd/gen-mapping -config resources.yml
+go run ./app/cmd/gen-mapping -config resources.yml
 
 # regenerate protobuf bindings
 buf generate
 
-# tests (Docker required for testcontainers)
-GOEXPERIMENT=jsonv2 go test ./...
+# unit tests (no Docker)
+GOEXPERIMENT=jsonv2 go test ./core/... ./es/... ./app/server/... ./app/dsl/...
+
+# integration tests (Docker required)
+GOEXPERIMENT=jsonv2 go test ./app/tests/...
 ```
 
 ## Change Rules
