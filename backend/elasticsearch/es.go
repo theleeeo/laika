@@ -14,8 +14,6 @@ import (
 	"github.com/theleeeo/indexer/core"
 )
 
-var ErrNotFound = fmt.Errorf("document not found")
-
 type Client struct {
 	es *esv8.Client
 
@@ -148,35 +146,4 @@ func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) error {
 	}
 	slog.Info("bulk upserted docs", "count", len(items))
 	return nil
-}
-
-func (c *Client) Get(ctx context.Context, indexAlias, docID string, includeFields []string) (map[string]any, error) {
-	res, err := c.es.Get(
-		indexAlias,
-		docID,
-		c.es.Get.WithContext(ctx),
-		c.es.Get.WithSourceIncludes(includeFields...),
-	)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-
-	if res.StatusCode == 404 {
-		return nil, nil
-	}
-
-	if res.IsError() {
-		b, _ := io.ReadAll(res.Body)
-		return nil, fmt.Errorf("es error: %s %s", res.Status(), string(b))
-	}
-
-	var getRes struct {
-		Source map[string]any `json:"_source"`
-	}
-	if err := json.UnmarshalRead(res.Body, &getRes); err != nil {
-		return nil, err
-	}
-
-	return getRes.Source, nil
 }
