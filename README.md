@@ -1,5 +1,7 @@
 # Laika
 
+<img src="laika_logo.svg" alt="Laika logo" width="200" />
+
 **L**eos **AI**-powered **K**onfigurable **A**ggregator
 
 Laika is a distributed search indexing engine that keeps Elasticsearch documents automatically in sync with your upstream services. It listens for change notifications over gRPC, resolves which search documents are affected, fetches the latest data from your services, and rebuilds the relevant Elasticsearch documents — all concurrently and safely across multiple instances.
@@ -236,3 +238,11 @@ GOEXPERIMENT=jsonv2 go test ./...
 | `./storage/postgres` | Postgres `Store` implementation (relation graph, resource versioning)     |
 
 Library consumers depend only on the root module (and `aggregation` / `storage` as needed). The `app` module wires everything into a deployable service.
+
+---
+
+## Disclaimer
+
+AI tools have been used during the development of this application.
+
+The Laika logo, however, was created by a human artist who was commissioned and paid for their work — it is not AI-generated.
