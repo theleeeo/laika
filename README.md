@@ -154,7 +154,7 @@ Laika exposes three gRPC services. Proto definitions live in `proto/`.
 | ------------------- | ----------------------------------------------------- |
 | `NotifyChange`      | Single resource change notification                   |
 | `NotifyChangeBatch` | Batch of change notifications                         |
-| `Rebuild`           | Trigger a full rebuild (paginated) of a resource type |
+| `Rebuild`           | Trigger a rebuild (paginated) of a resource type      |
 
 A notification carries the resource type, ID, change kind, and an optional monotonic version for stale-rejection.
 
@@ -175,7 +175,7 @@ Laika calls back into your service via this interface to fetch data during build
 | --------------- | ------------------------------------------------------ |
 | `FetchResource` | Fetch a single resource by type and ID                 |
 | `FetchRelated`  | Fetch resources related via a foreign key              |
-| `ListResources` | Paginated listing of all resources (for full rebuilds) |
+| `ListResources` | Paginated listing of all resources (for rebuilds)      |
 
 ---
 

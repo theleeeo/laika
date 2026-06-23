@@ -23,21 +23,21 @@ func (w *BuildWorker) Work(ctx context.Context, job *river.Job[BuildArgs]) error
 	return w.Idx.Build(ctx, job.Args)
 }
 
-type FullRebuildArgs struct {
+type RebuildArgs struct {
 	ResourceType string            `json:"resource_type"`
 	Versions     []int             `json:"versions"`
 	ResourceIDs  []string          `json:"resource_ids,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
-func (FullRebuildArgs) Kind() string { return "full_rebuild" }
+func (RebuildArgs) Kind() string { return "rebuild" }
 
-type FullRebuildWorker struct {
-	river.WorkerDefaults[FullRebuildArgs]
+type RebuildWorker struct {
+	river.WorkerDefaults[RebuildArgs]
 	Idx *Indexer
 }
 
-func (w *FullRebuildWorker) Work(ctx context.Context, job *river.Job[FullRebuildArgs]) error {
+func (w *RebuildWorker) Work(ctx context.Context, job *river.Job[RebuildArgs]) error {
 	return w.Idx.rebuild(ctx, job.Args)
 }
 
@@ -63,6 +63,6 @@ func (w *DeleteWorker) Work(ctx context.Context, job *river.Job[DeleteArgs]) err
 
 func RegisterWorkers(workers *river.Workers, idx *Indexer) {
 	river.AddWorker(workers, &BuildWorker{Idx: idx})
-	river.AddWorker(workers, &FullRebuildWorker{Idx: idx})
+	river.AddWorker(workers, &RebuildWorker{Idx: idx})
 	river.AddWorker(workers, &DeleteWorker{Idx: idx})
 }

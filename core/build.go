@@ -138,14 +138,14 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	return nil
 }
 
-func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
+func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs) error {
 	if len(params.ResourceIDs) > 0 {
 		return idx.rebuildByIDs(ctx, params)
 	}
 	return idx.rebuildAll(ctx, params)
 }
 
-func (idx *Indexer) rebuildByIDs(ctx context.Context, params FullRebuildArgs) error {
+func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
 	plans := idx.plans[params.ResourceType]
@@ -255,7 +255,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params FullRebuildArgs) er
 	return nil
 }
 
-func (idx *Indexer) rebuildAll(ctx context.Context, params FullRebuildArgs) error {
+func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
 	plans := idx.plans[params.ResourceType]

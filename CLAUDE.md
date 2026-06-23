@@ -50,7 +50,7 @@ The repo uses Go workspaces (`go.work`) with four modules:
 
 1. gRPC client → `app/server` translates requests into `core.Notification`
 2. `core.Indexer.RegisterChange` updates Postgres state and finds affected Parent Resources via the Relation graph
-3. `core` enqueues River jobs (`build`, `delete`, `full_rebuild`)
+3. `core` enqueues River jobs (`build`, `delete`, `rebuild`)
 4. River workers call `Indexer.Build`
 5. A Build executes a `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend`, updates the Relation graph
 

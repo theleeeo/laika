@@ -34,7 +34,7 @@ type IndexServiceClient interface {
 	NotifyChange(ctx context.Context, in *NotifyChangeRequest, opts ...grpc.CallOption) (*NotifyChangeResponse, error)
 	// NotifyChangeBatch is the batched version of NotifyChange.
 	NotifyChangeBatch(ctx context.Context, in *NotifyChangeBatchRequest, opts ...grpc.CallOption) (*NotifyChangeBatchResponse, error)
-	// Rebuild triggers a full rebuild of one or more resource indices.
+	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.
 	Rebuild(ctx context.Context, in *RebuildRequest, opts ...grpc.CallOption) (*RebuildResponse, error)
 }
@@ -87,7 +87,7 @@ type IndexServiceServer interface {
 	NotifyChange(context.Context, *NotifyChangeRequest) (*NotifyChangeResponse, error)
 	// NotifyChangeBatch is the batched version of NotifyChange.
 	NotifyChangeBatch(context.Context, *NotifyChangeBatchRequest) (*NotifyChangeBatchResponse, error)
-	// Rebuild triggers a full rebuild of one or more resource indices.
+	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.
 	Rebuild(context.Context, *RebuildRequest) (*RebuildResponse, error)
 }

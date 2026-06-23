@@ -14,7 +14,7 @@ service IndexService {
   rpc NotifyChangeBatch(NotifyChangeBatchRequest)
       returns (NotifyChangeBatchResponse);
 
-  // Rebuild triggers a full rebuild of one or more resource indices.
+  // Rebuild triggers a rebuild of one or more resource indices.
   // Jobs are enqueued and processed asynchronously by the job queue.
   rpc Rebuild(RebuildRequest) returns (RebuildResponse);
 }

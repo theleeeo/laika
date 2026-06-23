@@ -5,7 +5,7 @@ Every build writes the resulting document to the index of _every_ active Schema 
 The migration model this enables:
 
 1. Add a v2 Schema Version to the YAML alongside the existing v1. Both indices receive writes from then on.
-2. Run a `full_rebuild` for v2 to backfill historical resources into `a_search_v2`.
+2. Run a `rebuild` for v2 to backfill historical resources into `a_search_v2`.
 3. Cut the read alias `a_search` from `a_search_v1` to `a_search_v2`. The cutover is instantaneous because v2 is already fully populated and warm.
 4. Drop v1 from the YAML once the cutover has been validated.
 

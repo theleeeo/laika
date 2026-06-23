@@ -38,7 +38,7 @@ type ProviderServiceClient interface {
 	// and key.
 	FetchRelated(ctx context.Context, in *FetchRelatedRequest, opts ...grpc.CallOption) (*FetchRelatedResponse, error)
 	// ListResources returns a paginated list of all resources of a given type.
-	// Used for full index rebuilds.
+	// Used for index rebuilds.
 	ListResources(ctx context.Context, in *ListResourcesRequest, opts ...grpc.CallOption) (*ListResourcesResponse, error)
 }
 
@@ -94,7 +94,7 @@ type ProviderServiceServer interface {
 	// and key.
 	FetchRelated(context.Context, *FetchRelatedRequest) (*FetchRelatedResponse, error)
 	// ListResources returns a paginated list of all resources of a given type.
-	// Used for full index rebuilds.
+	// Used for index rebuilds.
 	ListResources(context.Context, *ListResourcesRequest) (*ListResourcesResponse, error)
 }
 

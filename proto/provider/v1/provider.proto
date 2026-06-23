@@ -18,7 +18,7 @@ service ProviderService {
   rpc FetchRelated(FetchRelatedRequest) returns (FetchRelatedResponse);
 
   // ListResources returns a paginated list of all resources of a given type.
-  // Used for full index rebuilds.
+  // Used for index rebuilds.
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
 }
 

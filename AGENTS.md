@@ -8,7 +8,7 @@ Canonical vocabulary lives in [CONTEXT.md](CONTEXT.md); architectural decisions 
 
 - Input: gRPC Notifications.
 - Source of truth for dependency impact: Postgres Relation graph.
-- Execution: River jobs (`build`, `delete`, `full_rebuild`).
+- Execution: River jobs (`build`, `delete`, `rebuild`).
 - Output: ES upserts/deletes ordered by Build Sequence.
 
 ## Core Flow

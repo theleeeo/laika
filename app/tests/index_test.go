@@ -384,7 +384,7 @@ func (t *TestSuite) Test_ChildUpdate_Rebuilds_Parent() {
 	})
 }
 
-// Test_Rebuild_SpecificIDs triggers a full rebuild for specific resource IDs
+// Test_Rebuild_SpecificIDs triggers a rebuild for specific resource IDs
 // and verifies the documents are rebuilt in ES.
 func (t *TestSuite) Test_Rebuild_SpecificIDs() {
 	t.setResourceConfig(DefaultResourceConfig)
@@ -529,7 +529,7 @@ func (t *TestSuite) Test_Rebuild_MixedSelectors() {
 	t.Require().Len(respB.Hits, 2)
 }
 
-// Test_Rebuild_All triggers a full rebuild of all resources of a type
+// Test_Rebuild_All triggers a rebuild of all resources of a type
 // using the "rebuild all" path (empty resource IDs).
 func (t *TestSuite) Test_Rebuild_All() {
 	t.setResourceConfig(DefaultResourceConfig)
@@ -598,7 +598,7 @@ func (t *TestSuite) Test_Rebuild_UnknownResource() {
 	t.Require().ErrorIs(err, core.ErrUnknownResource)
 }
 
-// Test_Rebuild_WithRelations verifies that a full rebuild correctly populates
+// Test_Rebuild_WithRelations verifies that a rebuild correctly populates
 // related resources and persists the relation graph.
 func (t *TestSuite) Test_Rebuild_WithRelations() {
 	t.setResourceConfig(DefaultResourceConfig)
