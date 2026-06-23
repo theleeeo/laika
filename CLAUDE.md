@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Canonical vocabulary lives in [CONTEXT.md](CONTEXT.md); architectural decisions in [docs/adr/](docs/adr/). This file describes the codebase — where things live and how to run them — not the language.
+
 ## Commands
 
 All Go commands require the `GOEXPERIMENT=jsonv2` flag (Go 1.26.1).
@@ -28,7 +30,7 @@ buf generate
 
 ## Architecture
 
-This is a distributed search indexing engine that keeps Elasticsearch documents in sync with upstream service data via gRPC change notifications.
+This is a distributed search indexing engine that keeps Elasticsearch Documents in sync with upstream service data via gRPC Notifications.
 
 ### Module Structure
 
@@ -47,10 +49,10 @@ The repo uses Go workspaces (`go.work`) with four modules:
 ### Core Data Flow
 
 1. gRPC client → `app/server` translates requests into `core.Notification`
-2. `core.Indexer.RegisterChange` updates Postgres state and finds affected root resources via the relation graph
-3. `core` enqueues River jobs (`rebuild`, `delete`, `full_rebuild`)
+2. `core.Indexer.RegisterChange` updates Postgres state and finds affected Parent Resources via the Relation graph
+3. `core` enqueues River jobs (`build`, `delete`, `full_rebuild`)
 4. River workers call `Indexer.Build`
-5. Build executes `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend`, updates the relation graph
+5. A Build executes a `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend`, updates the Relation graph
 
 Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBackend.Search`
 
@@ -65,9 +67,9 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 | Package | Role |
 |---------|------|
 | `core/` | Orchestration: `Indexer`, workers, `SearchBackend` interface, `IndexName`/`AliasName` |
-| `core/resource/` | Resource/version DSL types and validation |
+| `core/resource/` | Resource/Schema-Version DSL types and validation |
 | `model/` | Primitive types (`Resource`, `VersionedResource`) |
-| `projection/` | `Plan` type and `BuildDoc` — the aggregation result flowing through plans |
+| `projection/` | `Plan` type and `BuildDoc` — the aggregation result flowing through Plans |
 | `es/` | `SearchBackend` implementation; mapping generation |
 | `app/source/` | `Provider` interface + gRPC implementation |
 | `app/server/` | Thin gRPC adapters; translates proto ↔ core types |
@@ -78,12 +80,12 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 
 ### Critical Invariants
 
-- **Distributed-safe**: multiple indexer instances run concurrently; no per-resource serialization guarantee.
-- **OCC on writes**: ES writes use `external_gte` version type with `resources.build_idx` to handle concurrent rebuilds safely.
-- **Stale-version rejection**: `Version > 0` in a change notification enables rejection; `0` means always accept.
-- **Relation graph drives fanout**: affected root resources are found by querying the Postgres relation graph, not static config.
-- **Full listing mode**: `BuildRequest.ResourceID == ""` triggers `ListResources` pagination (full rebuild).
-- **Plans encapsulate data fetching**: `core.Indexer` only executes plans; it never calls `source.Provider` directly. Library users supply their own plans.
+- **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).
+- **Build Sequence drives OCC**: every ES write carries the Resource's Build Sequence (stored in `resources.build_idx`) sent as the `external_gte` version, so concurrent Builds and Rebuilds of the same Document land in counter order.
+- **Stale Version rejection**: a Notification with `Version > 0` enables drop-on-stale; `0` means always accept.
+- **Relation graph drives fanout**: affected Parent Resources are found by querying the Postgres Relation graph, not static config.
+- **All-of-Type Rebuild path**: `BuildRequest.ResourceID == ""` triggers `ListResources` pagination — the Rebuild path that walks every Resource of a Type.
+- **Plans encapsulate data fetching**: `core.Indexer` only executes Plans; it never calls `source.Provider` directly. Library users supply their own Plans.
 
 ### Configuration
 
