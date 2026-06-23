@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 
-	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/laika/model"
 )
 
 type Relation struct {

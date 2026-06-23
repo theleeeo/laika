@@ -1,11 +1,11 @@
-module github.com/theleeeo/indexer
+module github.com/theleeeo/laika
 
 go 1.26.1
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/riverqueue/river v0.35.0
-	github.com/theleeeo/indexer/aggregation v0.0.0-20260606115642-72edb519ca64
+	github.com/theleeeo/laika/aggregation v0.0.0-20260606115642-72edb519ca64
 )
 
 require (

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`github.com/theleeeo/indexer` keeps Elasticsearch documents in sync with upstream service data.
+`github.com/theleeeo/laika` keeps Elasticsearch documents in sync with upstream service data.
 
 - Input: gRPC change notifications.
 - Source of truth for dependency impact: Postgres relation graph.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/theleeeo/indexer/app/gen/search/v1"
-	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/laika/app/gen/search/v1"
+	"github.com/theleeeo/laika/core"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -87,8 +87,8 @@ func searchResponseToProto(resp core.SearchResponse) *search.SearchResponse {
 			continue
 		}
 		hits = append(hits, &search.SearchHit{
-			Id:    h.ID,
-			Score: h.Score,
+			Id:     h.ID,
+			Score:  h.Score,
 			Source: st,
 		})
 	}

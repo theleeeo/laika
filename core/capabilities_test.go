@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 func TestGetCapabilities_Empty(t *testing.T) {

@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // captureSearch executes Search and returns the decoded JSON body that was

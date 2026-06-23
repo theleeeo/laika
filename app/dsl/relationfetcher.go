@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/app/source"
-	"github.com/theleeeo/indexer/projection"
+	"github.com/theleeeo/laika/app/source"
+	"github.com/theleeeo/laika/core/resource"
+	"github.com/theleeeo/laika/projection"
 )
 
 // relationFetcher implements aggregation.SubFetcher[BuildDoc].

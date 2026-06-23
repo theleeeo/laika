@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/theleeeo/indexer/app/dsl"
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/app/source"
-	"github.com/theleeeo/indexer/backend/elasticsearch"
-	"github.com/theleeeo/indexer/storage/postgres"
+	"github.com/theleeeo/laika/app/dsl"
+	"github.com/theleeeo/laika/app/source"
+	"github.com/theleeeo/laika/backend/elasticsearch"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
+	"github.com/theleeeo/laika/storage/postgres"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"

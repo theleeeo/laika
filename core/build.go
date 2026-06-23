@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/theleeeo/indexer/model"
-	"github.com/theleeeo/indexer/projection"
+	"github.com/theleeeo/laika/model"
+	"github.com/theleeeo/laika/projection"
 )
 
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/laika/model"
 )
 
 // RegisterChange handles a single change notification from a source service.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/model"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"

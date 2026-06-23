@@ -3,7 +3,7 @@ package core
 import (
 	"fmt"
 
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // GetCapabilities returns the search capabilities for all configured resources.

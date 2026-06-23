@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/app/gen/index/v1"
+	"github.com/theleeeo/laika/app/gen/index/v1"
+	"github.com/theleeeo/laika/core"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

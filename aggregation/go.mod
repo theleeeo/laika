@@ -1,4 +1,4 @@
-module github.com/theleeeo/indexer/aggregation
+module github.com/theleeeo/laika/aggregation
 
 go 1.26.1
 

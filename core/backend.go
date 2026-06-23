@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // SearchBackend is the interface that wraps the document-level operations

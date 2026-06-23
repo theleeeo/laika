@@ -5,9 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/app/source"
-	
+	"github.com/theleeeo/laika/app/source"
+	"github.com/theleeeo/laika/core"
 )
 
 // sourceList extracts a []any from a hit's Source map.
@@ -22,7 +21,6 @@ func fieldStr(item any, key string) string {
 	s, _ := m[key].(string)
 	return s
 }
-
 
 // resourceTracked reports whether (resourceType, resourceID) is present in the
 // resources table.

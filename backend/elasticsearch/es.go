@@ -11,7 +11,7 @@ import (
 	"time"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
-	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/laika/core"
 )
 
 type Client struct {

@@ -1,8 +1,8 @@
 package elasticsearch
 
 import (
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // GenerateMapping builds an Elasticsearch index mapping from a version config.

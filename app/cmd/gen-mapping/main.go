@@ -11,10 +11,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/theleeeo/indexer/app/config"
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/backend/elasticsearch"
+	"github.com/theleeeo/laika/app/config"
+	"github.com/theleeeo/laika/backend/elasticsearch"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 func main() {

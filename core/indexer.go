@@ -7,8 +7,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/riverqueue/river"
 
-	"github.com/theleeeo/indexer/core/resource"
-	"github.com/theleeeo/indexer/projection"
+	"github.com/theleeeo/laika/core/resource"
+	"github.com/theleeeo/laika/projection"
 )
 
 var (

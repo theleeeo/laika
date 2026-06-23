@@ -11,8 +11,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/theleeeo/indexer/app/config"
-	"github.com/theleeeo/indexer/core"
+	"github.com/theleeeo/laika/app/config"
+	"github.com/theleeeo/laika/core"
 )
 
 func main() {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	pb "github.com/theleeeo/indexer/app/gen/provider/v1"
+	pb "github.com/theleeeo/laika/app/gen/provider/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )

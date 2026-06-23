@@ -3,8 +3,8 @@ package projection
 import (
 	"context"
 
-	"github.com/theleeeo/indexer/aggregation"
-	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/laika/aggregation"
+	"github.com/theleeeo/laika/model"
 )
 
 // BuildRequest is the request parameter for the aggregation plan.

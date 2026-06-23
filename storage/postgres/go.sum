@@ -53,10 +53,10 @@ github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UV
 github.com/stretchr/testify v1.7.0/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/h/Wwjteg=
 github.com/stretchr/testify v1.11.1 h1:7s2iGBzp5EwR7/aIZr8ao5+dra3wiQyKjjFuvgVKu7U=
 github.com/stretchr/testify v1.11.1/go.mod h1:wZwfW3scLgRK+23gO65QZefKpKQRnfz6sD981Nm4B6U=
-github.com/theleeeo/indexer v0.0.0-20260606115642-72edb519ca64 h1:chjezcYCfuhrVcUdaWNCMNO/I0VWaQnawMTPvgDXc14=
-github.com/theleeeo/indexer v0.0.0-20260606115642-72edb519ca64/go.mod h1:8I3lkkGePuqBjc57dFU6t14LSasbutGNt9MaIcPdSxs=
-github.com/theleeeo/indexer/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6 h1:ECAqO+yu9aO3M0bmKUZcDmzb3dztT97pWHsZL1yJKu0=
-github.com/theleeeo/indexer/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6/go.mod h1:5R/fqrzkfJxqWj4Pr+n/gNtQC9CBoQOXUdd2QJoeRsU=
+github.com/theleeeo/laika v0.0.0-20260606115642-72edb519ca64 h1:chjezcYCfuhrVcUdaWNCMNO/I0VWaQnawMTPvgDXc14=
+github.com/theleeeo/laika v0.0.0-20260606115642-72edb519ca64/go.mod h1:8I3lkkGePuqBjc57dFU6t14LSasbutGNt9MaIcPdSxs=
+github.com/theleeeo/laika/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6 h1:ECAqO+yu9aO3M0bmKUZcDmzb3dztT97pWHsZL1yJKu0=
+github.com/theleeeo/laika/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6/go.mod h1:5R/fqrzkfJxqWj4Pr+n/gNtQC9CBoQOXUdd2QJoeRsU=
 github.com/tidwall/gjson v1.14.2/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=
 github.com/tidwall/gjson v1.18.0 h1:FIDeeyB800efLX89e5a8Y0BNH+LOngJyGrIWxG2FKQY=
 github.com/tidwall/gjson v1.18.0/go.mod h1:/wbyibRr2FHMks5tjHJ5F8dMZh3AcwJEMf5vlfC0lxk=

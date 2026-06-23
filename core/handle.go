@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/theleeeo/indexer/model"
+	"github.com/theleeeo/laika/model"
 )
 
 // RebuildPayload is used as the payload for delete jobs and as the parameter

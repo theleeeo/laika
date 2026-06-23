@@ -8,8 +8,8 @@ import (
 	"io"
 	"time"
 
-	"github.com/theleeeo/indexer/core"
-	"github.com/theleeeo/indexer/core/resource"
+	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias string, vc *resource.VersionConfig) (core.SearchResponse, error) {

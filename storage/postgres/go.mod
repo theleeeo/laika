@@ -1,10 +1,10 @@
-module github.com/theleeeo/indexer/storage/postgres
+module github.com/theleeeo/laika/storage/postgres
 
 go 1.26.1
 
 require (
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/theleeeo/indexer v0.0.0-20260606115642-72edb519ca64
+	github.com/theleeeo/laika v0.0.0-20260606115642-72edb519ca64
 )
 
 require (
@@ -23,7 +23,7 @@ require (
 	github.com/riverqueue/river/rivershared v0.35.0 // indirect
 	github.com/riverqueue/river/rivertype v0.35.0 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
-	github.com/theleeeo/indexer/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6 // indirect
+	github.com/theleeeo/laika/pkg/aggregation v0.0.0-20260606114001-ec5dd6871ca6 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect

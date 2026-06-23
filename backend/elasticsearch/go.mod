@@ -1,10 +1,10 @@
-module github.com/theleeeo/indexer/backend/elasticsearch
+module github.com/theleeeo/laika/backend/elasticsearch
 
 go 1.26.1
 
 require (
 	github.com/elastic/go-elasticsearch/v8 v8.15.0
-	github.com/theleeeo/indexer v0.0.0-20260609200814-268883890081
+	github.com/theleeeo/laika v0.0.0-20260609200814-268883890081
 )
 
 require (
@@ -22,7 +22,7 @@ require (
 	github.com/riverqueue/river/rivershared v0.35.0 // indirect
 	github.com/riverqueue/river/rivertype v0.35.0 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
-	github.com/theleeeo/indexer/aggregation v0.0.0-20260606115642-72edb519ca64 // indirect
+	github.com/theleeeo/laika/aggregation v0.0.0-20260606115642-72edb519ca64 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
