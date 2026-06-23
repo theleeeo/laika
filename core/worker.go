@@ -26,6 +26,7 @@ func (w *BuildWorker) Work(ctx context.Context, job *river.Job[BuildArgs]) error
 type FullRebuildArgs struct {
 	ResourceType string            `json:"resource_type"`
 	Versions     []int             `json:"versions"`
+	ResourceIDs  []string          `json:"resource_ids,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 

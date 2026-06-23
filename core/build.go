@@ -139,6 +139,123 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 }
 
 func (idx *Indexer) rebuild(ctx context.Context, params FullRebuildArgs) error {
+	if len(params.ResourceIDs) > 0 {
+		return idx.rebuildByIDs(ctx, params)
+	}
+	return idx.rebuildAll(ctx, params)
+}
+
+func (idx *Indexer) rebuildByIDs(ctx context.Context, params FullRebuildArgs) error {
+	logger := slog.With(slog.String("type", params.ResourceType))
+
+	plans := idx.plans[params.ResourceType]
+	if len(plans) == 0 {
+		return fmt.Errorf("no plans for resource type %q", params.ResourceType)
+	}
+
+	resourceRelations := make(map[string][]model.VersionedResource)
+	var items []BulkItem
+	var failed int
+
+	for _, id := range params.ResourceIDs {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		root := model.Resource{Type: params.ResourceType, Id: id}
+
+		if err := idx.st.RemoveResource(ctx, root); err != nil {
+			logger.Warn("failed to remove relations", slog.String("id", id), slog.String("error", err.Error()))
+			failed++
+			continue
+		}
+
+		occVersion, err := idx.st.NextRebuildCounter(ctx, root)
+		if err != nil {
+			logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+			failed++
+			continue
+		}
+
+		skipRelations := false
+		for _, plan := range plans {
+			if plan.Executer == nil {
+				continue
+			}
+			ch := plan.Execute(ctx, projection.BuildRequest{
+				ResourceType: params.ResourceType,
+				ResourceID:   id,
+				Metadata:     params.Metadata,
+			})
+
+			var result projection.BuildDoc
+			var planErr error
+			for r := range ch {
+				if r.Err != nil {
+					planErr = r.Err
+					break
+				}
+				if len(r.Items) > 0 {
+					result = r.Items[0]
+					break
+				}
+			}
+			if planErr != nil {
+				logger.Warn("plan execution failed", slog.String("id", id), slog.Int("plan_version", plan.Version), slog.String("error", planErr.Error()))
+				failed++
+				skipRelations = true
+				break
+			}
+
+			// Source returned no data — delete from all versions and stop processing this ID.
+			if result.Doc == nil {
+				if err := idx.handleDelete(ctx, RebuildPayload{
+					ResourceType: params.ResourceType,
+					ResourceID:   id,
+				}); err != nil {
+					logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
+					failed++
+				}
+				skipRelations = true
+				break
+			}
+
+			resourceRelations[id] = append(resourceRelations[id], result.Relations...)
+			items = append(items, BulkItem{
+				Index:   IndexName(params.ResourceType, plan.Version),
+				ID:      id,
+				Doc:     result.Doc,
+				Version: occVersion,
+			})
+		}
+
+		if skipRelations {
+			delete(resourceRelations, id)
+		}
+	}
+
+	if len(items) > 0 {
+		if err := idx.es.BulkUpsert(ctx, items); err != nil {
+			return fmt.Errorf("bulk upsert: %w", err)
+		}
+	}
+
+	for id, rels := range resourceRelations {
+		plain := make([]model.Resource, len(rels))
+		for i, r := range rels {
+			plain[i] = r.Resource
+		}
+		if err := idx.st.AddChildResources(ctx, model.Resource{Type: params.ResourceType, Id: id}, plain); err != nil {
+			logger.Warn("failed to persist relations", slog.String("id", id), slog.String("error", err.Error()))
+			failed++
+		}
+	}
+
+	logger.Info("targeted rebuild complete", slog.Int("total", len(params.ResourceIDs)), slog.Int("failed", failed))
+	return nil
+}
+
+func (idx *Indexer) rebuildAll(ctx context.Context, params FullRebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
 	plans := idx.plans[params.ResourceType]

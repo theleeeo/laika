@@ -39,6 +39,26 @@ type FakeProvider struct {
 	resources  map[string]map[string]any           // "type|id" -> data
 	relations  map[string][]source.RelatedResource // "type|key" -> []RelatedResource
 	fetchGates map[string]*fetchGate
+
+	fetchResourceCount int
+	listResourcesCount int
+}
+
+// CallCounts returns the number of times FetchResource and ListResources have
+// been called. Counters are reset at the start of each test by Clear, and can
+// be reset mid-test with ResetCallCounts.
+func (f *FakeProvider) CallCounts() (fetchResource, listResources int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetchResourceCount, f.listResourcesCount
+}
+
+// ResetCallCounts zeros the provider call counters without touching data.
+func (f *FakeProvider) ResetCallCounts() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fetchResourceCount = 0
+	f.listResourcesCount = 0
 }
 
 type fetchGate struct {
@@ -50,6 +70,8 @@ type fetchGate struct {
 func (f *FakeProvider) ListResources(ctx context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
+	f.listResourcesCount++
 
 	var resources []source.ListedResource
 	prefix := params.ResourceType + "|"
@@ -89,6 +111,8 @@ func (f *FakeProvider) Clear() {
 	}
 	f.resources = make(map[string]map[string]any)
 	f.relations = make(map[string][]source.RelatedResource)
+	f.fetchResourceCount = 0
+	f.listResourcesCount = 0
 }
 
 // SetFetchGate blocks matching FetchResource calls until ReleaseFetchGate is
@@ -188,6 +212,7 @@ func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResou
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.fetchResourceCount++
 	data, ok := f.resources[params.ResourceType+"|"+params.ResourceID]
 	if !ok {
 		return source.FetchResourceResult{}, nil

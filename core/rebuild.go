@@ -34,6 +34,7 @@ func (idx *Indexer) Rebuild(ctx context.Context, selectors []ResourceSelector) e
 		if _, err := idx.river.Insert(ctx, FullRebuildArgs{
 			ResourceType: sel.ResourceType,
 			Versions:     sel.Versions,
+			ResourceIDs:  sel.ResourceIDs,
 			// TODO: Should we allow passing metadata for full rebuilds?
 			Metadata: nil,
 		}, nil); err != nil {

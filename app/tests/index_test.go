@@ -411,11 +411,16 @@ func (t *TestSuite) Test_Rebuild_SpecificIDs() {
 	})
 
 	// Rebuild only resource "1".
+	t.fakeProvider.ResetCallCounts()
 	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a", ResourceIDs: []string{"1"}},
 	})
 	t.Require().NoError(err)
 	t.worker.Drain(t.T().Context())
+
+	fetchCount, listCount := t.fakeProvider.CallCounts()
+	t.Require().Equal(0, listCount, "targeted rebuild must not call ListResources")
+	t.Require().GreaterOrEqual(fetchCount, 1, "targeted rebuild must call FetchResource at least once")
 
 	// Resource "1" should have updated data; "2" should be unchanged.
 	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
@@ -431,6 +436,97 @@ func (t *TestSuite) Test_Rebuild_SpecificIDs() {
 	t.Require().NoError(err)
 	t.Require().Len(resp.Hits, 1)
 	t.Require().Equal("2", resp.Hits[0].ID)
+}
+
+// Test_Rebuild_FewIDs rebuilds two specific IDs out of three and asserts that
+// only those two are rebuilt via FetchResource — ListResources must not be
+// touched and the un-targeted ID stays at its prior state.
+func (t *TestSuite) Test_Rebuild_FewIDs() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	for _, id := range []string{"1", "2", "3"} {
+		t.fakeProvider.SetResource("a", id, map[string]any{"id": id, "field1": "original" + id})
+		err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a", ResourceID: id, Kind: core.ChangeCreated,
+		})
+		t.Require().NoError(err)
+	}
+	t.worker.Drain(t.T().Context())
+
+	// Mutate source for all three; only IDs 1 and 2 will be rebuilt.
+	for _, id := range []string{"1", "2", "3"} {
+		t.fakeProvider.SetResource("a", id, map[string]any{"id": id, "field1": "rebuilt" + id})
+	}
+
+	t.fakeProvider.ResetCallCounts()
+	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+		{ResourceType: "a", ResourceIDs: []string{"1", "2"}},
+	})
+	t.Require().NoError(err)
+	t.worker.Drain(t.T().Context())
+
+	fetchCount, listCount := t.fakeProvider.CallCounts()
+	t.Require().Equal(0, listCount, "few-id rebuild must not call ListResources")
+	t.Require().GreaterOrEqual(fetchCount, 2, "few-id rebuild must call FetchResource for each ID")
+
+	for _, id := range []string{"1", "2"} {
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
+			Resource: "a", Query: "rebuilt" + id,
+		})
+		t.Require().NoError(err)
+		t.Require().Len(resp.Hits, 1)
+		t.Require().Equal(id, resp.Hits[0].ID)
+	}
+
+	// ID 3 was not rebuilt, so the index still has the original value.
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
+		Resource: "a", Query: "original3",
+	})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1)
+	t.Require().Equal("3", resp.Hits[0].ID)
+}
+
+// Test_Rebuild_MixedSelectors rebuilds [{a, ids: [1, 2]}, {b, no ids}] in one
+// call and asserts each selector takes the correct provider path.
+func (t *TestSuite) Test_Rebuild_MixedSelectors() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "aval1"})
+	t.fakeProvider.SetResource("a", "2", map[string]any{"id": "2", "field1": "aval2"})
+	t.fakeProvider.SetResource("a", "3", map[string]any{"id": "3", "field1": "aval3"})
+	t.fakeProvider.SetResource("b", "b1", map[string]any{"id": "b1", "field1": "bval1"})
+	t.fakeProvider.SetResource("b", "b2", map[string]any{"id": "b2", "field1": "bval2"})
+
+	for _, sel := range []struct{ typ, id string }{
+		{"a", "1"}, {"a", "2"}, {"a", "3"}, {"b", "b1"}, {"b", "b2"},
+	} {
+		err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: sel.typ, ResourceID: sel.id, Kind: core.ChangeCreated,
+		})
+		t.Require().NoError(err)
+	}
+	t.worker.Drain(t.T().Context())
+
+	t.fakeProvider.ResetCallCounts()
+	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+		{ResourceType: "a", ResourceIDs: []string{"1", "2"}},
+		{ResourceType: "b"},
+	})
+	t.Require().NoError(err)
+	t.worker.Drain(t.T().Context())
+
+	fetchCount, listCount := t.fakeProvider.CallCounts()
+	t.Require().GreaterOrEqual(fetchCount, 2, "mixed selectors: expected FetchResource for a's targeted IDs")
+	t.Require().GreaterOrEqual(listCount, 1, "mixed selectors: expected ListResources for b's all-of-type")
+
+	respA, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
+	t.Require().NoError(err)
+	t.Require().Len(respA.Hits, 3)
+
+	respB, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "b"})
+	t.Require().NoError(err)
+	t.Require().Len(respB.Hits, 2)
 }
 
 // Test_Rebuild_All triggers a full rebuild of all resources of a type
