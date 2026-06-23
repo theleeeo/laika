@@ -5,7 +5,7 @@ go 1.26.1
 require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/riverqueue/river v0.35.0
-	github.com/theleeeo/laika/aggregation v0.0.0-20260606115642-72edb519ca64
+	github.com/theleeeo/laika/aggregation v0.0.0-20260623091421-91ce70bc8f97
 )
 
 require (
@@ -13,12 +13,11 @@ require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/riverqueue/river/riverdriver v0.35.0 // indirect
 	github.com/riverqueue/river/rivershared v0.35.0 // indirect
 	github.com/riverqueue/river/rivertype v0.35.0 // indirect
-	github.com/rogpeppe/go-internal v1.13.1 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect
