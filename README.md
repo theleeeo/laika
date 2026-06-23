@@ -1,6 +1,9 @@
 # Laika
 
-<img src="laika_logo.svg" alt="Laika logo" width="200" />
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="laika_logo_dark.svg">
+  <img src="laika_logo.svg" alt="Laika logo" width="200" />
+</picture>
 
 **L**eos **AI**-powered **K**onfigurable **A**ggregator
 
