@@ -8,9 +8,7 @@ resources:
           type: text
       relations:
         - resource: c
-          key:
-            source: a
-            field: id
+          join: { local: id, foreign: a_id }
           cardinality: many
           fields:
             - name: number
@@ -25,16 +23,12 @@ resources:
           type: text
       relations:
         - resource: b
-          key:
-            source: a
-            field: b_id
+          join: { local: b_id, foreign: id }
           cardinality: one
           fields:
             - name: name
         - resource: c
-          key:
-            source: a
-            field: id
+          join: { local: id, foreign: a_id }
           cardinality: many
           fields:
             - name: number
@@ -49,15 +43,11 @@ resources:
       - name: number
     relations:
       - resource: a
-        key:
-          source: c
-          field: a_id
+        join: { local: a_id, foreign: id }
         fields:
           - name: searchField
       - resource: b
-        key:
-          source: c
-          field: b_id
+        join: { local: b_id, foreign: id }
         fields:
           - name: name
             # Control whether this field is searchable or not.

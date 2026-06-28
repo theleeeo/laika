@@ -20,6 +20,9 @@ type mockProvider struct {
 	lastFetchResourceMetadata map[string]string
 	lastFetchRelatedMetadata  map[string]string
 	lastListMetadata          map[string]string
+	// lastFetchRelatedKey records the key passed to the most recent
+	// FetchRelated call, for asserting the foreign field name is sent.
+	lastFetchRelatedKey source.ResourceKey
 	// pageSize controls how many items are returned per ListResources page.
 	pageSize int
 }
@@ -55,6 +58,7 @@ func (m *mockProvider) FetchResource(_ context.Context, params source.FetchResou
 
 func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
 	m.lastFetchRelatedMetadata = copyMetadata(params.Metadata)
+	m.lastFetchRelatedKey = params.Key
 	key := params.ResourceType + "|" + params.Key.Value
 	data, ok := m.related[key]
 	if !ok {
@@ -106,6 +110,78 @@ func (m *mockProvider) ListResources(_ context.Context, params source.ListResour
 	}, nil
 }
 
+func TestRelationFetch_PassesForeignFieldToProvider(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1"}
+	prov.related["customer|1"] = []map[string]any{{"id": "c1", "name": "Alice"}}
+
+	// order.id == customer.order_id : the local field read from order is "id",
+	// the foreign field the provider filters customers by is "order_id".
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{{
+			Resource: "customer",
+			Join:     resource.JoinConfig{Local: "id", Foreign: "order_id"},
+			Fields:   []resource.FieldConfig{{Name: "name"}},
+		}},
+	}
+
+	plan := buildPlanForVersion(prov, "order", vc)
+	ch := plan.Execute(context.Background(), projection.BuildRequest{
+		ResourceType: "order",
+		ResourceID:   "1",
+	})
+	for r := range ch {
+		require.NoError(t, r.Err)
+	}
+
+	// The provider must receive the foreign field name, not the local one.
+	require.Equal(t, "order_id", prov.lastFetchRelatedKey.Field)
+	require.Equal(t, "1", prov.lastFetchRelatedKey.Value)
+}
+
+func TestRelationFetch_ChainedJoinFromSibling(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1"}
+	// customer is fetched by order.id; it carries the address foreign key.
+	prov.related["customer|1"] = []map[string]any{{"id": "c1", "name": "Alice", "address_id": "addr9"}}
+	// address is fetched by the address_id read from the customer sibling.
+	prov.related["address|addr9"] = []map[string]any{{"id": "addr9", "city": "NYC"}}
+
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{
+			{
+				Resource: "customer",
+				Join:     resource.JoinConfig{Local: "id", Foreign: "order_id"},
+				Fields:   []resource.FieldConfig{{Name: "name"}, {Name: "address_id"}},
+			},
+			{
+				// Local field address_id comes from the customer sibling, not the root.
+				Resource: "address",
+				Join:     resource.JoinConfig{Local: "address_id", Foreign: "id", From: "customer"},
+				Fields:   []resource.FieldConfig{{Name: "city"}},
+			},
+		},
+	}
+
+	plan := buildPlanForVersion(prov, "order", vc)
+	var docs []projection.BuildDoc
+	for r := range plan.Execute(context.Background(), projection.BuildRequest{ResourceType: "order", ResourceID: "1"}) {
+		require.NoError(t, r.Err)
+		docs = append(docs, r.Items...)
+	}
+
+	require.Len(t, docs, 1)
+	addr, ok := docs[0].Doc["address"].([]map[string]any)
+	require.True(t, ok, "address relation should be resolved into the doc")
+	require.Len(t, addr, 1)
+	require.Equal(t, "NYC", addr[0]["city"])
+	// The address fetch was keyed by the foreign field on address ("id").
+	require.Equal(t, "id", prov.lastFetchRelatedKey.Field)
+	require.Equal(t, "addr9", prov.lastFetchRelatedKey.Value)
+}
+
 func TestBuildPlanForVersion_PropagatesMetadata(t *testing.T) {
 	prov := newMockProvider()
 	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1"}
@@ -115,7 +191,7 @@ func TestBuildPlanForVersion_PropagatesMetadata(t *testing.T) {
 		Fields: []resource.FieldConfig{{Name: "number"}},
 		Relations: []resource.RelationConfig{{
 			Resource: "customer",
-			Key:      resource.KeyConfig{Source: "order", Field: "id"},
+			Join:     resource.JoinConfig{Local: "id", Foreign: "order_id"},
 			Fields:   []resource.FieldConfig{{Name: "name"}},
 		}},
 	}
@@ -291,7 +367,7 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 		Relations: []resource.RelationConfig{
 			{
 				Resource: "customer",
-				Key:      resource.KeyConfig{Source: "order", Field: "id"},
+				Join:     resource.JoinConfig{Local: "id", Foreign: "order_id"},
 				Fields:   []resource.FieldConfig{{Name: "name"}},
 			},
 		},

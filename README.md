@@ -119,14 +119,43 @@ resources:
             search: false # include in filter but exclude from full-text search
       relations:
         - resource: customer
-          key:
-            source: order # which resource holds the foreign key
-            field: customer_id
+          # join the local field on this resource to the foreign field on the
+          # related resource: order.customer_id == customer.id
+          join: { local: customer_id, foreign: id }
           cardinality: one # "one" → object mapping, "many" → nested mapping
           fields:
             - name: name
             - name: email
 ```
+
+**Chained joins (`from`)** — by default `local` is read from the root resource. When the key you need to join on lives on a *related* resource rather than the root, add `from:` to read `local` from a sibling relation instead. Laika fetches the sibling first, then uses one of its fields to fetch the next hop.
+
+```yaml
+resources:
+  - type: order
+    fields:
+      fields:
+        - name: status
+      relations:
+        # order.customer_id == customer.id
+        - resource: customer
+          join: { local: customer_id, foreign: id }
+          cardinality: one
+          fields:
+            - name: name
+
+        # customer.company_id == company.id
+        # `from: customer` reads company_id off the already-fetched customer,
+        # not the order. The sibling must be declared earlier; Laika orders the
+        # fetches so customer is resolved before company.
+        - resource: company
+          join: { local: company_id, foreign: id, from: customer }
+          cardinality: one
+          fields:
+            - name: name
+```
+
+The `local` field referenced through `from` is read from the sibling's **full fetched data**, so it does not need to appear in that sibling's `fields:` list — `company_id` above stays out of the indexed customer document but is still available to drive the join.
 
 **Versioning** lets you run multiple index shapes concurrently:
 

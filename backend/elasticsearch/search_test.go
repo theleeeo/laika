@@ -72,7 +72,7 @@ func vcWithNestedRelation() *resource.VersionConfig {
 			{
 				Resource:    "tags",
 				Cardinality: "many",
-				Key:         resource.KeyConfig{Source: "root", Field: "id"},
+				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
 				Fields:      []resource.FieldConfig{{Name: "label"}},
 			},
 		},
@@ -89,7 +89,7 @@ func vcWithObjectRelation() *resource.VersionConfig {
 			{
 				Resource:    "owner",
 				Cardinality: "one",
-				Key:         resource.KeyConfig{Source: "root", Field: "id"},
+				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
 				Fields:      []resource.FieldConfig{{Name: "email"}},
 			},
 		},
@@ -277,7 +277,7 @@ func TestSearch_NestedRelation_AllFieldsSearchDisabled_NoClause(t *testing.T) {
 			{
 				Resource:    "meta",
 				Cardinality: "many",
-				Key:         resource.KeyConfig{Source: "root", Field: "id"},
+				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
 				Fields: []resource.FieldConfig{
 					{Name: "internal", Query: resource.QueryConfig{Search: new(false)}},
 				},

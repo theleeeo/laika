@@ -308,7 +308,7 @@ var DefaultResourceConfig = resource.Configs{
 				Relations: []resource.RelationConfig{
 					{
 						Resource: "b",
-						Key:      resource.KeyConfig{Source: "a", Field: "id"},
+						Join:     resource.JoinConfig{Local: "id", Foreign: "a_id"},
 						Fields: []resource.FieldConfig{
 							{Name: "field1"},
 							{Name: "field2"},
@@ -345,7 +345,7 @@ var RelatedResourceConfig = resource.Configs{
 				Relations: []resource.RelationConfig{
 					{
 						Resource: "b",
-						Key:      resource.KeyConfig{Source: "a", Field: "id"},
+						Join:     resource.JoinConfig{Local: "id", Foreign: "a_id"},
 						Fields:   []resource.FieldConfig{{Name: "f1"}},
 					},
 				},
@@ -363,7 +363,7 @@ var RelatedResourceConfig = resource.Configs{
 				Relations: []resource.RelationConfig{
 					{
 						Resource: "a",
-						Key:      resource.KeyConfig{Source: "b", Field: "id"},
+						Join:     resource.JoinConfig{Local: "id", Foreign: "b_id"},
 						Fields:   []resource.FieldConfig{{Name: "f1"}},
 					},
 				},
@@ -381,12 +381,12 @@ var RelatedResourceConfig = resource.Configs{
 				Relations: []resource.RelationConfig{
 					{
 						Resource: "a",
-						Key:      resource.KeyConfig{Source: "c", Field: "id"},
+						Join:     resource.JoinConfig{Local: "id", Foreign: "c_id"},
 						Fields:   []resource.FieldConfig{{Name: "f1"}},
 					},
 					{
 						Resource: "b",
-						Key:      resource.KeyConfig{Source: "c", Field: "id"},
+						Join:     resource.JoinConfig{Local: "id", Foreign: "c_id"},
 						Fields:   []resource.FieldConfig{{Name: "f1"}},
 					},
 				},

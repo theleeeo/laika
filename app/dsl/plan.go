@@ -41,7 +41,7 @@ func buildPlanForVersion(provider source.Provider, resourceName string, vc *reso
 	})
 
 	// Resolve the topological order of relations.
-	ordered, err := resolveOrder(resourceName, vc.Relations)
+	ordered, err := resolveOrder(vc.Relations)
 	if err != nil {
 		// If the config is invalid the plan will never execute successfully,
 		// but we defer the error to execution time rather than panicking at
@@ -131,8 +131,9 @@ func filterFields(data map[string]any, fields []resource.FieldConfig) map[string
 }
 
 // resolveOrder topologically sorts relations so that dependencies (relations
-// whose key source is another relation) are resolved before their dependants.
-func resolveOrder(rootType string, relations []resource.RelationConfig) ([]resource.RelationConfig, error) {
+// whose local field comes from a sibling relation via Join.From) are resolved
+// before their dependants.
+func resolveOrder(relations []resource.RelationConfig) ([]resource.RelationConfig, error) {
 	byResource := make(map[string]resource.RelationConfig, len(relations))
 	for _, r := range relations {
 		byResource[r.Resource] = r
@@ -152,10 +153,10 @@ func resolveOrder(rootType string, relations []resource.RelationConfig) ([]resou
 		}
 		inStack[rel.Resource] = true
 
-		if rel.Key.Source != rootType {
-			dep, ok := byResource[rel.Key.Source]
+		if rel.Join.From != "" {
+			dep, ok := byResource[rel.Join.From]
 			if !ok {
-				return fmt.Errorf("key source %q not found among relations", rel.Key.Source)
+				return fmt.Errorf("join from %q not found among relations", rel.Join.From)
 			}
 			if err := visit(dep); err != nil {
 				return err

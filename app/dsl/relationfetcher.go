@@ -20,15 +20,17 @@ func (f *relationFetcher) Fetch(parent projection.BuildDoc) (any, error) {
 		return (*fetchedRelation)(nil), nil
 	}
 
-	sourceData, ok := parent.Resolved[f.rel.Key.Source]
+	sourceData, ok := parent.Resolved[f.rel.LocalSource(parent.Root.Type)]
 	if !ok || len(sourceData) == 0 {
 		return &fetchedRelation{}, nil
 	}
 
+	// Read the value from the local field, but identify the related resources
+	// to the provider by the foreign field they are matched on.
 	var key source.ResourceKey
-	if val, ok := sourceData[0][f.rel.Key.Field]; ok {
+	if val, ok := sourceData[0][f.rel.Join.Local]; ok {
 		if valStr, ok := val.(string); ok {
-			key = source.ResourceKey{Field: f.rel.Key.Field, Value: valStr}
+			key = source.ResourceKey{Field: f.rel.Join.Foreign, Value: valStr}
 		}
 	}
 	if key.Value == "" {

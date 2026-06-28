@@ -57,17 +57,17 @@ func (c Configs) verifyFieldRelations() error {
 					}
 				}
 
-				// Verify key source: must be the owning resource or a sibling relation in this version
-				if currentRel.Key.Source != rCfg.Resource {
+				// Verify join from: when set it must name a sibling relation in this version.
+				if currentRel.Join.From != "" {
 					found := false
 					for _, siblingRel := range vc.Relations {
-						if siblingRel.Resource == currentRel.Key.Source {
+						if siblingRel.Resource == currentRel.Join.From {
 							found = true
 							break
 						}
 					}
 					if !found {
-						return fmt.Errorf("version %d: relation '%s'->'%s' key source '%s' is not the root resource and not a sibling relation", v, rCfg.Resource, currentRel.Resource, currentRel.Key.Source)
+						return fmt.Errorf("version %d: relation '%s'->'%s' join from '%s' is not a sibling relation", v, rCfg.Resource, currentRel.Resource, currentRel.Join.From)
 					}
 				}
 			}
@@ -85,11 +85,11 @@ func (c Configs) verifyFieldRelations() error {
 // verifyNoCyclesVersion checks that the relation key dependencies within a single
 // version config form a DAG (no cycles).
 func verifyNoCyclesVersion(resourceName string, vc *VersionConfig) error {
-	// Build adjacency: relation resource name -> list of deps (key sources that are sibling relations)
-	deps := make(map[string]string) // relation -> dependency (its key source, if it's a sibling)
+	// Build adjacency: relation resource name -> the sibling relation its local field comes from
+	deps := make(map[string]string) // relation -> dependency (the sibling its local field comes from)
 	for _, rel := range vc.Relations {
-		if rel.Key.Source != resourceName {
-			deps[rel.Resource] = rel.Key.Source
+		if rel.Join.From != "" {
+			deps[rel.Resource] = rel.Join.From
 		}
 	}
 
@@ -184,8 +184,8 @@ func (c RelationConfig) Validate() error {
 		return fmt.Errorf("resource required")
 	}
 
-	if err := c.Key.Validate(); err != nil {
-		return fmt.Errorf("key: %w", err)
+	if err := c.Join.Validate(); err != nil {
+		return fmt.Errorf("join: %w", err)
 	}
 
 	if c.Cardinality != "" && c.Cardinality != "one" && c.Cardinality != "many" {
@@ -209,12 +209,12 @@ func (c RelationConfig) Validate() error {
 	return nil
 }
 
-func (k KeyConfig) Validate() error {
-	if k.Source == "" {
-		return fmt.Errorf("source required")
+func (j JoinConfig) Validate() error {
+	if j.Local == "" {
+		return fmt.Errorf("local required")
 	}
-	if k.Field == "" {
-		return fmt.Errorf("field required")
+	if j.Foreign == "" {
+		return fmt.Errorf("foreign required")
 	}
 	return nil
 }

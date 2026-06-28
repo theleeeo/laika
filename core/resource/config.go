@@ -129,24 +129,41 @@ type QueryConfig struct {
 	Search *bool `yaml:"search"`
 }
 
-type KeyConfig struct {
-	// Source is the name of the resource to extract the lookup key from.
-	// Use the root resource's own name to extract from root data,
-	// or a sibling relation name to extract from its resolved data.
-	Source string `yaml:"source"`
+// JoinConfig names both sides of the join between a resource and a related
+// resource. The relation matches rows where the Local field on this resource
+// equals the Foreign field on the related resource.
+type JoinConfig struct {
+	// Local is the field whose value identifies the related resources.
+	// By default it is read from the root resource; set From to read it
+	// from a sibling relation instead (for chained joins).
+	Local string `yaml:"local"`
 
-	// Field is the field name to extract from the source resource's data.
-	// The extracted value is passed to the provider.
-	Field string `yaml:"field"`
+	// Foreign is the field on the related resource that Local's value is
+	// matched against. It is passed to the provider as the lookup key field.
+	Foreign string `yaml:"foreign"`
+
+	// From names a sibling relation to read Local from. Empty means the
+	// Local field is read from the root resource.
+	From string `yaml:"from"`
 }
 
 type RelationConfig struct {
 	Resource    string        `yaml:"resource"`
-	Key         KeyConfig     `yaml:"key"`
+	Join        JoinConfig    `yaml:"join"`
 	Cardinality string        `yaml:"cardinality"` // "one" or "many"; defaults to "many"
 	Fields      []FieldConfig `yaml:"fields"`
 }
 
 func (r RelationConfig) IsMany() bool {
 	return r.Cardinality != "one"
+}
+
+// LocalSource returns the name of the resource the Local join field is read
+// from: the sibling relation named by Join.From, or the root resource when
+// From is empty.
+func (r RelationConfig) LocalSource(root string) string {
+	if r.Join.From != "" {
+		return r.Join.From
+	}
+	return root
 }
