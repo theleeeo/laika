@@ -33,7 +33,7 @@ This composes with the existing consistency model unchanged: Parent Builds carry
 
 ## Separation of concerns
 
-`core.Indexer` does not gain a `source.Provider` dependency. The reverse-resolution abstraction is supplied to core the same way Plans are — a `ParentResolver` that, given the `BuildDoc` core just produced, returns the `[]model.Resource` Parents to also build. Core enqueues those Builds; it never extracts keys or fetches data itself. The implementation lives in `app/dsl`, is built from the reverse map, and reads the already-fetched data on the `BuildDoc`. See [ADR 0001](./0001-core-is-a-library-the-app-is-one-assembly.md) for why data fetching stays out of core.
+`core.Indexer` does not gain a `source.Provider` dependency. Reverse resolution rides on the existing Plan seam rather than a separate abstraction injected into core: the `BuildDoc` gains a `Parents []model.Resource` field that the Plan populates from the root's own fetched data, mirroring the `Relations` field it already populates for the forward (child) edges. Core reads `BuildDoc.Parents` after the Build and enqueues a Build for each; it never extracts keys or fetches data itself. The derivation lives in `app/dsl`, is built from the reverse map, and reads only data already on the `BuildDoc`. This keeps Plans the single place that turns a resource into everything a Build needs — see the "Plans encapsulate data fetching" invariant and [ADR 0001](./0001-core-is-a-library-the-app-is-one-assembly.md) for why data fetching stays out of core.
 
 ## Coverage and the future backstop
 
@@ -41,6 +41,6 @@ Reverse discovery works wherever the Parent key is a field on the Child's own da
 
 ## Status
 
-This ADR records the design decision only. Implementation — the `join` DSL block (replacing `key`), the reverse map, the `ParentResolver` abstraction, build-time emission, and integration coverage for the create-Child-then-see-it-in-Parent cycle — is tracked as a separate follow-up issue.
+This ADR records the design decision only. Implementation — the `join` DSL block (replacing `key`), the reverse map, the `BuildDoc.Parents` field populated by the Plan, build-time emission, and integration coverage for the create-Child-then-see-it-in-Parent cycle — is tracked as a separate follow-up issue.
 
 **Implication for contributors:** do not satisfy the brand-new-Child case by adding a required Parent Notification to the upstream contract, and do not move reverse resolution onto the `RegisterChange` ingest path. Resolution belongs at Child Build time, driven by config, reusing the fetch the Build already performs.

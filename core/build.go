@@ -58,6 +58,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	}
 
 	var allRelations []model.VersionedResource
+	var builtDoc projection.BuildDoc
 
 	for _, plan := range plans {
 		if plan.Executer == nil {
@@ -89,6 +90,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		}
 
 		allRelations = append(allRelations, result.Relations...)
+		builtDoc = result
 
 		indexName := IndexName(resourceType, plan.Version)
 		if err := idx.es.Upsert(ctx, indexName, resourceID, result.Doc, occVersion); err != nil {
@@ -106,6 +108,20 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		plainRelations,
 	); err != nil {
 		return fmt.Errorf("persist relations for %s/%s: %w", resourceType, resourceID, err)
+	}
+
+	// Reverse-relation discovery: bootstrap Parent edges for a brand-new Child.
+	//
+	// The Child just built may not yet appear in a Parent that should include
+	// it, because no Parent→Child edge has ever been persisted — so the
+	// RegisterChange fanout could not reach the Parent. The Plan derived the
+	// affected Parents from the Child's own fetched data onto the BuildDoc;
+	// enqueue their Builds. Each Parent Build re-establishes the edge, so
+	// subsequent Child updates are found via GetParentResources without this
+	// path. See ADR 0006.
+	// TODO: Will there be a double enqueue now for all Parents that already have the edge? Should we check for existing edges first?
+	if err := idx.enqueueParents(ctx, builtDoc.Parents, metadata); err != nil {
+		return err
 	}
 
 	// Drift check.
@@ -132,6 +148,24 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 			}, nil); err != nil {
 				return fmt.Errorf("re-enqueue after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
+		}
+	}
+
+	return nil
+}
+
+// enqueueParents enqueues a Build for each Parent the Plan derived from the
+// built Child document. The enqueued Builds run normally — carrying their own
+// Build Sequence for ES OCC and re-running the drift check — and are idempotent
+// under the at-least-once contract, so re-emitting a Parent Build is safe.
+func (idx *Indexer) enqueueParents(ctx context.Context, parents []model.Resource, metadata map[string]string) error {
+	for _, parent := range parents {
+		if _, err := idx.river.Insert(ctx, BuildArgs{
+			ResourceType: parent.Type,
+			ResourceIds:  []string{parent.Id},
+			Metadata:     metadata,
+		}, nil); err != nil {
+			return fmt.Errorf("enqueue parent build %s/%s: %w", parent.Type, parent.Id, err)
 		}
 	}
 

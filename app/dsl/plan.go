@@ -15,11 +15,15 @@ import (
 // and version in the config. This is the default plan builder used by the standalone binary.
 // Library users can build their own plans and pass them to NewBuilder directly.
 func BuildPlansFromConfig(provider source.Provider, resources resource.Configs) map[string][]projection.Plan {
+	// Reverse map for parent discovery, derived once from the join declarations
+	// across all resources. Each root plan populates BuildDoc.Parents from it.
+	reverse := buildReverseMap(resources)
+
 	plans := make(map[string][]projection.Plan, len(resources))
 	for _, rCfg := range resources {
 		versionPlans := make([]projection.Plan, len(rCfg.Versions))
 		for i, vc := range rCfg.Versions {
-			versionPlans[i] = buildPlanForVersion(provider, rCfg.Resource, &vc)
+			versionPlans[i] = buildPlanForVersion(provider, rCfg.Resource, &vc, reverse[rCfg.Resource])
 		}
 		plans[rCfg.Resource] = versionPlans
 	}
@@ -27,17 +31,30 @@ func BuildPlansFromConfig(provider source.Provider, resources resource.Configs) 
 }
 
 // buildPlanForVersion creates a RootPlan for the resource version and chains SubPlans
-// for each relation in topological order.
-func buildPlanForVersion(provider source.Provider, resourceName string, vc *resource.VersionConfig) projection.Plan {
+// for each relation in topological order. parentRefs drives reverse-relation
+// discovery: the root plan derives BuildDoc.Parents from the root's own data.
+func buildPlanForVersion(provider source.Provider, resourceName string, vc *resource.VersionConfig, parentRefs []parentRef) projection.Plan {
 	// Root plan: fetches the root resource and initialises the BuildDoc.
 	// When ResourceID is empty, the plan lists all resources of the type with
 	// pagination via provider.ListResources. When set, it fetches a single
-	// resource as before.
+	// resource as before. After fetching, it derives the Parents to bootstrap
+	// from the root's own data (see ADR 0006).
 	rootPlan := aggregation.NewRootPlan(func(params aggregation.FetchParameters[projection.BuildRequest]) (aggregation.FetchResult[projection.BuildDoc], error) {
+		var result aggregation.FetchResult[projection.BuildDoc]
+		var err error
 		if params.Request.ResourceID == "" {
-			return fetchAllResources(provider, resourceName, vc.Fields, params)
+			result, err = fetchAllResources(provider, resourceName, vc.Fields, params)
+		} else {
+			result, err = fetchSingleResource(provider, resourceName, vc.Fields, params)
 		}
-		return fetchSingleResource(provider, resourceName, vc.Fields, params)
+		if err != nil {
+			return result, err
+		}
+
+		for i := range result.Items {
+			result.Items[i].Parents = deriveParents(parentRefs, result.Items[i].Resolved[resourceName])
+		}
+		return result, nil
 	})
 
 	// Resolve the topological order of relations.

@@ -126,7 +126,7 @@ func TestRelationFetch_PassesForeignFieldToProvider(t *testing.T) {
 		}},
 	}
 
-	plan := buildPlanForVersion(prov, "order", vc)
+	plan := buildPlanForVersion(prov, "order", vc, nil)
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "order",
 		ResourceID:   "1",
@@ -165,7 +165,7 @@ func TestRelationFetch_ChainedJoinFromSibling(t *testing.T) {
 		},
 	}
 
-	plan := buildPlanForVersion(prov, "order", vc)
+	plan := buildPlanForVersion(prov, "order", vc, nil)
 	var docs []projection.BuildDoc
 	for r := range plan.Execute(context.Background(), projection.BuildRequest{ResourceType: "order", ResourceID: "1"}) {
 		require.NoError(t, r.Err)
@@ -196,7 +196,7 @@ func TestBuildPlanForVersion_PropagatesMetadata(t *testing.T) {
 		}},
 	}
 
-	plan := buildPlanForVersion(prov, "order", vc)
+	plan := buildPlanForVersion(prov, "order", vc, nil)
 	metadata := map[string]string{"tenant-id": "t1", "trace-id": "abc"}
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
@@ -227,7 +227,7 @@ func TestBuildPlanForVersion_FetchSingle(t *testing.T) {
 
 	fields := []resource.FieldConfig{{Name: "title"}}
 	vc := &resource.VersionConfig{Fields: fields}
-	plan := buildPlanForVersion(prov, "product", vc)
+	plan := buildPlanForVersion(prov, "product", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
@@ -251,7 +251,7 @@ func TestBuildPlanForVersion_FetchSingle_NotFound(t *testing.T) {
 
 	fields := []resource.FieldConfig{{Name: "title"}}
 	vc := &resource.VersionConfig{Fields: fields}
-	plan := buildPlanForVersion(prov, "product", vc)
+	plan := buildPlanForVersion(prov, "product", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
@@ -277,7 +277,7 @@ func TestBuildPlanForVersion_FetchAll_SinglePage(t *testing.T) {
 
 	fields := []resource.FieldConfig{{Name: "title"}}
 	vc := &resource.VersionConfig{Fields: fields}
-	plan := buildPlanForVersion(prov, "product", vc)
+	plan := buildPlanForVersion(prov, "product", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
@@ -308,7 +308,7 @@ func TestBuildPlanForVersion_FetchAll_MultiplePages(t *testing.T) {
 
 	fields := []resource.FieldConfig{{Name: "title"}}
 	vc := &resource.VersionConfig{Fields: fields}
-	plan := buildPlanForVersion(prov, "product", vc)
+	plan := buildPlanForVersion(prov, "product", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
@@ -336,7 +336,7 @@ func TestBuildPlanForVersion_FetchAll_Empty(t *testing.T) {
 
 	fields := []resource.FieldConfig{{Name: "title"}}
 	vc := &resource.VersionConfig{Fields: fields}
-	plan := buildPlanForVersion(prov, "product", vc)
+	plan := buildPlanForVersion(prov, "product", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
@@ -373,7 +373,7 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 		},
 	}
 
-	plan := buildPlanForVersion(prov, "order", vc)
+	plan := buildPlanForVersion(prov, "order", vc, nil)
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "order",

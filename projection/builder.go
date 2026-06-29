@@ -23,7 +23,17 @@ type BuildDoc struct {
 	Doc      map[string]any
 	Resolved map[string][]map[string]any
 
+	// Relations are the forward edges discovered during the build — the
+	// children this document references. Core persists them in the Relation
+	// graph.
 	Relations []model.VersionedResource
+
+	// Parents are the reverse edges derived from the root's own data — the
+	// Parents that should also be built so they include this resource. The Plan
+	// populates them after fetching the root; core enqueues a Build for each.
+	// This bootstraps a Parent edge for a brand-new Child that has no persisted
+	// edge yet. See ADR 0006.
+	Parents []model.Resource
 }
 
 // TODO: NewPlan builder
