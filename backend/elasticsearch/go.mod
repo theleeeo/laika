@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/elastic/go-elasticsearch/v8 v8.15.0
+	github.com/stretchr/testify v1.11.1
 	github.com/theleeeo/laika v0.0.0-20260623091421-91ce70bc8f97
 )
 
@@ -22,7 +23,6 @@ require (
 	github.com/riverqueue/river/riverdriver v0.35.0 // indirect
 	github.com/riverqueue/river/rivershared v0.35.0 // indirect
 	github.com/riverqueue/river/rivertype v0.35.0 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/theleeeo/laika/aggregation v0.0.0-20260623091421-91ce70bc8f97 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.2.0 // indirect

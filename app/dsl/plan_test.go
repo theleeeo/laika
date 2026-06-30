@@ -403,6 +403,130 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 	require.Equal(t, "c1", docs[0].Relations[0].Id)
 }
 
+// execSinglePlan builds a single-version plan, executes it for one resource id,
+// drains the result channel asserting no error, and returns the single BuildDoc.
+func execSinglePlan(t *testing.T, prov *mockProvider, vc *resource.VersionConfig, resourceType, id string) projection.BuildDoc {
+	t.Helper()
+	plan := buildPlanForVersion(prov, resourceType, vc, nil)
+	var docs []projection.BuildDoc
+	for r := range plan.Execute(context.Background(), projection.BuildRequest{
+		ResourceType: resourceType,
+		ResourceID:   id,
+	}) {
+		require.NoError(t, r.Err)
+		docs = append(docs, r.Items...)
+	}
+	require.Len(t, docs, 1)
+	return docs[0]
+}
+
+// cardinality:one with a single related row → indexed as one object, not an array.
+func TestRelationAssembly_SingularCardinality_SingleObject(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1", "customer_id": "c1"}
+	prov.related["customer|c1"] = []map[string]any{{"id": "c1", "name": "Alice"}}
+
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{{
+			Resource:    "customer",
+			Cardinality: "one",
+			Join:        resource.JoinConfig{Local: "customer_id", Foreign: "id"},
+			Fields:      []resource.FieldConfig{{Name: "name"}},
+		}},
+	}
+
+	doc := execSinglePlan(t, prov, vc, "order", "1")
+
+	customer, ok := doc.Doc["customer"].(map[string]any)
+	require.True(t, ok, "cardinality:one relation must be a single object, got %T", doc.Doc["customer"])
+	require.Equal(t, "Alice", customer["name"])
+	require.Equal(t, "c1", customer["id"])
+
+	// Resolved keeps the full array form for chained joins.
+	require.Len(t, doc.Resolved["customer"], 1)
+	// Graph edge still tracked.
+	require.Len(t, doc.Relations, 1)
+	require.Equal(t, "c1", doc.Relations[0].Id)
+	require.Equal(t, "customer", doc.Relations[0].Type)
+}
+
+// cardinality:one with no related rows → the key is omitted entirely.
+func TestRelationAssembly_SingularCardinality_NoRows_OmitsKey(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1", "customer_id": "c1"}
+	// No prov.related entry for customer|c1 → zero related rows.
+
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{{
+			Resource:    "customer",
+			Cardinality: "one",
+			Join:        resource.JoinConfig{Local: "customer_id", Foreign: "id"},
+			Fields:      []resource.FieldConfig{{Name: "name"}},
+		}},
+	}
+
+	doc := execSinglePlan(t, prov, vc, "order", "1")
+
+	_, present := doc.Doc["customer"]
+	require.False(t, present, "cardinality:one key must be omitted when there are no related rows")
+	require.Empty(t, doc.Resolved["customer"])
+}
+
+// cardinality:one with multiple related rows → first row wins; Resolved keeps all.
+func TestRelationAssembly_SingularCardinality_MultipleRows_FirstWins(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1", "customer_id": "c1"}
+	prov.related["customer|c1"] = []map[string]any{
+		{"id": "c1", "name": "Alice"},
+		{"id": "c2", "name": "Bob"},
+	}
+
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{{
+			Resource:    "customer",
+			Cardinality: "one",
+			Join:        resource.JoinConfig{Local: "customer_id", Foreign: "id"},
+			Fields:      []resource.FieldConfig{{Name: "name"}},
+		}},
+	}
+
+	doc := execSinglePlan(t, prov, vc, "order", "1")
+
+	customer, ok := doc.Doc["customer"].(map[string]any)
+	require.True(t, ok, "cardinality:one relation must be a single object, got %T", doc.Doc["customer"])
+	require.Equal(t, "Alice", customer["name"])
+	require.Len(t, doc.Resolved["customer"], 2, "Resolved must keep every related row")
+}
+
+// cardinality:many (default) → indexed as an array (regression guard).
+func TestRelationAssembly_ManyCardinality_Array(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1"}
+	prov.related["customer|1"] = []map[string]any{
+		{"id": "c1", "name": "Alice"},
+		{"id": "c2", "name": "Bob"},
+	}
+
+	vc := &resource.VersionConfig{
+		Fields: []resource.FieldConfig{{Name: "number"}},
+		Relations: []resource.RelationConfig{{
+			Resource:    "customer",
+			Cardinality: "many",
+			Join:        resource.JoinConfig{Local: "id", Foreign: "order_id"},
+			Fields:      []resource.FieldConfig{{Name: "name"}},
+		}},
+	}
+
+	doc := execSinglePlan(t, prov, vc, "order", "1")
+
+	customers, ok := doc.Doc["customer"].([]map[string]any)
+	require.True(t, ok, "cardinality:many relation must be an array, got %T", doc.Doc["customer"])
+	require.Len(t, customers, 2)
+}
+
 func TestBuildPlansFromConfig_VersionedPlans(t *testing.T) {
 	prov := newMockProvider()
 	prov.resources["product|1"] = map[string]any{"id": "1", "title": "Widget", "price": "9.99"}

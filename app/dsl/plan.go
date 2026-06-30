@@ -3,6 +3,7 @@ package dsl
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/theleeeo/laika/aggregation"
 	"github.com/theleeeo/laika/app/source"
@@ -130,7 +131,17 @@ func buildRelationSubPlan(
 			subResources = append(subResources, filtered)
 		}
 
-		parentDoc.Doc[rel.Resource] = subResources
+		// Shape the indexed document per the relation's cardinality. A "many"
+		// relation is an array of objects (ES nested); a "one" relation is a
+		// single object (ES object). For "one" we take the first related row
+		// and omit the key entirely when there are no related rows, so the
+		// indexed shape matches the generated mapping.
+		if rel.IsMany() {
+			parentDoc.Doc[rel.Resource] = subResources
+		} else if len(subResources) > 0 {
+			slog.Warn("relation cardinality is one but multiple related rows were returned; using the first row", "resource", parentDoc.Root.Type, "relation", rel.Resource, "count", len(subResources))
+			parentDoc.Doc[rel.Resource] = subResources[0]
+		}
 		return parentDoc
 	}
 
