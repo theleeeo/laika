@@ -147,15 +147,31 @@ type JoinConfig struct {
 	From string `yaml:"from"`
 }
 
+// Relation strategies decide how a child's data reaches the parent's
+// searchable surface. denormalize copies the child's fields into the parent
+// document (default). reference stores only the join key and resolves the
+// child's fields at search time via a two-phase join.
+const (
+	StrategyDenormalize = "denormalize"
+	StrategyReference   = "reference"
+)
+
 type RelationConfig struct {
 	Resource    string        `yaml:"resource"`
 	Join        JoinConfig    `yaml:"join"`
 	Cardinality string        `yaml:"cardinality"` // "one" or "many"; defaults to "many"
+	Strategy    string        `yaml:"strategy"`    // "denormalize" (default) or "reference"
 	Fields      []FieldConfig `yaml:"fields"`
 }
 
 func (r RelationConfig) IsMany() bool {
 	return r.Cardinality != "one"
+}
+
+// IsReference reports whether this relation is resolved at search time rather
+// than denormalized into the parent document.
+func (r RelationConfig) IsReference() bool {
+	return r.Strategy == StrategyReference
 }
 
 // LocalSource returns the name of the resource the Local join field is read

@@ -74,6 +74,11 @@ func buildPlanForVersion(provider source.Provider, resourceName string, vc *reso
 	// Chain a SubPlan for each relation.
 	var current aggregation.Executer[projection.BuildRequest, projection.BuildDoc] = rootPlan
 	for _, rel := range ordered {
+		if rel.IsReference() {
+			// reference relations are resolved at search time; never fetched
+			// or denormalized into the document.
+			continue
+		}
 		current = buildRelationSubPlan(provider, current, rel)
 	}
 

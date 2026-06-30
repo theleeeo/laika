@@ -139,6 +139,48 @@ func TestGetCapabilities_MultipleResources(t *testing.T) {
 		[]FilterOp{FilterOpEq, FilterOpIn})
 }
 
+func TestReferenceFieldsAreFilterOnly(t *testing.T) {
+	cfg := &resource.Config{
+		Resource:   "c",
+		ReadVersion: 1,
+		Versions: []resource.VersionConfig{{
+			Version: 1,
+			Fields: []resource.FieldConfig{{Name: "b_id"}},
+			Relations: []resource.RelationConfig{
+				{
+					Resource: "b",
+					Strategy: resource.StrategyReference,
+					Join: resource.JoinConfig{Local: "b_id", Foreign: "id"},
+					Fields: []resource.FieldConfig{{Name: "name"}},
+				},
+			},
+		}},
+	}
+	cfg.ApplyDefaults()
+	idx := New(Config{
+		Resources: resource.Configs{cfg},
+	})
+
+	caps := idx.GetCapabilities()
+	var fc *FieldCapability
+	for i := range caps.Resources {
+		for j := range caps.Resources[i].Fields {
+			if caps.Resources[i].Fields[j].Field == "b.name" {
+				fc = &caps.Resources[i].Fields[j]
+			}
+		}
+	}
+	if fc == nil {
+		t.Fatal("reference field b.name must still be advertised")
+	}
+	if fc.Searchable || fc.Sortable {
+		t.Fatalf("reference field must be filter-only, got searchable=%v sortable=%v", fc.Searchable, fc.Sortable)
+	}
+	if len(fc.FilterOps) != 2 {
+		t.Fatalf("reference field must support Eq+In filters, got %v", fc.FilterOps)
+	}
+}
+
 func assertField(t *testing.T, f FieldCapability, wantField, wantType string, wantSearchable, wantSortable bool, wantOps []FilterOp) {
 	t.Helper()
 	if f.Field != wantField {

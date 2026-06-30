@@ -21,6 +21,7 @@ resources:
         - name: searchField
         - name: secondaryField
           type: text
+        - name: b_id
       relations:
         - resource: b
           join: { local: b_id, foreign: id }
@@ -46,8 +47,10 @@ resources:
         join: { local: a_id, foreign: id }
         fields:
           - name: searchField
+          - name: b_id
       - resource: b
-        join: { local: b_id, foreign: id }
+        join: { local: b_id, from: a, foreign: id }
+        strategy: reference
         fields:
           - name: name
             # Control whether this field is searchable or not.

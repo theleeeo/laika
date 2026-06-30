@@ -81,3 +81,78 @@ func TestValidate_JoinFromCycleDetected(t *testing.T) {
 	err := cfg.Validate()
 	require.ErrorContains(t, err, "cycle")
 }
+
+// refConfigs builds a minimal two-resource config where c references b,
+// keyed by `local` sourced `from` (empty = native root field).
+func refConfigs(local, from string, cFields []FieldConfig, aFields []FieldConfig) Configs {
+	rels := []RelationConfig{}
+	if aFields != nil {
+		rels = append(rels, RelationConfig{
+			Resource: "a", Join: JoinConfig{Local: "id", Foreign: "c_id"}, Fields: aFields,
+		})
+	}
+	rels = append(rels, RelationConfig{
+		Resource: "b", Strategy: StrategyReference,
+		Join: JoinConfig{Local: local, Foreign: "id", From: from}, Fields: []FieldConfig{{Name: "name"}},
+	})
+	return Configs{
+		{Resource: "c", Versions: []VersionConfig{{Version: 1, Fields: cFields, Relations: rels}}},
+		{Resource: "a", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "x"}, {Name: "b_id"}}}}},
+		{Resource: "b", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "name"}}}}},
+	}
+}
+
+func TestReferenceKeyReachable(t *testing.T) {
+	// native key present as a root field of c -> OK
+	if err := refConfigs("b_id", "", []FieldConfig{{Name: "b_id"}}, nil).Validate(); err != nil {
+		t.Fatalf("native root key should be reachable: %v", err)
+	}
+	// key denormalized via sibling a (a.fields includes b_id) -> OK
+	if err := refConfigs("b_id", "a", []FieldConfig{{Name: "n"}}, []FieldConfig{{Name: "b_id"}}).Validate(); err != nil {
+		t.Fatalf("key via denormalized sibling should be reachable: %v", err)
+	}
+}
+
+func TestReferenceKeyUnreachable(t *testing.T) {
+	// native key NOT a field of c -> error
+	if err := refConfigs("b_id", "", []FieldConfig{{Name: "other"}}, nil).Validate(); err == nil {
+		t.Fatal("expected error: native key not an indexed field")
+	}
+	// from sibling a, but a does not denormalize b_id -> error
+	if err := refConfigs("b_id", "a", []FieldConfig{{Name: "n"}}, []FieldConfig{{Name: "n"}}).Validate(); err == nil {
+		t.Fatal("expected error: sibling does not carry the key")
+	}
+}
+
+func TestDenormalizeKeyFromReferenceSiblingRejected(t *testing.T) {
+	// c has a_id as a root field, so reference relation 'a' (keyed by a_id) itself
+	// passes validation. The denormalize relation 'b' then tries to source its local
+	// join key From: 'a' — but 'a' is a reference relation whose data is never
+	// materialized, so the key would silently resolve to empty at build time.
+	cfgs := Configs{
+		{Resource: "c", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "a_id"}}, Relations: []RelationConfig{
+			// reference sibling 'a': uses native root field a_id -> its own validation passes
+			{Resource: "a", Strategy: StrategyReference, Join: JoinConfig{Local: "a_id", Foreign: "id"}, Fields: []FieldConfig{{Name: "x"}}},
+			// denormalize relation 'b': sources its local key From: 'a' (a reference sibling)
+			{Resource: "b", Join: JoinConfig{Local: "x", From: "a", Foreign: "id"}, Fields: []FieldConfig{{Name: "name"}}},
+		}}}},
+		{Resource: "a", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "x"}}}}},
+		{Resource: "b", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "name"}}}}},
+	}
+	err := cfgs.Validate()
+	require.ErrorContains(t, err, "reference relation")
+}
+
+func TestReferenceKeyFromReferenceSibling(t *testing.T) {
+	cfgs := Configs{
+		{Resource: "c", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "n"}}, Relations: []RelationConfig{
+			{Resource: "a", Strategy: StrategyReference, Join: JoinConfig{Local: "a_id", Foreign: "id"}, Fields: []FieldConfig{{Name: "b_id"}}},
+			{Resource: "b", Strategy: StrategyReference, Join: JoinConfig{Local: "b_id", From: "a", Foreign: "id"}, Fields: []FieldConfig{{Name: "name"}}},
+		}}}},
+		{Resource: "a", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "b_id"}}}}},
+		{Resource: "b", Versions: []VersionConfig{{Version: 1, Fields: []FieldConfig{{Name: "name"}}}}},
+	}
+	if err := cfgs.Validate(); err == nil {
+		t.Fatal("expected error: cannot source a reference key from a reference sibling")
+	}
+}

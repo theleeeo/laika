@@ -20,7 +20,13 @@ func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
 
 		for _, rel := range vc.Relations {
 			for _, f := range rel.Fields {
-				cap.Fields = append(cap.Fields, fieldCapability(fmt.Sprintf("%s.%s", rel.Resource, f.Name), f))
+				fc := fieldCapability(fmt.Sprintf("%s.%s", rel.Resource, f.Name), f)
+				if rel.IsReference() {
+					fc.Searchable = false
+					fc.Sortable = false
+					fc.FilterOps = []FilterOp{FilterOpEq, FilterOpIn}
+				}
+				cap.Fields = append(cap.Fields, fc)
 			}
 		}
 

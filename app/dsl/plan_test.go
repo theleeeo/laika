@@ -23,16 +23,19 @@ type mockProvider struct {
 	// lastFetchRelatedKey records the key passed to the most recent
 	// FetchRelated call, for asserting the foreign field name is sent.
 	lastFetchRelatedKey source.ResourceKey
+	// fetchedRelated records which resource types FetchRelated was called for.
+	fetchedRelated map[string]bool
 	// pageSize controls how many items are returned per ListResources page.
 	pageSize int
 }
 
 func newMockProvider() *mockProvider {
 	return &mockProvider{
-		resources: make(map[string]map[string]any),
-		related:   make(map[string][]map[string]any),
-		listed:    make(map[string][]source.ListedResource),
-		pageSize:  100,
+		resources:      make(map[string]map[string]any),
+		related:        make(map[string][]map[string]any),
+		listed:         make(map[string][]source.ListedResource),
+		fetchedRelated: make(map[string]bool),
+		pageSize:       100,
 	}
 }
 
@@ -59,6 +62,7 @@ func (m *mockProvider) FetchResource(_ context.Context, params source.FetchResou
 func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
 	m.lastFetchRelatedMetadata = copyMetadata(params.Metadata)
 	m.lastFetchRelatedKey = params.Key
+	m.fetchedRelated[params.ResourceType] = true
 	key := params.ResourceType + "|" + params.Key.Value
 	data, ok := m.related[key]
 	if !ok {
@@ -401,6 +405,39 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 	require.Len(t, docs[0].Relations, 1)
 	require.Equal(t, "customer", docs[0].Relations[0].Type)
 	require.Equal(t, "c1", docs[0].Relations[0].Id)
+}
+
+// runPlan executes the plan for a single resource ID and drains the channel,
+// failing the test if any error is emitted.
+func runPlan(t *testing.T, plan projection.Plan, resourceType, resourceID string) {
+	t.Helper()
+	ch := plan.Execute(context.Background(), projection.BuildRequest{
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+	})
+	for r := range ch {
+		require.NoError(t, r.Err)
+	}
+}
+
+func TestReferenceRelationNotFetched(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["c|c1"] = map[string]any{"id": "c1", "b_id": "b1"}
+
+	resources := resource.Configs{
+		{Resource: "c", Versions: []resource.VersionConfig{{Version: 1,
+			Fields: []resource.FieldConfig{{Name: "b_id"}},
+			Relations: []resource.RelationConfig{
+				{Resource: "b", Strategy: resource.StrategyReference, Join: resource.JoinConfig{Local: "b_id", Foreign: "id"}, Fields: []resource.FieldConfig{{Name: "name"}}},
+			}}}},
+		{Resource: "b", Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "name"}}}}},
+	}
+	plans := BuildPlansFromConfig(prov, resources)
+	runPlan(t, plans["c"][0], "c", "c1")
+
+	if prov.fetchedRelated["b"] {
+		t.Fatal("reference relation 'b' must not be fetched via FetchRelated")
+	}
 }
 
 // execSinglePlan builds a single-version plan, executes it for one resource id,

@@ -57,17 +57,28 @@ func (c Configs) verifyFieldRelations() error {
 					}
 				}
 
-				// Verify join from: when set it must name a sibling relation in this version.
+				// Verify join from: when set it must name a sibling relation in this version,
+				// and that sibling must not itself be a reference relation (whose data is
+				// never materialized, so its key cannot be used as a join source).
 				if currentRel.Join.From != "" {
 					found := false
 					for _, siblingRel := range vc.Relations {
 						if siblingRel.Resource == currentRel.Join.From {
 							found = true
+							if siblingRel.IsReference() {
+								return fmt.Errorf("version %d: relation '%s'->'%s' sources its key from '%s', which is a reference relation; a reference sibling's data is not materialized, so its key cannot be used as a join source", v, rCfg.Resource, currentRel.Resource, currentRel.Join.From)
+							}
 							break
 						}
 					}
 					if !found {
 						return fmt.Errorf("version %d: relation '%s'->'%s' join from '%s' is not a sibling relation", v, rCfg.Resource, currentRel.Resource, currentRel.Join.From)
+					}
+				}
+
+				if currentRel.IsReference() {
+					if err := verifyReferenceKeyReachable(rCfg.Resource, v, vc, currentRel); err != nil {
+						return err
 					}
 				}
 			}
@@ -192,6 +203,10 @@ func (c RelationConfig) Validate() error {
 		return fmt.Errorf("cardinality must be \"one\" or \"many\"")
 	}
 
+	if c.Strategy != "" && c.Strategy != StrategyDenormalize && c.Strategy != StrategyReference {
+		return fmt.Errorf("strategy must be %q or %q", StrategyDenormalize, StrategyReference)
+	}
+
 	// TODO: Default to "Use all fields" if none specified?
 	if len(c.Fields) == 0 {
 		return fmt.Errorf("at least one field required")
@@ -217,4 +232,39 @@ func (j JoinConfig) Validate() error {
 		return fmt.Errorf("foreign required")
 	}
 	return nil
+}
+
+// verifyReferenceKeyReachable ensures a reference relation's local join key is
+// present on the indexed document so the two-phase search join can fold matching
+// child IDs into a terms filter. The key is reachable either as a root field of
+// the resource (Join.From == "") or as a denormalized field of the sibling
+// relation named by Join.From (which must itself be a denormalize relation).
+func verifyReferenceKeyReachable(resourceName string, version int, vc *VersionConfig, rel RelationConfig) error {
+	key := rel.Join.Local
+
+	if rel.Join.From == "" {
+		for _, f := range vc.Fields {
+			if f.Name == key {
+				return nil
+			}
+		}
+		return fmt.Errorf("version %d: reference relation '%s'->'%s' local key '%s' must be an indexed field on '%s'", version, resourceName, rel.Resource, key, resourceName)
+	}
+
+	for _, sib := range vc.Relations {
+		if sib.Resource != rel.Join.From {
+			continue
+		}
+		if sib.IsReference() {
+			return fmt.Errorf("version %d: reference relation '%s'->'%s' sources its key from '%s', which must be a denormalize relation", version, resourceName, rel.Resource, rel.Join.From)
+		}
+		for _, f := range sib.Fields {
+			if f.Name == key {
+				return nil
+			}
+		}
+		return fmt.Errorf("version %d: reference relation '%s'->'%s' local key '%s' must be a denormalized field of sibling '%s'", version, resourceName, rel.Resource, key, rel.Join.From)
+	}
+
+	return fmt.Errorf("version %d: reference relation '%s'->'%s' join from '%s' is not a sibling relation", version, resourceName, rel.Resource, rel.Join.From)
 }

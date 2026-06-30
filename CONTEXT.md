@@ -26,6 +26,15 @@ A directed link from one Resource to another: a Parent contains a Child in its i
 **Parent / Child**:
 The two endpoints of a Relation. The Parent is the Resource whose document includes data from the Child. A single Resource is a Parent in some Relations and a Child in others — these are roles, not types.
 
+**Strategy**:
+How a Relation's Child reaches the Parent's searchable surface. `denormalize`
+(default) copies the Child's selected fields into the Parent's Document — a
+change to the Child rebuilds every Parent that contains it. `reference` copies
+nothing: the Parent keeps only the join key and the Child's fields are resolved
+at search time via a two-phase join. Used when a low-count Child would otherwise
+be denormalized into a high-count Parent, where the rebuild fanout is ruinous.
+Distinct from Cardinality (`one`/`many`), which is join multiplicity.
+
 ### Operations
 
 **Notification**:

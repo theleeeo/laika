@@ -34,6 +34,26 @@ type SearchRequest struct {
 	Sort     []SortOption
 }
 
+// AddFilter appends a filter to the request. It is the explicit way a
+// middleware adds a filter to a search.
+//
+// A filter is routed entirely by its Field path, opaquely to the strategy of
+// the relation it names (see [Indexer.referenceResolve]):
+//
+//   - "b.name" filters the denormalized "b" block when "b" is a denormalize
+//     relation, or is extracted onto the referenced "b" search when "b" is a
+//     reference relation — the caller writes the same path either way.
+//   - "fields.tenant_id" (a root field) applies to the primary search only; it
+//     is not copied onto any referenced search.
+//   - "b.tenant_id" applies to the referenced "b" search (because "b" is a
+//     reference relation), not to the primary.
+//
+// So a middleware scopes a referenced child by naming that child's field
+// explicitly; there is no implicit fan-out across searches.
+func (r *SearchRequest) AddFilter(f Filter) {
+	r.Filters = append(r.Filters, f)
+}
+
 // SearchHit is a single document returned by a search.
 type SearchHit struct {
 	ID     string

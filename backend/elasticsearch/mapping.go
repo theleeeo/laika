@@ -22,6 +22,12 @@ func GenerateMapping(vc *resource.VersionConfig) map[string]any {
 	}
 
 	for _, rel := range vc.Relations {
+		if rel.IsReference() {
+			// reference relations store no child fields on the parent; only the
+			// join key (a root field) is needed, and it is already mapped above.
+			continue
+		}
+
 		relProps := make(map[string]any, len(rel.Fields)+1)
 		relProps["id"] = map[string]any{"type": "keyword"}
 		for _, f := range rel.Fields {

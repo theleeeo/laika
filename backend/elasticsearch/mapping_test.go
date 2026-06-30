@@ -8,6 +8,24 @@ import (
 	"github.com/theleeeo/laika/core/resource"
 )
 
+func TestGenerateMappingOmitsReference(t *testing.T) {
+	vc := &resource.VersionConfig{
+		Version: 1,
+		Fields:  []resource.FieldConfig{{Name: "b_id"}},
+		Relations: []resource.RelationConfig{
+			{Resource: "b", Strategy: resource.StrategyReference, Join: resource.JoinConfig{Local: "b_id", Foreign: "id"}, Fields: []resource.FieldConfig{{Name: "name"}}},
+		},
+	}
+	m := GenerateMapping(vc)
+	props := m["mappings"].(map[string]any)["properties"].(map[string]any)
+	if _, ok := props["b"]; ok {
+		t.Fatal("reference relation 'b' must not appear in the mapping")
+	}
+	if _, ok := props["fields"]; !ok {
+		t.Fatal("root fields must still be mapped")
+	}
+}
+
 // relType returns the ES "type" of a top-level relation property in a mapping.
 func relType(t *testing.T, m map[string]any, rel string) string {
 	t.Helper()
@@ -58,7 +76,7 @@ func TestGenerateMapping_RelationProperties_IncludeIDAndFields(t *testing.T) {
 			Resource:    "owner",
 			Cardinality: "one",
 			Fields: []resource.FieldConfig{
-				{Name: "email"},               // default type → keyword
+				{Name: "email"},                // default type → keyword
 				{Name: "age", Type: "integer"}, // explicit type
 			},
 		}},
@@ -73,7 +91,7 @@ func TestGenerateMapping_RelationProperties_IncludeIDAndFields(t *testing.T) {
 func TestGenerateMapping_RootFieldsWrappedWithESType(t *testing.T) {
 	vc := &resource.VersionConfig{
 		Fields: []resource.FieldConfig{
-			{Name: "title"},             // default → keyword
+			{Name: "title"},              // default → keyword
 			{Name: "body", Type: "text"}, // explicit
 		},
 	}

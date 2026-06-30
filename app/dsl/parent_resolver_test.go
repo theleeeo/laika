@@ -133,6 +133,20 @@ func TestPlanParents_DedupesAcrossVersions(t *testing.T) {
 	require.Equal(t, []model.Resource{{Type: "a", Id: "a1"}}, parents)
 }
 
+func TestBuildReverseMapSkipsReference(t *testing.T) {
+	resources := resource.Configs{
+		{Resource: "b", Versions: []resource.VersionConfig{{Version: 1, Relations: []resource.RelationConfig{
+			// invertible by shape (Local==id, From=="") but reference -> must be skipped
+			{Resource: "a", Strategy: resource.StrategyReference, Join: resource.JoinConfig{Local: "id", Foreign: "b_id"}, Fields: []resource.FieldConfig{{Name: "n"}}},
+		}}}},
+		{Resource: "a", Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "n"}}}}},
+	}
+	rev := buildReverseMap(resources)
+	if len(rev["a"]) != 0 {
+		t.Fatalf("reference relation must not appear in reverse map, got %+v", rev["a"])
+	}
+}
+
 // A child whose foreign field is absent or empty yields no parent and no error.
 func TestPlanParents_MissingForeignFieldEmitsNothing(t *testing.T) {
 	resources := resource.Configs{

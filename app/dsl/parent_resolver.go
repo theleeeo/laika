@@ -34,7 +34,7 @@ func buildReverseMap(resources resource.Configs) map[string][]parentRef {
 	for _, cfg := range resources {
 		for _, vc := range cfg.Versions {
 			for _, rel := range vc.Relations {
-				if rel.Join.From != "" || rel.Join.Local != identityField {
+				if rel.IsReference() || rel.Join.From != "" || rel.Join.Local != identityField {
 					continue
 				}
 				ref := parentRef{parentType: cfg.Resource, foreignField: rel.Join.Foreign}
