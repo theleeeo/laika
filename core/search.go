@@ -5,8 +5,16 @@ import (
 	"errors"
 )
 
-// Search executes a search query against the indexed documents for the given resource.
+// Search executes a search query against the indexed documents for the given
+// resource, running it through the registered search middleware chain.
 func (idx *Indexer) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+	return idx.searchChain(ctx, req)
+}
+
+// searchBase is the innermost search handler: it validates the resource,
+// normalizes paging, and calls the backend. It is the base of the middleware
+// chain composed in New.
+func (idx *Indexer) searchBase(ctx context.Context, req SearchRequest) (SearchResponse, error) {
 	if req.Resource == "" {
 		return SearchResponse{}, errors.New("resource is required")
 	}

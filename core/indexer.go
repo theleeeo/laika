@@ -45,6 +45,13 @@ type Config struct {
 	// later via [Indexer.SetRiverClient]; this lets callers wire workers
 	// that reference the Indexer before the client is created.
 	RiverClient *river.Client[pgx.Tx]
+
+	// SearchMiddlewares wrap the search path. They run outermost-first in
+	// registration order: []{A, B} executes A → B → the Indexer's own
+	// validate/normalize/backend call. A middleware may authorize the request,
+	// short-circuit with an error, mutate the SearchRequest, and inspect or
+	// modify the SearchResponse. The chain is composed once at construction.
+	SearchMiddlewares []SearchMiddleware
 }
 
 // Indexer is the core indexing engine. It receives change notifications,
@@ -59,17 +66,24 @@ type Indexer struct {
 	river *river.Client[pgx.Tx]
 
 	resources resource.Configs
+
+	// searchChain is the composed search handler: the registered middlewares
+	// wrapped around searchBase. When no middlewares are registered it equals
+	// searchBase, so the search path has zero overhead.
+	searchChain SearchHandler
 }
 
 // New creates a new Indexer with the given configuration.
 func New(cfg Config) *Indexer {
-	return &Indexer{
+	idx := &Indexer{
 		st:        cfg.Store,
 		es:        cfg.ES,
 		river:     cfg.RiverClient,
 		resources: cfg.Resources,
 		plans:     cfg.Plans,
 	}
+	idx.searchChain = chainSearch(idx.searchBase, cfg.SearchMiddlewares)
+	return idx
 }
 
 // SetRiverClient assigns the River client used to enqueue jobs. It is
