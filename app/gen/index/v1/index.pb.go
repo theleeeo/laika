@@ -500,9 +500,9 @@ const file_index_v1_index_proto_rawDesc = "" +
 	"\fIndexService\x12M\n" +
 	"\fNotifyChange\x12\x1d.index.v1.NotifyChangeRequest\x1a\x1e.index.v1.NotifyChangeResponse\x12\\\n" +
 	"\x11NotifyChangeBatch\x12\".index.v1.NotifyChangeBatchRequest\x1a#.index.v1.NotifyChangeBatchResponse\x12>\n" +
-	"\aRebuild\x12\x18.index.v1.RebuildRequest\x1a\x19.index.v1.RebuildResponseBw\n" +
+	"\aRebuild\x12\x18.index.v1.RebuildRequest\x1a\x19.index.v1.RebuildResponseB\x8d\x01\n" +
 	"\fcom.index.v1B\n" +
-	"IndexProtoP\x01Z\x1aindexer/gen/index/v1;index\xa2\x02\x03IXX\xaa\x02\bIndex.V1\xca\x02\bIndex\\V1\xe2\x02\x14Index\\V1\\GPBMetadata\xea\x02\tIndex::V1b\x06proto3"
+	"IndexProtoP\x01Z0github.com/theleeeo/laika/app/gen/index/v1;index\xa2\x02\x03IXX\xaa\x02\bIndex.V1\xca\x02\bIndex\\V1\xe2\x02\x14Index\\V1\\GPBMetadata\xea\x02\tIndex::V1b\x06proto3"
 
 var (
 	file_index_v1_index_proto_rawDescOnce sync.Once

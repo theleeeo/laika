@@ -681,8 +681,8 @@ const file_search_v1_search_proto_rawDesc = "" +
 	"\fFILTER_OP_IN\x10\x022\xa8\x01\n" +
 	"\rSearchService\x12=\n" +
 	"\x06Search\x12\x18.search.v1.SearchRequest\x1a\x19.search.v1.SearchResponse\x12X\n" +
-	"\x0fGetCapabilities\x12!.search.v1.GetCapabilitiesRequest\x1a\".search.v1.GetCapabilitiesResponseB\x81\x01\n" +
-	"\rcom.search.v1B\vSearchProtoP\x01Z\x1eindexer/gen/searcher/v1;search\xa2\x02\x03SXX\xaa\x02\tSearch.V1\xca\x02\tSearch\\V1\xe2\x02\x15Search\\V1\\GPBMetadata\xea\x02\n" +
+	"\x0fGetCapabilities\x12!.search.v1.GetCapabilitiesRequest\x1a\".search.v1.GetCapabilitiesResponseB\x95\x01\n" +
+	"\rcom.search.v1B\vSearchProtoP\x01Z2github.com/theleeeo/laika/app/gen/search/v1;search\xa2\x02\x03SXX\xaa\x02\tSearch.V1\xca\x02\tSearch\\V1\xe2\x02\x15Search\\V1\\GPBMetadata\xea\x02\n" +
 	"Search::V1b\x06proto3"
 
 var (

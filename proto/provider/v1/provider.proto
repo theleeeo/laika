@@ -4,7 +4,7 @@ package provider.v1;
 
 import "google/protobuf/struct.proto";
 
-option go_package = "indexer/gen/provider/v1;provider";
+option go_package = "github.com/theleeeo/laika/app/gen/provider/v1;provider";
 
 // ProviderService is the API that a source provider plugin must implement.
 // The indexer connects to it as a gRPC client to fetch resource data.

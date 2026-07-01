@@ -629,8 +629,8 @@ const file_provider_v1_provider_proto_rawDesc = "" +
 	"\x0fProviderService\x12V\n" +
 	"\rFetchResource\x12!.provider.v1.FetchResourceRequest\x1a\".provider.v1.FetchResourceResponse\x12S\n" +
 	"\fFetchRelated\x12 .provider.v1.FetchRelatedRequest\x1a!.provider.v1.FetchRelatedResponse\x12V\n" +
-	"\rListResources\x12!.provider.v1.ListResourcesRequest\x1a\".provider.v1.ListResourcesResponseB\x8f\x01\n" +
-	"\x0fcom.provider.v1B\rProviderProtoP\x01Z indexer/gen/provider/v1;provider\xa2\x02\x03PXX\xaa\x02\vProvider.V1\xca\x02\vProvider\\V1\xe2\x02\x17Provider\\V1\\GPBMetadata\xea\x02\fProvider::V1b\x06proto3"
+	"\rListResources\x12!.provider.v1.ListResourcesRequest\x1a\".provider.v1.ListResourcesResponseB\xa5\x01\n" +
+	"\x0fcom.provider.v1B\rProviderProtoP\x01Z6github.com/theleeeo/laika/app/gen/provider/v1;provider\xa2\x02\x03PXX\xaa\x02\vProvider.V1\xca\x02\vProvider\\V1\xe2\x02\x17Provider\\V1\\GPBMetadata\xea\x02\fProvider::V1b\x06proto3"
 
 var (
 	file_provider_v1_provider_proto_rawDescOnce sync.Once

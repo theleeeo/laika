@@ -2,9 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"log/slog"
-	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -12,21 +13,20 @@ import (
 
 	"github.com/theleeeo/laika/app/config"
 	"github.com/theleeeo/laika/app/dsl"
-	"github.com/theleeeo/laika/app/gen/index/v1"
-	"github.com/theleeeo/laika/app/gen/search/v1"
+	"github.com/theleeeo/laika/app/gen/index/v1/indexconnect"
+	"github.com/theleeeo/laika/app/gen/search/v1/searchconnect"
 	"github.com/theleeeo/laika/app/server"
 	"github.com/theleeeo/laika/app/source"
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/storage/postgres"
 
+	"connectrpc.com/grpcreflect"
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivermigrate"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -119,15 +119,31 @@ func main() {
 	idxSrv := server.NewIndexer(idx)
 	searchSrv := server.NewSearcher(idx)
 
-	lis, err := net.Listen("tcp", cfg.GRPC.Addr)
-	if err != nil {
-		log.Fatalf("listen: %v", err)
-	}
+	// A single Connect-backed HTTP server serves gRPC, gRPC-Web, and the
+	// Connect protocol (HTTP POST + JSON) from the same handlers. Existing
+	// plain-gRPC clients keep working; web clients get JSON for free.
+	mux := http.NewServeMux()
+	mux.Handle(indexconnect.NewIndexServiceHandler(idxSrv))
+	mux.Handle(searchconnect.NewSearchServiceHandler(searchSrv))
 
-	g := grpc.NewServer()
-	index.RegisterIndexServiceServer(g, idxSrv)
-	search.RegisterSearchServiceServer(g, searchSrv)
-	reflection.Register(g)
+	reflector := grpcreflect.NewStaticReflector(
+		indexconnect.IndexServiceName,
+		searchconnect.SearchServiceName,
+	)
+	mux.Handle(grpcreflect.NewHandlerV1(reflector))
+	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+
+	// Enable unencrypted (h2c) HTTP/2 so gRPC clients can speak HTTP/2 over
+	// cleartext on the same port, while HTTP/1.1 stays available for Connect/JSON.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	httpSrv := &http.Server{
+		Addr:      cfg.GRPC.Addr,
+		Handler:   mux,
+		Protocols: protocols,
+	}
 
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt)
@@ -148,11 +164,11 @@ func main() {
 	})
 
 	wg.Go(func() {
-		log.Printf("gRPC server listening on %s", cfg.GRPC.Addr)
-		if err := g.Serve(lis); err != nil {
-			log.Printf("gRPC server error: %v", err)
+		log.Printf("HTTP server (gRPC + gRPC-Web + Connect) listening on %s", cfg.GRPC.Addr)
+		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("HTTP server error: %v", err)
 		}
-		log.Printf("gRPC server stopped")
+		log.Printf("HTTP server stopped")
 	})
 
 	<-stopChan
@@ -164,16 +180,21 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Ask River to stop gracefully; cancelling ctx would force an immediate stop.
+	// Ask River and the HTTP server to stop gracefully; cancelling ctx would
+	// force an immediate stop.
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer stopCancel()
+
+	// Stop accepting new requests first, then drain River jobs.
+	if err := httpSrv.Shutdown(stopCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+
 	if err := riverClient.Stop(stopCtx); err != nil {
 		log.Printf("river client stop error: %v", err)
 	}
-	stopCancel()
 
 	cancel()
-
-	g.GracefulStop()
 
 	wg.Wait()
 }

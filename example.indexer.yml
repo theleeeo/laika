@@ -10,6 +10,9 @@
 #   provider.addr    -> PROVIDER_ADDR
 #   resource_config_path -> RESOURCE_CONFIG_PATH
 
+# Address of the HTTP server. It serves gRPC, gRPC-Web, and the Connect
+# protocol (HTTP POST + JSON, usable directly from a web client) from the same
+# port. gRPC clients connect over HTTP/2 cleartext (h2c) unchanged.
 grpc:
   addr: ":9000"
 

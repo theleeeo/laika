@@ -3,11 +3,10 @@ package server
 import (
 	"testing"
 
+	"connectrpc.com/connect"
 	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/app/gen/index/v1"
 	"github.com/theleeeo/laika/core"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 func TestProtoToNotification_Metadata(t *testing.T) {
@@ -56,8 +55,9 @@ func TestProtoToNotification_VersionZero(t *testing.T) {
 
 func TestMapAppError_StaleVersion(t *testing.T) {
 	err := mapAppError(core.ErrStaleVersion)
-	st, ok := status.FromError(err)
-	require.True(t, ok)
-	require.Equal(t, codes.FailedPrecondition, st.Code())
-	require.Equal(t, "stale version", st.Message())
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	require.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
+	require.Equal(t, "stale version", connectErr.Message())
 }

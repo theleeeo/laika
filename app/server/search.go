@@ -7,14 +7,11 @@ import (
 	"github.com/theleeeo/laika/app/gen/search/v1"
 	"github.com/theleeeo/laika/core"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
 type SearcherServer struct {
-	search.UnimplementedSearchServiceServer
-
 	idx *core.Indexer
 }
 
@@ -22,19 +19,19 @@ func NewSearcher(idx *core.Indexer) *SearcherServer {
 	return &SearcherServer{idx: idx}
 }
 
-func (s *SearcherServer) Search(ctx context.Context, req *search.SearchRequest) (*search.SearchResponse, error) {
-	resp, err := s.idx.Search(ctx, protoToSearchRequest(req))
+func (s *SearcherServer) Search(ctx context.Context, req *connect.Request[search.SearchRequest]) (*connect.Response[search.SearchResponse], error) {
+	resp, err := s.idx.Search(ctx, protoToSearchRequest(req.Msg))
 	if err != nil {
 		if errors.Is(err, core.ErrUnknownResource) {
-			return nil, status.Error(codes.FailedPrecondition, core.ErrUnknownResource.Error())
+			return nil, connect.NewError(connect.CodeFailedPrecondition, core.ErrUnknownResource)
 		}
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, connect.NewError(connect.CodeInternal, err)
 	}
-	return searchResponseToProto(resp), nil
+	return connect.NewResponse(searchResponseToProto(resp)), nil
 }
 
-func (s *SearcherServer) GetCapabilities(ctx context.Context, _ *search.GetCapabilitiesRequest) (*search.GetCapabilitiesResponse, error) {
-	return capabilitiesToProto(s.idx.GetCapabilities()), nil
+func (s *SearcherServer) GetCapabilities(_ context.Context, _ *connect.Request[search.GetCapabilitiesRequest]) (*connect.Response[search.GetCapabilitiesResponse], error) {
+	return connect.NewResponse(capabilitiesToProto(s.idx.GetCapabilities())), nil
 }
 
 func protoToSearchRequest(req *search.SearchRequest) core.SearchRequest {

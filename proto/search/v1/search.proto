@@ -4,7 +4,7 @@ package search.v1;
 
 import "google/protobuf/struct.proto";
 
-option go_package = "indexer/gen/searcher/v1;search";
+option go_package = "github.com/theleeeo/laika/app/gen/search/v1;search";
 
 service SearchService {
   rpc Search(SearchRequest) returns (SearchResponse);

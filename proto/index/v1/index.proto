@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package index.v1;
 
-option go_package = "indexer/gen/index/v1;index";
+option go_package = "github.com/theleeeo/laika/app/gen/index/v1;index";
 
 service IndexService {
   // NotifyChange informs the indexer that a resource has changed.

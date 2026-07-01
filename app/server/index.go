@@ -7,13 +7,10 @@ import (
 	"github.com/theleeeo/laika/app/gen/index/v1"
 	"github.com/theleeeo/laika/core"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"connectrpc.com/connect"
 )
 
 type IndexerServer struct {
-	index.UnimplementedIndexServiceServer
-
 	idx *core.Indexer
 }
 
@@ -23,26 +20,26 @@ func NewIndexer(idx *core.Indexer) *IndexerServer {
 	}
 }
 
-func (s *IndexerServer) NotifyChange(ctx context.Context, req *index.NotifyChangeRequest) (*index.NotifyChangeResponse, error) {
-	if req.Notification == nil {
-		return nil, status.Error(codes.InvalidArgument, "notification is required")
+func (s *IndexerServer) NotifyChange(ctx context.Context, req *connect.Request[index.NotifyChangeRequest]) (*connect.Response[index.NotifyChangeResponse], error) {
+	if req.Msg.Notification == nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("notification is required"))
 	}
 
-	n := protoToNotification(req.Notification)
+	n := protoToNotification(req.Msg.Notification)
 
 	if err := s.idx.RegisterChange(ctx, n); err != nil {
 		return nil, mapAppError(err)
 	}
 
-	return &index.NotifyChangeResponse{}, nil
+	return connect.NewResponse(&index.NotifyChangeResponse{}), nil
 }
 
-func (s *IndexerServer) NotifyChangeBatch(ctx context.Context, req *index.NotifyChangeBatchRequest) (*index.NotifyChangeBatchResponse, error) {
-	if len(req.Notifications) == 0 {
-		return &index.NotifyChangeBatchResponse{}, nil
+func (s *IndexerServer) NotifyChangeBatch(ctx context.Context, req *connect.Request[index.NotifyChangeBatchRequest]) (*connect.Response[index.NotifyChangeBatchResponse], error) {
+	if len(req.Msg.Notifications) == 0 {
+		return connect.NewResponse(&index.NotifyChangeBatchResponse{}), nil
 	}
 
-	for _, pn := range req.Notifications {
+	for _, pn := range req.Msg.Notifications {
 		if pn == nil {
 			continue
 		}
@@ -52,7 +49,7 @@ func (s *IndexerServer) NotifyChangeBatch(ctx context.Context, req *index.Notify
 		}
 	}
 
-	return &index.NotifyChangeBatchResponse{}, nil
+	return connect.NewResponse(&index.NotifyChangeBatchResponse{}), nil
 }
 
 func protoToNotification(pn *index.ChangeNotification) core.Notification {
@@ -77,24 +74,24 @@ func protoToNotification(pn *index.ChangeNotification) core.Notification {
 
 func mapAppError(err error) error {
 	if errors.Is(err, core.ErrUnknownResource) {
-		return status.Error(codes.InvalidArgument, "unknown resource")
+		return connect.NewError(connect.CodeInvalidArgument, errors.New("unknown resource"))
 	}
 	if errors.Is(err, core.ErrStaleVersion) {
-		return status.Error(codes.FailedPrecondition, "stale version")
+		return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale version"))
 	}
 	if invalidArgsErr, ok := errors.AsType[*core.InvalidArgumentError](err); ok {
-		return status.Error(codes.InvalidArgument, invalidArgsErr.Msg)
+		return connect.NewError(connect.CodeInvalidArgument, errors.New(invalidArgsErr.Msg))
 	}
-	return status.Error(codes.Internal, err.Error())
+	return connect.NewError(connect.CodeInternal, err)
 }
 
-func (s *IndexerServer) Rebuild(ctx context.Context, req *index.RebuildRequest) (*index.RebuildResponse, error) {
-	if len(req.Selectors) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "at least one selector is required")
+func (s *IndexerServer) Rebuild(ctx context.Context, req *connect.Request[index.RebuildRequest]) (*connect.Response[index.RebuildResponse], error) {
+	if len(req.Msg.Selectors) == 0 {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("at least one selector is required"))
 	}
 
-	selectors := make([]core.ResourceSelector, len(req.Selectors))
-	for i, ps := range req.Selectors {
+	selectors := make([]core.ResourceSelector, len(req.Msg.Selectors))
+	for i, ps := range req.Msg.Selectors {
 		versions := make([]int, len(ps.Versions))
 		for j, v := range ps.Versions {
 			versions[j] = int(v)
@@ -110,5 +107,5 @@ func (s *IndexerServer) Rebuild(ctx context.Context, req *index.RebuildRequest) 
 		return nil, mapAppError(err)
 	}
 
-	return &index.RebuildResponse{}, nil
+	return connect.NewResponse(&index.RebuildResponse{}), nil
 }
