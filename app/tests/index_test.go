@@ -1074,25 +1074,47 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 	t.Require().Len(staleResp.Hits, 0)
 }
 
+// Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdatesConverge verifies
+// that when two children of the same parent are updated concurrently — and one
+// is then updated a final time — the parent converges to the latest data of
+// every child.
+//
+// Concurrent Builds of the same parent are ordered only by their Build Sequence,
+// which is assigned at build start (NextRebuildCounter), NOT in Notification
+// order. So the Build that wins the ES OCC race is whichever grabs the counter
+// last, independent of which child update was logically latest. Convergence
+// therefore does not rely on the "right" Build winning; it relies on every Build
+// re-fetching live source data and on the drift check re-enqueueing any Build
+// that observed a now-superseded child version. The terminal Build (highest
+// counter, no re-enqueue) is the one that observed current versions, so after
+// the queue drains the parent holds the latest data of both children.
+//
+// The child updates are modelled in the source with versioned relations (not in
+// Notification metadata) so drift detection can compare observed vs stored
+// versions — the mechanism that actually drives convergence in production.
 func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdatesConverge() {
 	t.setResourceConfig(RelatedResourceConfig)
 
-	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_base"})
-	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_base"})
+	// Initial graph: c/1 -> a/1, c/1 -> b/1, all at version 1.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v1"})
+	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_v1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "c_base"})
-	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "a_base"}})
-	t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "b_base"}})
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "a_v1"}, Version: 1}})
+	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "b_v1"}, Version: 1}})
 
 	for _, n := range []core.Notification{
 		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
 		{ResourceType: "b", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
 		{ResourceType: "c", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
 	} {
-		err := t.idx.RegisterChange(t.T().Context(), n)
-		t.Require().NoError(err)
+		t.Require().NoError(t.idx.RegisterChange(t.T().Context(), n))
 	}
 	t.worker.Drain(t.T().Context())
 
+	// Concurrently advance both children to version 2 in the source and notify.
+	// Each fans out to parent c; their Builds of c race on the Build Sequence.
+	// The source data is written before RegisterChange so the fanned-out Build
+	// observes the new version.
 	start := make(chan struct{})
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
@@ -1100,74 +1122,69 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v2"})
+		t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "a_v2"}, Version: 2}})
 		<-start
 		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
-			ResourceType: "a",
-			ResourceID:   "1",
-			Kind:         core.ChangeUpdated,
-			Version:      2,
-			Metadata: map[string]string{
-				"test_override_f1": "c_from_a",
-			},
+			ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 2,
 		})
 	}()
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "b_v2"})
+		t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "b_v2"}, Version: 2}})
 		<-start
 		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
-			ResourceType: "b",
-			ResourceID:   "1",
-			Kind:         core.ChangeUpdated,
-			Version:      2,
-			Metadata: map[string]string{
-				"test_override_f1": "c_from_b",
-			},
+			ResourceType: "b", ResourceID: "1", Kind: core.ChangeUpdated, Version: 2,
 		})
 	}()
 
 	close(start)
 	wg.Wait()
 	close(errCh)
-
 	for registerErr := range errCh {
 		t.Require().NoError(registerErr)
 	}
 
-	err := t.idx.RegisterChange(t.T().Context(), core.Notification{
-		ResourceType: "a",
-		ResourceID:   "1",
-		Kind:         core.ChangeUpdated,
-		Version:      3,
-		Metadata: map[string]string{
-			"test_override_f1": "c_latest",
-		},
-	})
-	t.Require().NoError(err)
+	// A final update to a. This is the value c must ultimately reflect for a.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "a_v3"})
+	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "a_v3"}, Version: 3}})
+	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 3,
+	}))
 
 	t.worker.Drain(t.T().Context())
 
-	latestResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
-		Resource: "c",
-		Query:    "c_latest",
-	})
+	// c must converge to the latest data of both children: a_v3 and b_v2.
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c"})
 	t.Require().NoError(err)
-	t.Require().Len(latestResp.Hits, 1)
+	t.Require().Len(resp.Hits, 1)
 
-	staleRespA, err := t.idx.Search(t.T().Context(), core.SearchRequest{
-		Resource: "c",
-		Query:    "c_from_a",
-	})
-	t.Require().NoError(err)
-	t.Require().Len(staleRespA.Hits, 0)
+	aRels := sourceList(resp.Hits[0].Source, "a")
+	t.Require().Len(aRels, 1)
+	t.Require().Equal("a_v3", fieldStr(aRels[0], "f1"))
 
-	staleRespB, err := t.idx.Search(t.T().Context(), core.SearchRequest{
-		Resource: "c",
-		Query:    "c_from_b",
-	})
+	bRels := sourceList(resp.Hits[0].Source, "b")
+	t.Require().Len(bRels, 1)
+	t.Require().Equal("b_v2", fieldStr(bRels[0], "f1"))
+
+	// The latest child values are searchable on c.
+	latestA, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c", Query: "a_v3"})
 	t.Require().NoError(err)
-	t.Require().Len(staleRespB.Hits, 0)
+	t.Require().Len(latestA.Hits, 1)
+
+	latestB, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c", Query: "b_v2"})
+	t.Require().NoError(err)
+	t.Require().Len(latestB.Hits, 1)
+
+	// Superseded child values are gone.
+	for _, stale := range []string{"a_v1", "a_v2", "b_v1"} {
+		staleResp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "c", Query: stale})
+		t.Require().NoError(err)
+		t.Require().Lenf(staleResp.Hits, 0, "stale value %q should not be searchable on c", stale)
+	}
 }
 
 // Test_RaceCondition_ChildUpdatedDuringParentBuild reproduces the race where a
