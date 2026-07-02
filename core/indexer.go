@@ -82,8 +82,9 @@ func New(cfg Config) *Indexer {
 		resources: cfg.Resources,
 		plans:     cfg.Plans,
 	}
-	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+1)
+	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+2)
 	mws = append(mws, cfg.SearchMiddlewares...) // user middleware runs first (outermost); nothing precedes it
+	mws = append(mws, idx.deriveNestedPath)     // fill NestedPath for denormalized-many relation fields, before referenceResolve strips reference filters
 	mws = append(mws, idx.referenceResolve)     // innermost: route filters by path, run child searches, fold terms
 
 	idx.searchChain = chainSearch(idx.searchBase, mws)
