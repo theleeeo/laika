@@ -17,6 +17,7 @@ import (
 	"github.com/theleeeo/laika/app/gen/search/v1/searchconnect"
 	"github.com/theleeeo/laika/app/server"
 	"github.com/theleeeo/laika/app/source"
+	"github.com/theleeeo/laika/app/webui"
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/storage/postgres"
@@ -132,6 +133,10 @@ func main() {
 	)
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+
+	// Serve the self-contained demo search console at "/". The service routes
+	// above are registered on longer prefixes, so ServeMux keeps them intact.
+	mux.Handle("/", webui.Handler())
 
 	// Enable unencrypted (h2c) HTTP/2 so gRPC clients can speak HTTP/2 over
 	// cleartext on the same port, while HTTP/1.1 stays available for Connect/JSON.

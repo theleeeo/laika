@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laika · search console</title>
+<style>
+  :root {
+    --bg:        #0b0d0c;
+    --bg-grid:   #121512;
+    --panel:     #14171500;
+    --panel-2:   #171a18;
+    --line:      #262b27;
+    --line-2:    #333a34;
+    --ink:       #d9ded8;
+    --ink-dim:   #8a938a;
+    --ink-faint: #5c645d;
+    --signal:    #c3f53c;
+    --signal-dim:#7f9e2a;
+    --warn:      #f5a35c;
+    --err:       #f56c6c;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Menlo", "Consolas", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    background-image:
+      linear-gradient(var(--bg-grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px);
+    background-size: 26px 26px;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--signal); }
+
+  /* ---- header ---- */
+  header {
+    display: flex; align-items: center; gap: 18px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, #0f120f, #0b0d0c);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand .led {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--signal); box-shadow: 0 0 8px var(--signal);
+    align-self: center;
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+  .brand h1 {
+    margin: 0; font-size: 14px; font-weight: 600; letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .brand .sub { color: var(--ink-faint); font-size: 11px; letter-spacing: 1px; }
+  .header-spacer { flex: 1; }
+  .res-picker { display: flex; align-items: center; gap: 8px; }
+  .res-picker label { color: var(--ink-dim); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
+  #status {
+    font-size: 11px; color: var(--ink-dim);
+    border: 1px solid var(--line); border-radius: 2px;
+    padding: 4px 10px; white-space: nowrap;
+  }
+  #status.ok  { color: var(--signal); border-color: var(--signal-dim); }
+  #status.err { color: var(--err);    border-color: var(--err); }
+
+  /* ---- layout ---- */
+  main {
+    display: grid;
+    grid-template-columns: minmax(340px, 400px) 1fr;
+    gap: 0;
+    height: calc(100vh - 57px);
+  }
+  aside {
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 16px 16px 40px;
+  }
+  section.results {
+    overflow-y: auto;
+    display: flex; flex-direction: column;
+  }
+
+  /* ---- form controls ---- */
+  .block { margin-bottom: 22px; }
+  .block > .head {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--ink-dim); font-size: 10px; letter-spacing: 2px;
+    text-transform: uppercase; margin-bottom: 10px;
+  }
+  .block > .head::before {
+    content: ""; width: 5px; height: 5px; background: var(--signal-dim);
+    transform: rotate(45deg); flex: none;
+  }
+  .block > .head .rule { flex: 1; height: 1px; background: var(--line); }
+
+  input[type=text], select, textarea {
+    width: 100%;
+    background: #0e100e;
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: var(--mono); font-size: 13px;
+    padding: 7px 9px;
+    border-radius: 2px;
+    outline: none;
+  }
+  input[type=text]:focus, select:focus {
+    border-color: var(--signal-dim);
+    box-shadow: 0 0 0 1px var(--signal-dim);
+  }
+  input::placeholder { color: var(--ink-faint); }
+  select { cursor: pointer; appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--ink-dim) 50%),
+                      linear-gradient(135deg, var(--ink-dim) 50%, transparent 50%);
+    background-position: right 12px center, right 7px center;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+    padding-right: 26px;
+  }
+
+  /* full-text query */
+  .query-wrap { position: relative; }
+  .query-wrap .hint { color: var(--ink-faint); font-size: 10px; margin-top: 6px; }
+
+  /* filter groups */
+  .fgroup { margin-bottom: 14px; }
+  .fgroup .glabel {
+    color: var(--ink); font-size: 11px; letter-spacing: 1px;
+    padding: 5px 0; border-bottom: 1px dashed var(--line);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
+  }
+  .fgroup .glabel .tag {
+    color: #0b0d0c; background: var(--signal-dim); font-size: 9px;
+    padding: 1px 6px; border-radius: 2px; letter-spacing: 1px; text-transform: uppercase;
+  }
+  .fgroup .glabel .tag.rel { background: #3a4a1c; color: var(--signal); }
+  .frow { margin-bottom: 10px; }
+  .frow .fname {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin-bottom: 4px;
+  }
+  .frow .fname .path { color: var(--ink); }
+  .frow .fname .type { color: var(--ink-faint); font-size: 10px; }
+  .frow .controls { display: grid; grid-template-columns: 62px 1fr; gap: 6px; }
+  .frow select.op { padding: 6px 20px 6px 8px; font-size: 11px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .chip {
+    font-size: 10px; color: var(--signal); background: #1b2410;
+    border: 1px solid #3a4a1c; padding: 1px 7px; border-radius: 10px;
+  }
+  .frow.active .fname .path { color: var(--signal); }
+
+  .empty { color: var(--ink-faint); font-size: 11px; font-style: italic; }
+
+  /* pagination + actions */
+  .pager { display: flex; align-items: center; gap: 8px; }
+  .pager select { width: auto; }
+  .actions { display: flex; gap: 8px; margin-top: 8px; position: sticky; bottom: 0;
+    background: linear-gradient(0deg, var(--bg) 60%, transparent);
+    padding-top: 14px; }
+  button {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 1px;
+    cursor: pointer; border-radius: 2px; padding: 9px 14px;
+    border: 1px solid var(--line-2); background: #171a17; color: var(--ink);
+    text-transform: uppercase;
+    transition: background .12s, border-color .12s, color .12s;
+  }
+  button:hover { border-color: var(--signal-dim); color: var(--signal); }
+  button.primary { background: var(--signal); color: #0b0d0c; border-color: var(--signal); font-weight: 600; flex: 1; }
+  button.primary:hover { background: #d3ff5c; color: #0b0d0c; }
+  button.ghost { padding: 6px 10px; font-size: 11px; }
+  button:disabled { opacity: .35; cursor: not-allowed; border-color: var(--line); color: var(--ink-dim); }
+
+  /* ---- results ---- */
+  .results-bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 18px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: #0d0f0d; z-index: 5;
+  }
+  .results-bar .total { font-size: 13px; }
+  .results-bar .total b { color: var(--signal); }
+  .results-bar .spacer { flex: 1; }
+  .results-bar .took { color: var(--ink-faint); font-size: 11px; }
+
+  .table-wrap { overflow-x: auto; flex: 1; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  thead th {
+    text-align: left; color: var(--ink-dim); font-weight: 500;
+    font-size: 10px; letter-spacing: 1px; text-transform: uppercase;
+    padding: 9px 14px; border-bottom: 1px solid var(--line);
+    position: sticky; top: 49px; background: #0d0f0d; white-space: nowrap;
+  }
+  tbody td { padding: 8px 14px; border-bottom: 1px solid #1a1d1a; vertical-align: top; }
+  tbody tr.hit { cursor: pointer; }
+  tbody tr.hit:hover { background: #12150f; }
+  tbody tr.hit td:first-child { color: var(--signal); }
+  td .obj { color: var(--ink-faint); font-style: italic; }
+  td .score { color: var(--ink-dim); }
+  .caret { color: var(--ink-faint); display: inline-block; width: 10px; }
+  tr.detail td { background: #0c0e0c; padding: 0; border-bottom: 1px solid var(--line); }
+  tr.detail pre {
+    margin: 0; padding: 14px 18px; font-size: 12px; color: var(--ink);
+    white-space: pre-wrap; word-break: break-word; max-height: 380px; overflow: auto;
+  }
+  .no-results { padding: 40px 18px; color: var(--ink-faint); }
+
+  /* ---- raw panel ---- */
+  .raw {
+    border-top: 1px solid var(--line); background: #0c0e0c;
+  }
+  .raw .raw-head {
+    display: flex; gap: 8px; padding: 8px 18px; cursor: pointer;
+    color: var(--ink-dim); font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+    user-select: none;
+  }
+  .raw .raw-head:hover { color: var(--signal); }
+  .raw .raw-body { display: none; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); }
+  .raw.open .raw-body { display: grid; }
+  .raw .col { background: #0c0e0c; }
+  .raw .col h4 { margin: 0; padding: 8px 18px; font-size: 10px; color: var(--ink-faint);
+    letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+  .raw pre { margin: 0; padding: 12px 18px; font-size: 11px; color: var(--ink-dim);
+    white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+
+  /* scrollbars */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #23281f; border: 2px solid var(--bg); border-radius: 6px; }
+  ::-webkit-scrollbar-thumb:hover { background: #333c2b; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="led"></span>
+      <h1>laika</h1>
+      <span class="sub">search console</span>
+    </div>
+    <div class="header-spacer"></div>
+    <div class="res-picker">
+      <label for="resource">resource</label>
+      <select id="resource" style="width:auto;min-width:150px"></select>
+    </div>
+    <div id="status">connecting…</div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="block">
+        <div class="head">full-text query <span class="rule"></span></div>
+        <div class="query-wrap">
+          <input type="text" id="query" placeholder="search across searchable fields…" autocomplete="off">
+          <div class="hint" id="query-hint"></div>
+        </div>
+      </div>
+
+      <div class="block" id="sort-block">
+        <div class="head">sort <span class="rule"></span></div>
+        <div class="pager">
+          <select id="sort-field"><option value="">— relevance —</option></select>
+          <button class="ghost" id="sort-dir" title="toggle direction">DESC ↓</button>
+        </div>
+      </div>
+
+      <div class="block">
+        <div class="head">filters <span class="rule"></span></div>
+        <div id="filters"></div>
+      </div>
+
+      <div class="actions">
+        <button class="primary" id="run">Search</button>
+        <button id="reset">Reset</button>
+      </div>
+    </aside>
+
+    <section class="results">
+      <div class="results-bar">
+        <div class="total" id="total">—</div>
+        <div class="spacer"></div>
+        <div class="pager">
+          <button class="ghost" id="prev" disabled>◀ prev</button>
+          <span id="page-label" style="color:var(--ink-dim)">page 1</span>
+          <button class="ghost" id="next" disabled>next ▶</button>
+          <select id="page-size" title="page size">
+            <option>10</option><option selected>25</option><option>50</option><option>100</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table id="results-table">
+          <thead><tr id="thead-row"></tr></thead>
+          <tbody id="results-body"></tbody>
+        </table>
+        <div class="no-results" id="no-results">Run a search to see results.</div>
+      </div>
+
+      <div class="raw" id="raw">
+        <div class="raw-head" id="raw-toggle">▸ raw request / response</div>
+        <div class="raw-body">
+          <div class="col"><h4>SearchRequest →</h4><pre id="raw-req">—</pre></div>
+          <div class="col"><h4>← SearchResponse</h4><pre id="raw-resp">—</pre></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+<script>
+"use strict";
+
+const GET_CAPS = "/search.v1.SearchService/GetCapabilities";
+const SEARCH   = "/search.v1.SearchService/Search";
+
+const state = {
+  caps: {},            // resource name -> ResourceCapability
+  resource: null,
+  page: 0,
+  sortDesc: true,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function setStatus(msg, cls) {
+  const el = $("status");
+  el.textContent = msg;
+  el.className = cls || "";
+}
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`${res.status}: ${text || res.statusText}`);
+  return text ? JSON.parse(text) : {};
+}
+
+// ---- capabilities ----------------------------------------------------------
+
+async function loadCapabilities() {
+  setStatus("loading capabilities…");
+  const resp = await post(GET_CAPS, {});
+  const resources = resp.resources || [];
+  state.caps = {};
+  const sel = $("resource");
+  sel.innerHTML = "";
+  for (const rc of resources) {
+    state.caps[rc.resource] = rc;
+    const opt = document.createElement("option");
+    opt.value = rc.resource;
+    opt.textContent = rc.resource;
+    sel.appendChild(opt);
+  }
+  if (!resources.length) throw new Error("server reported no resources");
+  state.resource = resources[0].resource;
+  sel.value = state.resource;
+  renderResource();
+  setStatus(`${resources.length} resource(s) · ${state.resource}`, "ok");
+}
+
+// A field is filterable when the server advertises filter operations on it.
+const isFilterable = (f) => Array.isArray(f.filterOps) && f.filterOps.length > 0;
+const opLabel = (op) => op === "FILTER_OP_IN" ? "IN" : "EQ";
+
+// Split "fields.x" / "b.name" into { group, label, isRoot }.
+function classify(path) {
+  const dot = path.indexOf(".");
+  if (dot <= 0) return { group: "Root fields", label: path, isRoot: true };
+  const head = path.slice(0, dot), tail = path.slice(dot + 1);
+  if (head === "fields") return { group: "Root fields", label: tail, isRoot: true };
+  return { group: head, label: tail, isRoot: false };
+}
+
+function renderResource() {
+  const rc = state.caps[state.resource];
+  const fields = (rc && rc.fields) || [];
+
+  // full-text query hint
+  const searchable = fields.filter((f) => f.searchable === true).map((f) => f.field);
+  $("query-hint").textContent = searchable.length
+    ? `matches: ${searchable.join(", ")}`
+    : "no searchable (full-text) fields on this resource";
+
+  // sort options
+  const sortSel = $("sort-field");
+  sortSel.innerHTML = '<option value="">— relevance —</option>';
+  for (const f of fields.filter((f) => f.sortable === true)) {
+    const o = document.createElement("option");
+    o.value = f.field; o.textContent = f.field;
+    sortSel.appendChild(o);
+  }
+
+  // filters, grouped
+  const box = $("filters");
+  box.innerHTML = "";
+  const filterable = fields.filter(isFilterable);
+  if (!filterable.length) {
+    box.innerHTML = '<div class="empty">No filterable fields on this resource.</div>';
+    return;
+  }
+  const groups = new Map(); // group -> [field]
+  for (const f of filterable) {
+    const c = classify(f.field);
+    if (!groups.has(c.group)) groups.set(c.group, []);
+    groups.get(c.group).push({ f, c });
+  }
+  // Root fields first, then relations alphabetically.
+  const order = [...groups.keys()].sort((a, b) =>
+    (a === "Root fields" ? -1 : b === "Root fields" ? 1 : a.localeCompare(b)));
+
+  for (const g of order) {
+    const isRoot = g === "Root fields";
+    const grp = document.createElement("div");
+    grp.className = "fgroup";
+    const label = document.createElement("div");
+    label.className = "glabel";
+    label.innerHTML = isRoot
+      ? `<span class="tag">root</span> Root fields`
+      : `<span class="tag rel">relation</span> ${g}`;
+    grp.appendChild(label);
+
+    for (const { f, c } of groups.get(g)) {
+      grp.appendChild(filterRow(f, c));
+    }
+    box.appendChild(grp);
+  }
+}
+
+function filterRow(f, c) {
+  const row = document.createElement("div");
+  row.className = "frow";
+  row.dataset.field = f.field;
+
+  const name = document.createElement("div");
+  name.className = "fname";
+  name.innerHTML = `<span class="path" title="${f.field}">${c.label}</span>` +
+                   `<span class="type">${f.type || ""}</span>`;
+  row.appendChild(name);
+
+  const controls = document.createElement("div");
+  controls.className = "controls";
+
+  const op = document.createElement("select");
+  op.className = "op";
+  for (const o of f.filterOps) {
+    const opt = document.createElement("option");
+    opt.value = o; opt.textContent = opLabel(o);
+    op.appendChild(opt);
+  }
+
+  const val = document.createElement("input");
+  val.type = "text";
+  val.className = "val";
+  val.autocomplete = "off";
+
+  const chips = document.createElement("div");
+  chips.className = "chips";
+
+  const syncMode = () => {
+    const isIn = op.value === "FILTER_OP_IN";
+    val.placeholder = isIn ? "comma-separated values…" : "value…";
+    chips.style.display = isIn ? "flex" : "none";
+    renderChips();
+    row.classList.toggle("active", val.value.trim() !== "");
+  };
+  const renderChips = () => {
+    chips.innerHTML = "";
+    if (op.value !== "FILTER_OP_IN") return;
+    for (const v of parseValues(val.value)) {
+      const chip = document.createElement("span");
+      chip.className = "chip"; chip.textContent = v;
+      chips.appendChild(chip);
+    }
+  };
+
+  op.addEventListener("change", syncMode);
+  val.addEventListener("input", () => { renderChips(); row.classList.toggle("active", val.value.trim() !== ""); });
+  val.addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
+
+  controls.appendChild(op);
+  controls.appendChild(val);
+  row.appendChild(controls);
+  row.appendChild(chips);
+  syncMode();
+  return row;
+}
+
+const parseValues = (s) => s.split(",").map((v) => v.trim()).filter((v) => v.length > 0);
+
+// ---- request assembly ------------------------------------------------------
+
+function collectFilters() {
+  const out = [];
+  for (const row of document.querySelectorAll(".frow")) {
+    const field = row.dataset.field;
+    const op = row.querySelector("select.op").value;
+    const raw = row.querySelector("input.val").value;
+    if (op === "FILTER_OP_IN") {
+      const values = parseValues(raw);
+      if (values.length) out.push({ field, op, values });
+    } else {
+      const value = raw.trim();
+      if (value) out.push({ field, op, value });
+    }
+  }
+  return out;
+}
+
+function buildRequest() {
+  const req = {
+    resource: state.resource,
+    page: state.page,
+    pageSize: parseInt($("page-size").value, 10),
+    includeSource: true,
+  };
+  const q = $("query").value.trim();
+  if (q) req.query = q;
+  const filters = collectFilters();
+  if (filters.length) req.filters = filters;
+  const sortField = $("sort-field").value;
+  if (sortField) req.sort = [{ field: sortField, desc: state.sortDesc }];
+  return req;
+}
+
+// ---- search + render -------------------------------------------------------
+
+async function runSearch() {
+  const req = buildRequest();
+  $("raw-req").textContent = JSON.stringify(req, null, 2);
+  setStatus("searching…");
+  $("run").disabled = true;
+  try {
+    const t0 = performance.now();
+    const resp = await post(SEARCH, req);
+    const ms = Math.round(performance.now() - t0);
+    $("raw-resp").textContent = JSON.stringify(resp, null, 2);
+    renderResults(resp, ms);
+    setStatus(`ok · ${state.resource}`, "ok");
+  } catch (err) {
+    $("raw-resp").textContent = String(err);
+    $("raw").classList.add("open");
+    $("raw-toggle").textContent = "▾ raw request / response";
+    setStatus(String(err), "err");
+    renderResults({ total: "0", hits: [] }, 0);
+  } finally {
+    $("run").disabled = false;
+  }
+}
+
+function renderResults(resp, ms) {
+  const hits = resp.hits || [];
+  const total = Number(resp.total || 0);
+
+  $("total").innerHTML = `<b>${total.toLocaleString()}</b> hit${total === 1 ? "" : "s"}`;
+  const pageSize = parseInt($("page-size").value, 10);
+  $("page-label").textContent = `page ${state.page + 1}`;
+  $("prev").disabled = state.page <= 0;
+  $("next").disabled = (state.page + 1) * pageSize >= total;
+
+  const thead = $("thead-row");
+  const body = $("results-body");
+  thead.innerHTML = ""; body.innerHTML = "";
+
+  if (!hits.length) {
+    $("no-results").style.display = "block";
+    $("no-results").textContent = total === 0 ? "No documents matched." : "No hits on this page.";
+    $("results-table").style.display = "none";
+    return;
+  }
+  $("no-results").style.display = "none";
+  $("results-table").style.display = "table";
+
+  // Columns: id, score, then the union of top-level source keys (stable order).
+  const keys = [];
+  const seen = new Set();
+  for (const h of hits) {
+    for (const k of Object.keys(h.source || {})) {
+      if (!seen.has(k)) { seen.add(k); keys.push(k); }
+    }
+  }
+  for (const label of ["", "id", "score", ...keys]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    thead.appendChild(th);
+  }
+
+  for (const h of hits) {
+    const tr = document.createElement("tr");
+    tr.className = "hit";
+    const src = h.source || {};
+
+    const caretTd = document.createElement("td");
+    caretTd.innerHTML = '<span class="caret">▸</span>';
+    tr.appendChild(caretTd);
+
+    const idTd = document.createElement("td"); idTd.textContent = h.id || ""; tr.appendChild(idTd);
+    const scoreTd = document.createElement("td");
+    scoreTd.innerHTML = `<span class="score">${(h.score ?? 0).toFixed(3)}</span>`;
+    tr.appendChild(scoreTd);
+
+    for (const k of keys) {
+      const td = document.createElement("td");
+      td.appendChild(cell(src[k]));
+      tr.appendChild(td);
+    }
+
+    const detail = document.createElement("tr");
+    detail.className = "detail";
+    detail.style.display = "none";
+    const dtd = document.createElement("td");
+    dtd.colSpan = keys.length + 3;
+    const pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(src, null, 2);
+    dtd.appendChild(pre);
+    detail.appendChild(dtd);
+
+    tr.addEventListener("click", () => {
+      const open = detail.style.display !== "none";
+      detail.style.display = open ? "none" : "table-row";
+      caretTd.querySelector(".caret").textContent = open ? "▸" : "▾";
+    });
+
+    body.appendChild(tr);
+    body.appendChild(detail);
+  }
+}
+
+function cell(v) {
+  const span = document.createElement("span");
+  if (v === null || v === undefined) { span.className = "obj"; span.textContent = "—"; }
+  else if (Array.isArray(v)) { span.className = "obj"; span.textContent = `[${v.length}]`; }
+  else if (typeof v === "object") { span.className = "obj"; span.textContent = "{…}"; }
+  else span.textContent = String(v);
+  return span;
+}
+
+// ---- events ----------------------------------------------------------------
+
+$("resource").addEventListener("change", (e) => {
+  state.resource = e.target.value;
+  state.page = 0;
+  renderResource();
+  setStatus(`resource · ${state.resource}`, "ok");
+});
+
+$("run").addEventListener("click", () => { state.page = 0; runSearch(); });
+
+$("reset").addEventListener("click", () => {
+  $("query").value = "";
+  $("sort-field").value = "";
+  state.sortDesc = true;
+  $("sort-dir").textContent = "DESC ↓";
+  state.page = 0;
+  renderResource();
+  $("results-body").innerHTML = "";
+  $("thead-row").innerHTML = "";
+  $("results-table").style.display = "none";
+  $("no-results").style.display = "block";
+  $("no-results").textContent = "Run a search to see results.";
+  $("total").textContent = "—";
+  $("raw-req").textContent = "—";
+  $("raw-resp").textContent = "—";
+  setStatus(`reset · ${state.resource}`, "ok");
+});
+
+$("sort-dir").addEventListener("click", () => {
+  state.sortDesc = !state.sortDesc;
+  $("sort-dir").textContent = state.sortDesc ? "DESC ↓" : "ASC ↑";
+});
+
+$("prev").addEventListener("click", () => { if (state.page > 0) { state.page--; runSearch(); } });
+$("next").addEventListener("click", () => { state.page++; runSearch(); });
+$("page-size").addEventListener("change", () => { state.page = 0; runSearch(); });
+$("query").addEventListener("keydown", (e) => { if (e.key === "Enter") { state.page = 0; runSearch(); } });
+
+$("raw-toggle").addEventListener("click", () => {
+  const raw = $("raw");
+  raw.classList.toggle("open");
+  $("raw-toggle").textContent = (raw.classList.contains("open") ? "▾" : "▸") + " raw request / response";
+});
+
+loadCapabilities().catch((err) => setStatus(String(err), "err"));
+</script>
+</body>
+</html>
