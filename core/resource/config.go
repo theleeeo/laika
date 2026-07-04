@@ -157,8 +157,9 @@ const (
 )
 
 type RelationConfig struct {
-	Resource    string        `yaml:"resource"`
-	Join        JoinConfig    `yaml:"join"`
+	Resource string     `yaml:"resource"`
+	Join     JoinConfig `yaml:"join"`
+	// TODO: No default for cardinality; we should require it to be explicit in the config.
 	Cardinality string        `yaml:"cardinality"` // "one" or "many"; defaults to "many"
 	Strategy    string        `yaml:"strategy"`    // "denormalize" (default) or "reference"
 	Fields      []FieldConfig `yaml:"fields"`
