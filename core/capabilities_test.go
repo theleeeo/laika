@@ -22,8 +22,8 @@ func TestGetCapabilities_SingleResource(t *testing.T) {
 			{
 				Version: 1,
 				Fields: []resource.FieldConfig{
-					{Name: "title", Type: "text"},
-					{Name: "status"},
+					{Name: "title", Type: "text", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
+					{Name: "status", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 				},
 			},
 		},
@@ -61,14 +61,14 @@ func TestGetCapabilities_WithRelations(t *testing.T) {
 			{
 				Version: 1,
 				Fields: []resource.FieldConfig{
-					{Name: "order_number"},
+					{Name: "order_number", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 				},
 				Relations: []resource.RelationConfig{
 					{
 						Resource: "customer",
 						Fields: []resource.FieldConfig{
-							{Name: "name", Type: "text"},
-							{Name: "tier"},
+							{Name: "name", Type: "text", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
+							{Name: "tier", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 						},
 					},
 				},
@@ -94,14 +94,13 @@ func TestGetCapabilities_WithRelations(t *testing.T) {
 }
 
 func TestGetCapabilities_SearchDisabled(t *testing.T) {
-	falseVal := false
 	cfg := &resource.Config{
 		Resource: "item",
 		Versions: []resource.VersionConfig{
 			{
 				Version: 1,
 				Fields: []resource.FieldConfig{
-					{Name: "code", Query: resource.QueryConfig{Search: &falseVal}},
+					{Name: "code", Query: resource.QueryConfig{Search: resource.SearchTierNone}},
 				},
 			},
 		},
@@ -119,7 +118,7 @@ func TestGetCapabilities_SearchDisabled(t *testing.T) {
 
 func TestGetCapabilities_MultipleResources(t *testing.T) {
 	cfgA := &resource.Config{Resource: "a", Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "x"}}}}}
-	cfgB := &resource.Config{Resource: "b", Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "y", Type: "integer"}}}}}
+	cfgB := &resource.Config{Resource: "b", Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "y", Type: "integer", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}}}}}
 	cfgA.ApplyDefaults()
 	cfgB.ApplyDefaults()
 	idx := New(Config{
@@ -141,17 +140,17 @@ func TestGetCapabilities_MultipleResources(t *testing.T) {
 
 func TestReferenceFieldsAreFilterOnly(t *testing.T) {
 	cfg := &resource.Config{
-		Resource:   "c",
+		Resource:    "c",
 		ReadVersion: 1,
 		Versions: []resource.VersionConfig{{
 			Version: 1,
-			Fields: []resource.FieldConfig{{Name: "b_id"}},
+			Fields:  []resource.FieldConfig{{Name: "b_id"}},
 			Relations: []resource.RelationConfig{
 				{
 					Resource: "b",
 					Strategy: resource.StrategyReference,
-					Join: resource.JoinConfig{Local: "b_id", Foreign: "id"},
-					Fields: []resource.FieldConfig{{Name: "name"}},
+					Join:     resource.JoinConfig{Local: "b_id", Foreign: "id"},
+					Fields:   []resource.FieldConfig{{Name: "name"}},
 				},
 			},
 		}},

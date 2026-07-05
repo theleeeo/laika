@@ -119,7 +119,7 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 
 	var flatFields []string
 	for _, f := range vc.Fields {
-		if f.Query.Search == nil || *f.Query.Search {
+		if f.Query.IsSearchable() {
 			flatFields = append(flatFields, "fields."+f.Name)
 		}
 	}
@@ -135,7 +135,7 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 	for _, rel := range vc.Relations {
 		var relFields []string
 		for _, f := range rel.Fields {
-			if f.Query.Search == nil || *f.Query.Search {
+			if f.Query.IsSearchable() {
 				relFields = append(relFields, rel.Resource+"."+f.Name)
 			}
 		}

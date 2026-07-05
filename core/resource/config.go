@@ -28,14 +28,14 @@ type VersionConfig struct {
 func (vc *VersionConfig) GetSearchableFields() []string {
 	var fields []string
 	for _, f := range vc.Fields {
-		if f.Query.Search == nil || *f.Query.Search {
+		if f.Query.IsSearchable() {
 			fields = append(fields, "fields."+f.Name)
 		}
 	}
 
 	for _, r := range vc.Relations {
 		for _, f := range r.Fields {
-			if f.Query.Search == nil || *f.Query.Search {
+			if f.Query.IsSearchable() {
 				fields = append(fields, fmt.Sprintf("%s.%s", r.Resource, f.Name))
 			}
 		}
@@ -124,9 +124,43 @@ func (f FieldConfig) ESType() string {
 	return f.Type
 }
 
+// SearchTier selects which standardized searchable surface a field feeds in
+// Federated Search. Single-resource Search treats primary and secondary
+// identically (both feed its multi_match); none excludes the field.
+type SearchTier string
+
+const (
+	// SearchTierNone excludes the field from full-text search. It is the value
+	// an omitted selector resolves to.
+	SearchTierNone SearchTier = "none"
+	// SearchTierPrimary routes the field to the primary `search` surface: a
+	// Document's own high-signal text.
+	SearchTierPrimary SearchTier = "primary"
+	// SearchTierSecondary routes the field to the secondary `search_scoped`
+	// surface: lower-signal / denormalized-child text.
+	SearchTierSecondary SearchTier = "secondary"
+)
+
 type QueryConfig struct {
-	// Default true
-	Search *bool `yaml:"search"`
+	// Search selects the full-text searchable tier this field feeds:
+	// "primary", "secondary", or "none". Omitted means "none".
+	Search SearchTier `yaml:"search"`
+}
+
+// Tier returns the field's search tier, resolving an omitted (empty) selector
+// to SearchTierNone.
+func (q QueryConfig) Tier() SearchTier {
+	if q.Search == "" {
+		return SearchTierNone
+	}
+	return q.Search
+}
+
+// IsSearchable reports whether the field feeds single-resource full-text
+// search, i.e. its tier is primary or secondary.
+func (q QueryConfig) IsSearchable() bool {
+	t := q.Tier()
+	return t == SearchTierPrimary || t == SearchTierSecondary
 }
 
 // JoinConfig names both sides of the join between a resource and a related

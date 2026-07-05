@@ -4,8 +4,17 @@ resources:
     fields:
       fields:
         - name: searchField
+          # search selects the full-text searchable tier this field feeds:
+          #   primary   — the document's own high-signal text (search surface)
+          #   secondary — lower-signal / denormalized-child text (search_scoped)
+          #   none      — not full-text searchable (still filterable)
+          # Omitted means none.
+          query:
+            search: primary
         - name: secondaryField
           type: text
+          query:
+            search: secondary
       relations:
         - resource: c
           join: { local: id, foreign: a_id }
@@ -19,8 +28,12 @@ resources:
     fields:
       fields:
         - name: searchField
+          query:
+            search: primary
         - name: secondaryField
           type: text
+          query:
+            search: secondary
         - name: b_id
       relations:
         - resource: b
@@ -28,6 +41,8 @@ resources:
           cardinality: one
           fields:
             - name: name
+              query:
+                search: primary
         - resource: c
           join: { local: id, foreign: a_id }
           cardinality: many
@@ -38,6 +53,8 @@ resources:
   - type: b
     fields:
       - name: name
+        query:
+          search: primary
 
   - type: c
     fields:
@@ -47,14 +64,17 @@ resources:
         join: { local: a_id, foreign: id }
         fields:
           - name: searchField
+            query:
+              search: primary
           - name: b_id
       - resource: b
         join: { local: b_id, from: a, foreign: id }
         strategy: reference
         fields:
           - name: name
-            # Control whether this field is searchable or not.
-            # It will still be filterable, just not available for full text search.
-            # Default is true.
+            # reference-relation fields are excluded from Federated Search
+            # (their data is not denormalized into the parent), so a search tier
+            # has no effect here; they remain searchable via single-resource
+            # Search's two-phase join. Left as none.
             query:
-              search: false
+              search: none

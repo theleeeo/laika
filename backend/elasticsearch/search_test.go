@@ -56,8 +56,8 @@ func vcFlatOnly() *resource.VersionConfig {
 	return &resource.VersionConfig{
 		Version: 1,
 		Fields: []resource.FieldConfig{
-			{Name: "name"},
-			{Name: "status"},
+			{Name: "name", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
+			{Name: "status", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 		},
 	}
 }
@@ -67,13 +67,13 @@ func vcFlatOnly() *resource.VersionConfig {
 func vcWithNestedRelation() *resource.VersionConfig {
 	return &resource.VersionConfig{
 		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title"}},
+		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
 		Relations: []resource.RelationConfig{
 			{
 				Resource:    "tags",
 				Cardinality: "many",
 				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
-				Fields:      []resource.FieldConfig{{Name: "label"}},
+				Fields:      []resource.FieldConfig{{Name: "label", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
 			},
 		},
 	}
@@ -84,13 +84,13 @@ func vcWithNestedRelation() *resource.VersionConfig {
 func vcWithObjectRelation() *resource.VersionConfig {
 	return &resource.VersionConfig{
 		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title"}},
+		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
 		Relations: []resource.RelationConfig{
 			{
 				Resource:    "owner",
 				Cardinality: "one",
 				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
-				Fields:      []resource.FieldConfig{{Name: "email"}},
+				Fields:      []resource.FieldConfig{{Name: "email", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
 			},
 		},
 	}
@@ -241,8 +241,8 @@ func TestSearch_SearchDisabledField_ExcludedFromQuery(t *testing.T) {
 	vc := &resource.VersionConfig{
 		Version: 1,
 		Fields: []resource.FieldConfig{
-			{Name: "visible"},
-			{Name: "hidden", Query: resource.QueryConfig{Search: new(false)}},
+			{Name: "visible", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
+			{Name: "hidden", Query: resource.QueryConfig{Search: resource.SearchTierNone}},
 		},
 	}
 
@@ -272,14 +272,14 @@ func TestSearch_SearchDisabledField_ExcludedFromQuery(t *testing.T) {
 func TestSearch_NestedRelation_AllFieldsSearchDisabled_NoClause(t *testing.T) {
 	vc := &resource.VersionConfig{
 		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title"}},
+		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
 		Relations: []resource.RelationConfig{
 			{
 				Resource:    "meta",
 				Cardinality: "many",
 				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
 				Fields: []resource.FieldConfig{
-					{Name: "internal", Query: resource.QueryConfig{Search: new(false)}},
+					{Name: "internal", Query: resource.QueryConfig{Search: resource.SearchTierNone}},
 				},
 			},
 		},

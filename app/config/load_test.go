@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // TestParseConfig_JoinDSL verifies the join block parses both sides of the
@@ -49,6 +50,53 @@ resources:
 	require.Equal(t, "address_id", rels[1].Join.Local)
 	require.Equal(t, "id", rels[1].Join.Foreign)
 	require.Equal(t, "customer", rels[1].Join.From)
+}
+
+// TestParseConfig_SearchTier verifies the per-field search tier selector parses
+// from YAML, that an omitted selector resolves to none, and that an unknown tier
+// is rejected loudly by validation.
+func TestParseConfig_SearchTier(t *testing.T) {
+	yaml := `
+resources:
+  - type: doc
+    fields:
+      - name: title
+        query:
+          search: primary
+      - name: body
+        query:
+          search: secondary
+      - name: internal
+        query:
+          search: none
+      - name: omitted
+`
+	cfgs, err := ParseConfig([]byte(yaml))
+	require.NoError(t, err)
+	require.NoError(t, cfgs.Validate())
+
+	fields := cfgs.Get("doc").GetVersion(1).Fields
+	require.Equal(t, resource.SearchTierPrimary, fields[0].Query.Tier())
+	require.True(t, fields[0].Query.IsSearchable())
+	require.Equal(t, resource.SearchTierSecondary, fields[1].Query.Tier())
+	require.True(t, fields[1].Query.IsSearchable())
+	require.Equal(t, resource.SearchTierNone, fields[2].Query.Tier())
+	require.False(t, fields[2].Query.IsSearchable())
+	// Omitted resolves to none — the breaking-change default.
+	require.Equal(t, resource.SearchTierNone, fields[3].Query.Tier())
+	require.False(t, fields[3].Query.IsSearchable())
+
+	bad := `
+resources:
+  - type: doc
+    fields:
+      - name: title
+        query:
+          search: bogus
+`
+	cfgs, err = ParseConfig([]byte(bad))
+	require.NoError(t, err)
+	require.Error(t, cfgs.Validate())
 }
 
 // TestExampleResourcesConfig_Valid ensures the shipped example config parses

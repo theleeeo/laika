@@ -187,6 +187,11 @@ func (c FieldConfig) Validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name required")
 	}
+	switch c.Query.Search {
+	case "", SearchTierNone, SearchTierPrimary, SearchTierSecondary:
+	default:
+		return fmt.Errorf("search must be %q, %q or %q", SearchTierPrimary, SearchTierSecondary, SearchTierNone)
+	}
 	return nil
 }
 

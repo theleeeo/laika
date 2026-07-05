@@ -38,7 +38,7 @@ func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
 
 func fieldCapability(path string, f resource.FieldConfig) FieldCapability {
 	esType := f.ESType()
-	searchable := f.Query.Search == nil || *f.Query.Search
+	searchable := f.Query.IsSearchable()
 
 	fc := FieldCapability{
 		Field:      path,
