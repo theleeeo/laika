@@ -35,6 +35,9 @@ const (
 const (
 	// SearchServiceSearchProcedure is the fully-qualified name of the SearchService's Search RPC.
 	SearchServiceSearchProcedure = "/search.v1.SearchService/Search"
+	// SearchServiceFederatedSearchProcedure is the fully-qualified name of the SearchService's
+	// FederatedSearch RPC.
+	SearchServiceFederatedSearchProcedure = "/search.v1.SearchService/FederatedSearch"
 	// SearchServiceGetCapabilitiesProcedure is the fully-qualified name of the SearchService's
 	// GetCapabilities RPC.
 	SearchServiceGetCapabilitiesProcedure = "/search.v1.SearchService/GetCapabilities"
@@ -43,6 +46,7 @@ const (
 // SearchServiceClient is a client for the search.v1.SearchService service.
 type SearchServiceClient interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
+	FederatedSearch(context.Context, *connect.Request[v1.FederatedSearchRequest]) (*connect.Response[v1.FederatedSearchResponse], error)
 	GetCapabilities(context.Context, *connect.Request[v1.GetCapabilitiesRequest]) (*connect.Response[v1.GetCapabilitiesResponse], error)
 }
 
@@ -63,6 +67,12 @@ func NewSearchServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 			connect.WithSchema(searchServiceMethods.ByName("Search")),
 			connect.WithClientOptions(opts...),
 		),
+		federatedSearch: connect.NewClient[v1.FederatedSearchRequest, v1.FederatedSearchResponse](
+			httpClient,
+			baseURL+SearchServiceFederatedSearchProcedure,
+			connect.WithSchema(searchServiceMethods.ByName("FederatedSearch")),
+			connect.WithClientOptions(opts...),
+		),
 		getCapabilities: connect.NewClient[v1.GetCapabilitiesRequest, v1.GetCapabilitiesResponse](
 			httpClient,
 			baseURL+SearchServiceGetCapabilitiesProcedure,
@@ -75,12 +85,18 @@ func NewSearchServiceClient(httpClient connect.HTTPClient, baseURL string, opts 
 // searchServiceClient implements SearchServiceClient.
 type searchServiceClient struct {
 	search          *connect.Client[v1.SearchRequest, v1.SearchResponse]
+	federatedSearch *connect.Client[v1.FederatedSearchRequest, v1.FederatedSearchResponse]
 	getCapabilities *connect.Client[v1.GetCapabilitiesRequest, v1.GetCapabilitiesResponse]
 }
 
 // Search calls search.v1.SearchService.Search.
 func (c *searchServiceClient) Search(ctx context.Context, req *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error) {
 	return c.search.CallUnary(ctx, req)
+}
+
+// FederatedSearch calls search.v1.SearchService.FederatedSearch.
+func (c *searchServiceClient) FederatedSearch(ctx context.Context, req *connect.Request[v1.FederatedSearchRequest]) (*connect.Response[v1.FederatedSearchResponse], error) {
+	return c.federatedSearch.CallUnary(ctx, req)
 }
 
 // GetCapabilities calls search.v1.SearchService.GetCapabilities.
@@ -91,6 +107,7 @@ func (c *searchServiceClient) GetCapabilities(ctx context.Context, req *connect.
 // SearchServiceHandler is an implementation of the search.v1.SearchService service.
 type SearchServiceHandler interface {
 	Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error)
+	FederatedSearch(context.Context, *connect.Request[v1.FederatedSearchRequest]) (*connect.Response[v1.FederatedSearchResponse], error)
 	GetCapabilities(context.Context, *connect.Request[v1.GetCapabilitiesRequest]) (*connect.Response[v1.GetCapabilitiesResponse], error)
 }
 
@@ -107,6 +124,12 @@ func NewSearchServiceHandler(svc SearchServiceHandler, opts ...connect.HandlerOp
 		connect.WithSchema(searchServiceMethods.ByName("Search")),
 		connect.WithHandlerOptions(opts...),
 	)
+	searchServiceFederatedSearchHandler := connect.NewUnaryHandler(
+		SearchServiceFederatedSearchProcedure,
+		svc.FederatedSearch,
+		connect.WithSchema(searchServiceMethods.ByName("FederatedSearch")),
+		connect.WithHandlerOptions(opts...),
+	)
 	searchServiceGetCapabilitiesHandler := connect.NewUnaryHandler(
 		SearchServiceGetCapabilitiesProcedure,
 		svc.GetCapabilities,
@@ -117,6 +140,8 @@ func NewSearchServiceHandler(svc SearchServiceHandler, opts ...connect.HandlerOp
 		switch r.URL.Path {
 		case SearchServiceSearchProcedure:
 			searchServiceSearchHandler.ServeHTTP(w, r)
+		case SearchServiceFederatedSearchProcedure:
+			searchServiceFederatedSearchHandler.ServeHTTP(w, r)
 		case SearchServiceGetCapabilitiesProcedure:
 			searchServiceGetCapabilitiesHandler.ServeHTTP(w, r)
 		default:
@@ -130,6 +155,10 @@ type UnimplementedSearchServiceHandler struct{}
 
 func (UnimplementedSearchServiceHandler) Search(context.Context, *connect.Request[v1.SearchRequest]) (*connect.Response[v1.SearchResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("search.v1.SearchService.Search is not implemented"))
+}
+
+func (UnimplementedSearchServiceHandler) FederatedSearch(context.Context, *connect.Request[v1.FederatedSearchRequest]) (*connect.Response[v1.FederatedSearchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("search.v1.SearchService.FederatedSearch is not implemented"))
 }
 
 func (UnimplementedSearchServiceHandler) GetCapabilities(context.Context, *connect.Request[v1.GetCapabilitiesRequest]) (*connect.Response[v1.GetCapabilitiesResponse], error) {

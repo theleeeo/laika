@@ -30,6 +30,20 @@ func TestSearch_UnknownResourceMapsToFailedPrecondition(t *testing.T) {
 	require.Equal(t, connect.CodeFailedPrecondition, connect.CodeOf(err))
 }
 
+// FederatedSearch is a stub until the adapter + validation land in #17; assert
+// it advertises itself as unimplemented rather than pretending to succeed.
+func TestFederatedSearch_NotYetImplemented(t *testing.T) {
+	srv := newSearcher()
+
+	_, err := srv.FederatedSearch(context.Background(), connect.NewRequest(&search.FederatedSearchRequest{
+		Query:     "anything",
+		Resources: []string{"a"},
+	}))
+
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnimplemented, connect.CodeOf(err))
+}
+
 func TestGetCapabilities_EmptyConfigReturnsNoResources(t *testing.T) {
 	srv := newSearcher()
 

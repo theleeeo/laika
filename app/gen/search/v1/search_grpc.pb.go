@@ -20,6 +20,7 @@ const _ = grpc.SupportPackageIsVersion9
 
 const (
 	SearchService_Search_FullMethodName          = "/search.v1.SearchService/Search"
+	SearchService_FederatedSearch_FullMethodName = "/search.v1.SearchService/FederatedSearch"
 	SearchService_GetCapabilities_FullMethodName = "/search.v1.SearchService/GetCapabilities"
 )
 
@@ -28,6 +29,7 @@ const (
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type SearchServiceClient interface {
 	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
+	FederatedSearch(ctx context.Context, in *FederatedSearchRequest, opts ...grpc.CallOption) (*FederatedSearchResponse, error)
 	GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error)
 }
 
@@ -49,6 +51,16 @@ func (c *searchServiceClient) Search(ctx context.Context, in *SearchRequest, opt
 	return out, nil
 }
 
+func (c *searchServiceClient) FederatedSearch(ctx context.Context, in *FederatedSearchRequest, opts ...grpc.CallOption) (*FederatedSearchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FederatedSearchResponse)
+	err := c.cc.Invoke(ctx, SearchService_FederatedSearch_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *searchServiceClient) GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetCapabilitiesResponse)
@@ -64,6 +76,7 @@ func (c *searchServiceClient) GetCapabilities(ctx context.Context, in *GetCapabi
 // for forward compatibility.
 type SearchServiceServer interface {
 	Search(context.Context, *SearchRequest) (*SearchResponse, error)
+	FederatedSearch(context.Context, *FederatedSearchRequest) (*FederatedSearchResponse, error)
 	GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error)
 }
 
@@ -76,6 +89,9 @@ type UnimplementedSearchServiceServer struct{}
 
 func (UnimplementedSearchServiceServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Search not implemented")
+}
+func (UnimplementedSearchServiceServer) FederatedSearch(context.Context, *FederatedSearchRequest) (*FederatedSearchResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method FederatedSearch not implemented")
 }
 func (UnimplementedSearchServiceServer) GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetCapabilities not implemented")
@@ -118,6 +134,24 @@ func _SearchService_Search_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SearchService_FederatedSearch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FederatedSearchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SearchServiceServer).FederatedSearch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SearchService_FederatedSearch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SearchServiceServer).FederatedSearch(ctx, req.(*FederatedSearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SearchService_GetCapabilities_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetCapabilitiesRequest)
 	if err := dec(in); err != nil {
@@ -146,6 +180,10 @@ var SearchService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Search",
 			Handler:    _SearchService_Search_Handler,
+		},
+		{
+			MethodName: "FederatedSearch",
+			Handler:    _SearchService_FederatedSearch_Handler,
 		},
 		{
 			MethodName: "GetCapabilities",

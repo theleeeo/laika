@@ -280,6 +280,281 @@ func (x *SearchResponse) GetHits() []*SearchHit {
 	return nil
 }
 
+type FederatedSearchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Query string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
+	// The set of Resource Types to span. Required and non-empty; an empty set is
+	// an InvalidArgument error (not "all") so newly-added Types are never
+	// silently exposed.
+	Resources []string `protobuf:"bytes,2,rep,name=resources,proto3" json:"resources,omitempty"`
+	// Global filters, applied on root fields.* paths common to every requested
+	// Type. Reuses the single-resource Filter message.
+	Filters []*Filter `protobuf:"bytes,3,rep,name=filters,proto3" json:"filters,omitempty"`
+	// Pagination (simple from/size), same normalization as single-resource
+	// Search (25 default, 100 cap).
+	Page          int32 `protobuf:"varint,4,opt,name=page,proto3" json:"page,omitempty"`
+	PageSize      int32 `protobuf:"varint,5,opt,name=page_size,json=pageSize,proto3" json:"page_size,omitempty"`
+	IncludeSource bool  `protobuf:"varint,6,opt,name=include_source,json=includeSource,proto3" json:"include_source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FederatedSearchRequest) Reset() {
+	*x = FederatedSearchRequest{}
+	mi := &file_search_v1_search_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FederatedSearchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FederatedSearchRequest) ProtoMessage() {}
+
+func (x *FederatedSearchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_search_v1_search_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FederatedSearchRequest.ProtoReflect.Descriptor instead.
+func (*FederatedSearchRequest) Descriptor() ([]byte, []int) {
+	return file_search_v1_search_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *FederatedSearchRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *FederatedSearchRequest) GetResources() []string {
+	if x != nil {
+		return x.Resources
+	}
+	return nil
+}
+
+func (x *FederatedSearchRequest) GetFilters() []*Filter {
+	if x != nil {
+		return x.Filters
+	}
+	return nil
+}
+
+func (x *FederatedSearchRequest) GetPage() int32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *FederatedSearchRequest) GetPageSize() int32 {
+	if x != nil {
+		return x.PageSize
+	}
+	return 0
+}
+
+func (x *FederatedSearchRequest) GetIncludeSource() bool {
+	if x != nil {
+		return x.IncludeSource
+	}
+	return false
+}
+
+// A single cross-type hit. Keyed by (resource, id) since id alone is not
+// globally unique across Types.
+type FederatedHit struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Resource string                 `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
+	Id       string                 `protobuf:"bytes,2,opt,name=id,proto3" json:"id,omitempty"`
+	Score    float64                `protobuf:"fixed64,3,opt,name=score,proto3" json:"score,omitempty"`
+	// The indexed document (source)
+	Source        *structpb.Struct `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FederatedHit) Reset() {
+	*x = FederatedHit{}
+	mi := &file_search_v1_search_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FederatedHit) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FederatedHit) ProtoMessage() {}
+
+func (x *FederatedHit) ProtoReflect() protoreflect.Message {
+	mi := &file_search_v1_search_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FederatedHit.ProtoReflect.Descriptor instead.
+func (*FederatedHit) Descriptor() ([]byte, []int) {
+	return file_search_v1_search_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *FederatedHit) GetResource() string {
+	if x != nil {
+		return x.Resource
+	}
+	return ""
+}
+
+func (x *FederatedHit) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *FederatedHit) GetScore() float64 {
+	if x != nil {
+		return x.Score
+	}
+	return 0
+}
+
+func (x *FederatedHit) GetSource() *structpb.Struct {
+	if x != nil {
+		return x.Source
+	}
+	return nil
+}
+
+// Per-resource hit count within a federated response.
+type ResourceCount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Resource      string                 `protobuf:"bytes,1,opt,name=resource,proto3" json:"resource,omitempty"`
+	Count         int64                  `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceCount) Reset() {
+	*x = ResourceCount{}
+	mi := &file_search_v1_search_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceCount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceCount) ProtoMessage() {}
+
+func (x *ResourceCount) ProtoReflect() protoreflect.Message {
+	mi := &file_search_v1_search_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceCount.ProtoReflect.Descriptor instead.
+func (*ResourceCount) Descriptor() ([]byte, []int) {
+	return file_search_v1_search_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *ResourceCount) GetResource() string {
+	if x != nil {
+		return x.Resource
+	}
+	return ""
+}
+
+func (x *ResourceCount) GetCount() int64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+type FederatedSearchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Total         int64                  `protobuf:"varint,1,opt,name=total,proto3" json:"total,omitempty"`
+	Hits          []*FederatedHit        `protobuf:"bytes,2,rep,name=hits,proto3" json:"hits,omitempty"`
+	Counts        []*ResourceCount       `protobuf:"bytes,3,rep,name=counts,proto3" json:"counts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FederatedSearchResponse) Reset() {
+	*x = FederatedSearchResponse{}
+	mi := &file_search_v1_search_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FederatedSearchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FederatedSearchResponse) ProtoMessage() {}
+
+func (x *FederatedSearchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_search_v1_search_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FederatedSearchResponse.ProtoReflect.Descriptor instead.
+func (*FederatedSearchResponse) Descriptor() ([]byte, []int) {
+	return file_search_v1_search_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *FederatedSearchResponse) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *FederatedSearchResponse) GetHits() []*FederatedHit {
+	if x != nil {
+		return x.Hits
+	}
+	return nil
+}
+
+func (x *FederatedSearchResponse) GetCounts() []*ResourceCount {
+	if x != nil {
+		return x.Counts
+	}
+	return nil
+}
+
 type Filter struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Example: "b.name.keyword" or "a_status" or "c.state"
@@ -301,7 +576,7 @@ type Filter struct {
 
 func (x *Filter) Reset() {
 	*x = Filter{}
-	mi := &file_search_v1_search_proto_msgTypes[3]
+	mi := &file_search_v1_search_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -313,7 +588,7 @@ func (x *Filter) String() string {
 func (*Filter) ProtoMessage() {}
 
 func (x *Filter) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[3]
+	mi := &file_search_v1_search_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -326,7 +601,7 @@ func (x *Filter) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Filter.ProtoReflect.Descriptor instead.
 func (*Filter) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{3}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Filter) GetField() string {
@@ -375,7 +650,7 @@ type Sort struct {
 
 func (x *Sort) Reset() {
 	*x = Sort{}
-	mi := &file_search_v1_search_proto_msgTypes[4]
+	mi := &file_search_v1_search_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -387,7 +662,7 @@ func (x *Sort) String() string {
 func (*Sort) ProtoMessage() {}
 
 func (x *Sort) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[4]
+	mi := &file_search_v1_search_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -400,7 +675,7 @@ func (x *Sort) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Sort.ProtoReflect.Descriptor instead.
 func (*Sort) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{4}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Sort) GetField() string {
@@ -425,7 +700,7 @@ type GetCapabilitiesRequest struct {
 
 func (x *GetCapabilitiesRequest) Reset() {
 	*x = GetCapabilitiesRequest{}
-	mi := &file_search_v1_search_proto_msgTypes[5]
+	mi := &file_search_v1_search_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -437,7 +712,7 @@ func (x *GetCapabilitiesRequest) String() string {
 func (*GetCapabilitiesRequest) ProtoMessage() {}
 
 func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[5]
+	mi := &file_search_v1_search_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -450,7 +725,7 @@ func (x *GetCapabilitiesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesRequest.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesRequest) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{5}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{9}
 }
 
 type GetCapabilitiesResponse struct {
@@ -462,7 +737,7 @@ type GetCapabilitiesResponse struct {
 
 func (x *GetCapabilitiesResponse) Reset() {
 	*x = GetCapabilitiesResponse{}
-	mi := &file_search_v1_search_proto_msgTypes[6]
+	mi := &file_search_v1_search_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -474,7 +749,7 @@ func (x *GetCapabilitiesResponse) String() string {
 func (*GetCapabilitiesResponse) ProtoMessage() {}
 
 func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[6]
+	mi := &file_search_v1_search_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -487,7 +762,7 @@ func (x *GetCapabilitiesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetCapabilitiesResponse.ProtoReflect.Descriptor instead.
 func (*GetCapabilitiesResponse) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{6}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetCapabilitiesResponse) GetResources() []*ResourceCapability {
@@ -507,7 +782,7 @@ type ResourceCapability struct {
 
 func (x *ResourceCapability) Reset() {
 	*x = ResourceCapability{}
-	mi := &file_search_v1_search_proto_msgTypes[7]
+	mi := &file_search_v1_search_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -519,7 +794,7 @@ func (x *ResourceCapability) String() string {
 func (*ResourceCapability) ProtoMessage() {}
 
 func (x *ResourceCapability) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[7]
+	mi := &file_search_v1_search_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -532,7 +807,7 @@ func (x *ResourceCapability) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResourceCapability.ProtoReflect.Descriptor instead.
 func (*ResourceCapability) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{7}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *ResourceCapability) GetResource() string {
@@ -567,7 +842,7 @@ type FieldCapability struct {
 
 func (x *FieldCapability) Reset() {
 	*x = FieldCapability{}
-	mi := &file_search_v1_search_proto_msgTypes[8]
+	mi := &file_search_v1_search_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -579,7 +854,7 @@ func (x *FieldCapability) String() string {
 func (*FieldCapability) ProtoMessage() {}
 
 func (x *FieldCapability) ProtoReflect() protoreflect.Message {
-	mi := &file_search_v1_search_proto_msgTypes[8]
+	mi := &file_search_v1_search_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -592,7 +867,7 @@ func (x *FieldCapability) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldCapability.ProtoReflect.Descriptor instead.
 func (*FieldCapability) Descriptor() ([]byte, []int) {
-	return file_search_v1_search_proto_rawDescGZIP(), []int{8}
+	return file_search_v1_search_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *FieldCapability) GetField() string {
@@ -649,7 +924,26 @@ const file_search_v1_search_proto_rawDesc = "" +
 	"\x06source\x18\x03 \x01(\v2\x17.google.protobuf.StructR\x06source\"P\n" +
 	"\x0eSearchResponse\x12\x14\n" +
 	"\x05total\x18\x01 \x01(\x03R\x05total\x12(\n" +
-	"\x04hits\x18\x02 \x03(\v2\x14.search.v1.SearchHitR\x04hits\"\x92\x01\n" +
+	"\x04hits\x18\x02 \x03(\v2\x14.search.v1.SearchHitR\x04hits\"\xd1\x01\n" +
+	"\x16FederatedSearchRequest\x12\x14\n" +
+	"\x05query\x18\x01 \x01(\tR\x05query\x12\x1c\n" +
+	"\tresources\x18\x02 \x03(\tR\tresources\x12+\n" +
+	"\afilters\x18\x03 \x03(\v2\x11.search.v1.FilterR\afilters\x12\x12\n" +
+	"\x04page\x18\x04 \x01(\x05R\x04page\x12\x1b\n" +
+	"\tpage_size\x18\x05 \x01(\x05R\bpageSize\x12%\n" +
+	"\x0einclude_source\x18\x06 \x01(\bR\rincludeSource\"\x81\x01\n" +
+	"\fFederatedHit\x12\x1a\n" +
+	"\bresource\x18\x01 \x01(\tR\bresource\x12\x0e\n" +
+	"\x02id\x18\x02 \x01(\tR\x02id\x12\x14\n" +
+	"\x05score\x18\x03 \x01(\x01R\x05score\x12/\n" +
+	"\x06source\x18\x04 \x01(\v2\x17.google.protobuf.StructR\x06source\"A\n" +
+	"\rResourceCount\x12\x1a\n" +
+	"\bresource\x18\x01 \x01(\tR\bresource\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x03R\x05count\"\x8e\x01\n" +
+	"\x17FederatedSearchResponse\x12\x14\n" +
+	"\x05total\x18\x01 \x01(\x03R\x05total\x12+\n" +
+	"\x04hits\x18\x02 \x03(\v2\x17.search.v1.FederatedHitR\x04hits\x120\n" +
+	"\x06counts\x18\x03 \x03(\v2\x18.search.v1.ResourceCountR\x06counts\"\x92\x01\n" +
 	"\x06Filter\x12\x14\n" +
 	"\x05field\x18\x01 \x01(\tR\x05field\x12#\n" +
 	"\x02op\x18\x02 \x01(\x0e2\x13.search.v1.FilterOpR\x02op\x12\x14\n" +
@@ -678,9 +972,10 @@ const file_search_v1_search_proto_rawDesc = "" +
 	"\bFilterOp\x12\x19\n" +
 	"\x15FILTER_OP_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fFILTER_OP_EQ\x10\x01\x12\x10\n" +
-	"\fFILTER_OP_IN\x10\x022\xa8\x01\n" +
+	"\fFILTER_OP_IN\x10\x022\x82\x02\n" +
 	"\rSearchService\x12=\n" +
 	"\x06Search\x12\x18.search.v1.SearchRequest\x1a\x19.search.v1.SearchResponse\x12X\n" +
+	"\x0fFederatedSearch\x12!.search.v1.FederatedSearchRequest\x1a\".search.v1.FederatedSearchResponse\x12X\n" +
 	"\x0fGetCapabilities\x12!.search.v1.GetCapabilitiesRequest\x1a\".search.v1.GetCapabilitiesResponseB\x95\x01\n" +
 	"\rcom.search.v1B\vSearchProtoP\x01Z2github.com/theleeeo/laika/app/gen/search/v1;search\xa2\x02\x03SXX\xaa\x02\tSearch.V1\xca\x02\tSearch\\V1\xe2\x02\x15Search\\V1\\GPBMetadata\xea\x02\n" +
 	"Search::V1b\x06proto3"
@@ -698,38 +993,48 @@ func file_search_v1_search_proto_rawDescGZIP() []byte {
 }
 
 var file_search_v1_search_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_search_v1_search_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_search_v1_search_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_search_v1_search_proto_goTypes = []any{
 	(FilterOp)(0),                   // 0: search.v1.FilterOp
 	(*SearchRequest)(nil),           // 1: search.v1.SearchRequest
 	(*SearchHit)(nil),               // 2: search.v1.SearchHit
 	(*SearchResponse)(nil),          // 3: search.v1.SearchResponse
-	(*Filter)(nil),                  // 4: search.v1.Filter
-	(*Sort)(nil),                    // 5: search.v1.Sort
-	(*GetCapabilitiesRequest)(nil),  // 6: search.v1.GetCapabilitiesRequest
-	(*GetCapabilitiesResponse)(nil), // 7: search.v1.GetCapabilitiesResponse
-	(*ResourceCapability)(nil),      // 8: search.v1.ResourceCapability
-	(*FieldCapability)(nil),         // 9: search.v1.FieldCapability
-	(*structpb.Struct)(nil),         // 10: google.protobuf.Struct
+	(*FederatedSearchRequest)(nil),  // 4: search.v1.FederatedSearchRequest
+	(*FederatedHit)(nil),            // 5: search.v1.FederatedHit
+	(*ResourceCount)(nil),           // 6: search.v1.ResourceCount
+	(*FederatedSearchResponse)(nil), // 7: search.v1.FederatedSearchResponse
+	(*Filter)(nil),                  // 8: search.v1.Filter
+	(*Sort)(nil),                    // 9: search.v1.Sort
+	(*GetCapabilitiesRequest)(nil),  // 10: search.v1.GetCapabilitiesRequest
+	(*GetCapabilitiesResponse)(nil), // 11: search.v1.GetCapabilitiesResponse
+	(*ResourceCapability)(nil),      // 12: search.v1.ResourceCapability
+	(*FieldCapability)(nil),         // 13: search.v1.FieldCapability
+	(*structpb.Struct)(nil),         // 14: google.protobuf.Struct
 }
 var file_search_v1_search_proto_depIdxs = []int32{
-	4,  // 0: search.v1.SearchRequest.filters:type_name -> search.v1.Filter
-	5,  // 1: search.v1.SearchRequest.sort:type_name -> search.v1.Sort
-	10, // 2: search.v1.SearchHit.source:type_name -> google.protobuf.Struct
+	8,  // 0: search.v1.SearchRequest.filters:type_name -> search.v1.Filter
+	9,  // 1: search.v1.SearchRequest.sort:type_name -> search.v1.Sort
+	14, // 2: search.v1.SearchHit.source:type_name -> google.protobuf.Struct
 	2,  // 3: search.v1.SearchResponse.hits:type_name -> search.v1.SearchHit
-	0,  // 4: search.v1.Filter.op:type_name -> search.v1.FilterOp
-	8,  // 5: search.v1.GetCapabilitiesResponse.resources:type_name -> search.v1.ResourceCapability
-	9,  // 6: search.v1.ResourceCapability.fields:type_name -> search.v1.FieldCapability
-	0,  // 7: search.v1.FieldCapability.filter_ops:type_name -> search.v1.FilterOp
-	1,  // 8: search.v1.SearchService.Search:input_type -> search.v1.SearchRequest
-	6,  // 9: search.v1.SearchService.GetCapabilities:input_type -> search.v1.GetCapabilitiesRequest
-	3,  // 10: search.v1.SearchService.Search:output_type -> search.v1.SearchResponse
-	7,  // 11: search.v1.SearchService.GetCapabilities:output_type -> search.v1.GetCapabilitiesResponse
-	10, // [10:12] is the sub-list for method output_type
-	8,  // [8:10] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	8,  // 4: search.v1.FederatedSearchRequest.filters:type_name -> search.v1.Filter
+	14, // 5: search.v1.FederatedHit.source:type_name -> google.protobuf.Struct
+	5,  // 6: search.v1.FederatedSearchResponse.hits:type_name -> search.v1.FederatedHit
+	6,  // 7: search.v1.FederatedSearchResponse.counts:type_name -> search.v1.ResourceCount
+	0,  // 8: search.v1.Filter.op:type_name -> search.v1.FilterOp
+	12, // 9: search.v1.GetCapabilitiesResponse.resources:type_name -> search.v1.ResourceCapability
+	13, // 10: search.v1.ResourceCapability.fields:type_name -> search.v1.FieldCapability
+	0,  // 11: search.v1.FieldCapability.filter_ops:type_name -> search.v1.FilterOp
+	1,  // 12: search.v1.SearchService.Search:input_type -> search.v1.SearchRequest
+	4,  // 13: search.v1.SearchService.FederatedSearch:input_type -> search.v1.FederatedSearchRequest
+	10, // 14: search.v1.SearchService.GetCapabilities:input_type -> search.v1.GetCapabilitiesRequest
+	3,  // 15: search.v1.SearchService.Search:output_type -> search.v1.SearchResponse
+	7,  // 16: search.v1.SearchService.FederatedSearch:output_type -> search.v1.FederatedSearchResponse
+	11, // 17: search.v1.SearchService.GetCapabilities:output_type -> search.v1.GetCapabilitiesResponse
+	15, // [15:18] is the sub-list for method output_type
+	12, // [12:15] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_search_v1_search_proto_init() }
@@ -743,7 +1048,7 @@ func file_search_v1_search_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_search_v1_search_proto_rawDesc), len(file_search_v1_search_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

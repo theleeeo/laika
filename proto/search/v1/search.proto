@@ -8,6 +8,7 @@ option go_package = "github.com/theleeeo/laika/app/gen/search/v1;search";
 
 service SearchService {
   rpc Search(SearchRequest) returns (SearchResponse);
+  rpc FederatedSearch(FederatedSearchRequest) returns (FederatedSearchResponse);
   rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse);
 }
 
@@ -40,6 +41,49 @@ message SearchHit {
 message SearchResponse {
   int64 total = 1;
   repeated SearchHit hits = 2;
+}
+
+message FederatedSearchRequest {
+  string query = 1;
+
+  // The set of Resource Types to span. Required and non-empty; an empty set is
+  // an InvalidArgument error (not "all") so newly-added Types are never
+  // silently exposed.
+  repeated string resources = 2;
+
+  // Global filters, applied on root fields.* paths common to every requested
+  // Type. Reuses the single-resource Filter message.
+  repeated Filter filters = 3;
+
+  // Pagination (simple from/size), same normalization as single-resource
+  // Search (25 default, 100 cap).
+  int32 page = 4;
+  int32 page_size = 5;
+
+  bool include_source = 6;
+}
+
+// A single cross-type hit. Keyed by (resource, id) since id alone is not
+// globally unique across Types.
+message FederatedHit {
+  string resource = 1;
+  string id = 2;
+  double score = 3;
+
+  // The indexed document (source)
+  google.protobuf.Struct source = 4;
+}
+
+// Per-resource hit count within a federated response.
+message ResourceCount {
+  string resource = 1;
+  int64 count = 2;
+}
+
+message FederatedSearchResponse {
+  int64 total = 1;
+  repeated FederatedHit hits = 2;
+  repeated ResourceCount counts = 3;
 }
 
 enum FilterOp {

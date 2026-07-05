@@ -30,6 +30,13 @@ func (s *SearcherServer) Search(ctx context.Context, req *connect.Request[search
 	return connect.NewResponse(searchResponseToProto(resp)), nil
 }
 
+// FederatedSearch is not yet implemented; the adapter + request validation are
+// tracked in #17. The stub exists so SearcherServer satisfies the generated
+// SearchServiceHandler interface once the RPC was added to the proto.
+func (s *SearcherServer) FederatedSearch(_ context.Context, _ *connect.Request[search.FederatedSearchRequest]) (*connect.Response[search.FederatedSearchResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("FederatedSearch is not yet implemented"))
+}
+
 func (s *SearcherServer) GetCapabilities(_ context.Context, _ *connect.Request[search.GetCapabilitiesRequest]) (*connect.Response[search.GetCapabilitiesResponse], error) {
 	return connect.NewResponse(capabilitiesToProto(s.idx.GetCapabilities())), nil
 }
