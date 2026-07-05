@@ -681,3 +681,62 @@ func TestBuildIndexFilterGroups_ScopesFiltersToIndex(t *testing.T) {
 	assertIndexTerm(should[0], "product_search", 1)
 	assertIndexTerm(should[1], "order_search", 0)
 }
+
+func TestBuildSecondaryClause_CorrelatesScopeWithinEntry(t *testing.T) {
+	clause := buildSecondaryClause("acme", "tenant-1")
+
+	nested, ok := clause.(map[string]any)["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected nested clause, got %#v", clause)
+	}
+	if nested["path"] != "search_scoped" {
+		t.Errorf("nested path = %v, want search_scoped", nested["path"])
+	}
+
+	// The text match and the scope term must live in the SAME nested query's
+	// bool.must — that is what correlates them per entry: an entry contributes
+	// its text only when its own scope[] contains the caller.
+	must, ok := nested["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
+	if !ok || len(must) != 2 {
+		t.Fatalf("expected 2 must clauses (text + scope), got %#v", nested["query"])
+	}
+
+	var sawTextMatch, sawScopeTerm bool
+	for _, c := range must {
+		m := c.(map[string]any)
+		if mm, ok := m["multi_match"].(map[string]any); ok {
+			fields, _ := mm["fields"].([]any)
+			if len(fields) == 0 || fields[0] != "search_scoped.text.full^3" {
+				t.Errorf("text match fields = %#v, want boosted search_scoped.text.full first", fields)
+			}
+			sawTextMatch = true
+		}
+		if term, ok := m["term"].(map[string]any); ok {
+			if term["search_scoped.scope"] != "tenant-1" {
+				t.Errorf("scope term = %#v, want search_scoped.scope=tenant-1", term)
+			}
+			sawScopeTerm = true
+		}
+	}
+	if !sawTextMatch || !sawScopeTerm {
+		t.Fatalf("expected both text match and scope term inside the nested clause (text=%v scope=%v)", sawTextMatch, sawScopeTerm)
+	}
+}
+
+func TestBuildSecondaryClause_EmptyScopeUnscoped(t *testing.T) {
+	clause := buildSecondaryClause("acme", "")
+
+	must := clause.(map[string]any)["nested"].(map[string]any)["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
+	if len(must) != 1 {
+		t.Fatalf("expected only the text match when scope is empty, got %#v", must)
+	}
+	if _, ok := must[0].(map[string]any)["multi_match"]; !ok {
+		t.Errorf("expected text multi_match, got %#v", must[0])
+	}
+	// No scope term anywhere.
+	for _, c := range must {
+		if _, ok := c.(map[string]any)["term"]; ok {
+			t.Errorf("unscoped secondary must carry no scope term, got %#v", c)
+		}
+	}
+}

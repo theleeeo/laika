@@ -171,6 +171,40 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 	}
 }
 
+// buildSecondaryClause builds the nested query over a Federated Search's
+// secondary tier (the search_scoped nested field). It matches the query text
+// against each entry's n-grammed text, boosting the standard-analyzed .full
+// subfield for whole-token precision over incidental infix hits (spec D15).
+//
+// When scope is non-empty it weaves a term on the same entry's scope[] keyword
+// array into the same nested bool.must (spec D11.2, D14). Because a nested query
+// is satisfied per entry, placing the text match and the scope term together
+// correlates them: an entry contributes its text only when its own scope
+// contains the caller — a top-level scope filter could not express this. A term
+// on a keyword array matches when the array contains the value. An empty scope
+// yields an unscoped secondary match (standalone-app behaviour).
+func buildSecondaryClause(query, scope string) any {
+	must := []any{
+		map[string]any{
+			"multi_match": map[string]any{
+				"query":  query,
+				"fields": []any{"search_scoped.text.full^3", "search_scoped.text"},
+			},
+		},
+	}
+	if scope != "" {
+		must = append(must, map[string]any{
+			"term": map[string]any{"search_scoped.scope": scope},
+		})
+	}
+	return map[string]any{
+		"nested": map[string]any{
+			"path":  "search_scoped",
+			"query": map[string]any{"bool": map[string]any{"must": must}},
+		},
+	}
+}
+
 // buildIndexFilterGroups assembles the per-index filter groups of a Federated
 // Search into a single bool query. Each group becomes a should-clause that pins
 // documents to that Type's read alias (a term on the _index metadata field) and

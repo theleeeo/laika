@@ -37,21 +37,33 @@ type IndexFilterGroup struct {
 // documents contributing nothing while other Types still return) fails closed by
 // appending a match-nothing filter rather than returning an error, yielding an
 // empty group for that Type.
-func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []string, base SearchRequest) ([]IndexFilterGroup, error) {
+//
+// The same collect pass also harvests the caller's secondary scope value (spec
+// D11.2, D14): a consumer middleware sets req.SecondaryScope from the caller
+// identity, which is the caller's tenant regardless of Type, so it is a single
+// value across all groups. The last non-empty value seen is returned; empty
+// means unscoped secondary. The Federated Search query builder weaves it into
+// the nested search_scoped clause.
+func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []string, base SearchRequest) ([]IndexFilterGroup, string, error) {
 	groups := make([]IndexFilterGroup, 0, len(resources))
+	var scope string
 	for _, name := range resources {
 		r := idx.resources.Get(name)
 		if r == nil {
-			return nil, fmt.Errorf("%q: %w", name, ErrUnknownResource)
+			return nil, "", fmt.Errorf("%q: %w", name, ErrUnknownResource)
 		}
 
 		req := base
 		req.Resource = name
-		req.Filters = nil // start clean; the chain appends this Type's own filters
+		req.Filters = nil       // start clean; the chain appends this Type's own filters
+		req.SecondaryScope = "" // start clean; the chain sets the caller's scope
 
-		filters, err := idx.collectFilters(ctx, req)
+		filters, entryScope, err := idx.collectFilters(ctx, req)
 		if err != nil {
-			return nil, fmt.Errorf("collect filters for %q: %w", name, err)
+			return nil, "", fmt.Errorf("collect filters for %q: %w", name, err)
+		}
+		if entryScope != "" {
+			scope = entryScope
 		}
 
 		groups = append(groups, IndexFilterGroup{
@@ -60,21 +72,26 @@ func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []st
 			Filters:  filters,
 		})
 	}
-	return groups, nil
+	return groups, scope, nil
 }
 
 // collectFilters runs the consumer middleware chain around a collect-only
-// terminal that captures the request's Filters instead of searching. Any error
-// raised by the chain (enforcement failing closed) is returned to the caller.
-func (idx *Indexer) collectFilters(ctx context.Context, req SearchRequest) ([]Filter, error) {
-	var collected []Filter
+// terminal that captures the request's Filters and SecondaryScope instead of
+// searching. Any error raised by the chain (enforcement failing closed) is
+// returned to the caller.
+func (idx *Indexer) collectFilters(ctx context.Context, req SearchRequest) ([]Filter, string, error) {
+	var (
+		collected []Filter
+		scope     string
+	)
 	terminal := func(_ context.Context, r SearchRequest) (SearchResponse, error) {
 		collected = r.Filters
+		scope = r.SecondaryScope
 		return SearchResponse{}, nil
 	}
 	handler := chainSearch(terminal, idx.searchMiddlewares)
 	if _, err := handler(ctx, req); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return collected, nil
+	return collected, scope, nil
 }

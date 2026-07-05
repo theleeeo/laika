@@ -33,7 +33,7 @@ func TestCollectIndexFilterGroups_CapturesFilterWithAlias(t *testing.T) {
 	backend := &recordingBackend{}
 	idx := newFederatedIndexer(backend, []string{"product"}, appendFilter("tenant_id"))
 
-	groups, err := idx.collectIndexFilterGroups(context.Background(), []string{"product"}, SearchRequest{})
+	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product"}, SearchRequest{})
 	if err != nil {
 		t.Fatalf("collectIndexFilterGroups: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestCollectIndexFilterGroups_PerTypeFiltersIndependent(t *testing.T) {
 	}
 	idx := newFederatedIndexer(backend, []string{"product", "order"}, perType)
 
-	groups, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
+	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
 	if err != nil {
 		t.Fatalf("collectIndexFilterGroups: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestCollectIndexFilterGroups_DeniedTypeFailsClosed(t *testing.T) {
 	}
 	idx := newFederatedIndexer(backend, []string{"product", "order"}, deny)
 
-	groups, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
+	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
 	if !errors.Is(err, denied) {
 		t.Fatalf("expected denied error to propagate, got %v", err)
 	}
@@ -112,11 +112,45 @@ func TestCollectIndexFilterGroups_DeniedTypeFailsClosed(t *testing.T) {
 	}
 }
 
+func TestCollectIndexFilterGroups_HarvestsSecondaryScope(t *testing.T) {
+	backend := &recordingBackend{}
+	// A middleware that sets the caller's tenant scope value on the request —
+	// the dedicated channel Federated Search harvests for the secondary tier.
+	setScope := func(next SearchHandler) SearchHandler {
+		return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+			req.SecondaryScope = "tenant-42"
+			return next(ctx, req)
+		}
+	}
+	idx := newFederatedIndexer(backend, []string{"product", "order"}, setScope)
+
+	_, scope, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
+	if err != nil {
+		t.Fatalf("collectIndexFilterGroups: %v", err)
+	}
+	if scope != "tenant-42" {
+		t.Errorf("harvested scope = %q, want %q", scope, "tenant-42")
+	}
+}
+
+func TestCollectIndexFilterGroups_NoScopeChannel_Empty(t *testing.T) {
+	backend := &recordingBackend{}
+	idx := newFederatedIndexer(backend, []string{"product"}, appendFilter("tenant_id"))
+
+	_, scope, err := idx.collectIndexFilterGroups(context.Background(), []string{"product"}, SearchRequest{})
+	if err != nil {
+		t.Fatalf("collectIndexFilterGroups: %v", err)
+	}
+	if scope != "" {
+		t.Errorf("expected empty scope when no middleware sets it, got %q", scope)
+	}
+}
+
 func TestCollectIndexFilterGroups_UnknownResource(t *testing.T) {
 	backend := &recordingBackend{}
 	idx := newFederatedIndexer(backend, []string{"product"})
 
-	_, err := idx.collectIndexFilterGroups(context.Background(), []string{"nope"}, SearchRequest{})
+	_, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"nope"}, SearchRequest{})
 	if !errors.Is(err, ErrUnknownResource) {
 		t.Fatalf("expected ErrUnknownResource, got %v", err)
 	}

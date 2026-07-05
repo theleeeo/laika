@@ -32,6 +32,15 @@ type SearchRequest struct {
 	PageSize int32
 	Filters  []Filter
 	Sort     []SortOption
+
+	// SecondaryScope is the caller's single tenant scope value for Federated
+	// Search's secondary tier (spec D11.2, D14). It is the dedicated channel a
+	// consumer's search middleware sets from the caller identity; Federated
+	// Search harvests it in collect mode (see collectIndexFilterGroups) and
+	// weaves a term into the nested search_scoped clause so secondary text
+	// matches only inside entries the caller may see. Empty means unscoped
+	// secondary (standalone-app behaviour). Single-resource Search ignores it.
+	SecondaryScope string
 }
 
 // AddFilter appends a filter to the request. It is the explicit way a
