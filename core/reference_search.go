@@ -41,149 +41,178 @@ type referenceTarget struct {
 // without recomposing the search chain.
 func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 	return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-		logger := LoggerFromContext(ctx)
-		cfg := idx.resources.Get(req.Resource)
-		if cfg == nil {
-			return next(ctx, req)
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, req.Resource, req.Filters)
+		if err != nil {
+			return SearchResponse{}, err
 		}
-		vc := cfg.ReadVersionConfig()
-		if vc == nil {
-			return next(ctx, req)
+		if matchedNothing {
+			// No child matched a reference filter, so no parent can match.
+			return SearchResponse{}, nil
 		}
+		req.Filters = resolved
+		return next(ctx, req)
+	}
+}
 
-		logger.Debug("reference resolve: start", slog.Int("filter_count", len(req.Filters)))
+// resolveReferenceFilters turns reference-relation filters for resource into
+// filters the target index can answer directly. It partitions filters by field
+// path — a filter naming a reference relation's field is extracted onto that
+// child's search, everything else (root fields, denormalized relation fields)
+// stays on the primary — then executes each child search and folds its matching
+// join keys into a terms filter on the parent key. The returned slice is the
+// primary filters plus those folded terms filters.
+//
+// matchedNothing reports that some reference relation matched no children, which
+// means no parent document can satisfy that filter. Callers decide what that
+// means: single-resource Search returns an empty result, while Federated Search
+// excludes just that Type (its group matches nothing) so other Types still
+// return. In that case the returned filter slice is unspecified.
+//
+// A resource with no read version config resolves to its filters unchanged.
+// idx.resources is read at call time so SetPlans updates need no chain rebuild.
+func (idx *Indexer) resolveReferenceFilters(ctx context.Context, resourceName string, filters []Filter) (resolved []Filter, matchedNothing bool, err error) {
+	logger := LoggerFromContext(ctx)
+	cfg := idx.resources.Get(resourceName)
+	if cfg == nil {
+		return filters, false, nil
+	}
+	vc := cfg.ReadVersionConfig()
+	if vc == nil {
+		return filters, false, nil
+	}
 
-		// Partition filters by field path: reference-relation filters become
-		// child targets; everything else stays on the primary.
-		var primary []Filter
-		targets := map[string]*referenceTarget{}
-		for _, f := range req.Filters {
-			relName, field, isPath := splitRelationField(f.Field)
-			var rel *resource.RelationConfig
-			if isPath {
-				rel = vc.GetRelation(relName)
+	logger.Debug("reference resolve: start", slog.Int("filter_count", len(filters)))
+
+	// Partition filters by field path: reference-relation filters become
+	// child targets; everything else stays on the primary.
+	var primary []Filter
+	targets := map[string]*referenceTarget{}
+	for _, f := range filters {
+		relName, field, isPath := splitRelationField(f.Field)
+		var rel *resource.RelationConfig
+		if isPath {
+			rel = vc.GetRelation(relName)
+		}
+		isReference := rel != nil && rel.IsReference()
+
+		if isReference {
+			tgt := targets[relName]
+			if tgt == nil {
+				tgt = newReferenceTarget(*rel, vc)
+				targets[relName] = tgt
 			}
-			isReference := rel != nil && rel.IsReference()
-
-			if isReference {
-				tgt := targets[relName]
-				if tgt == nil {
-					tgt = newReferenceTarget(*rel, vc)
-					targets[relName] = tgt
-				}
-				childFilter := f
-				childFilter.Field = "fields." + field
-				childFilter.NestedPath = ""
-				tgt.Filters = append(tgt.Filters, childFilter)
-				logger.Debug("reference resolve: filter routed",
-					slog.String("field", f.Field),
-					slog.String("rel_name", relName),
-					slog.Bool("is_relation", rel != nil),
-					slog.Bool("is_reference", true),
-					slog.String("dest", "child:"+relName),
-				)
-				continue
-			}
-
+			childFilter := f
+			childFilter.Field = "fields." + field
+			childFilter.NestedPath = ""
+			tgt.Filters = append(tgt.Filters, childFilter)
 			logger.Debug("reference resolve: filter routed",
 				slog.String("field", f.Field),
 				slog.String("rel_name", relName),
 				slog.Bool("is_relation", rel != nil),
-				slog.Bool("is_reference", false),
-				slog.String("dest", "primary"),
+				slog.Bool("is_reference", true),
+				slog.String("dest", "child:"+relName),
 			)
-			primary = append(primary, f)
+			continue
 		}
-		req.Filters = primary
 
-		// Resolve each child target into a terms filter on the parent key.
-		// Iterate config order (not map order) so behavior is deterministic.
-		for _, rel := range vc.Relations {
-			tgt, ok := targets[rel.Resource]
-			if !ok {
-				continue
-			}
+		logger.Debug("reference resolve: filter routed",
+			slog.String("field", f.Field),
+			slog.String("rel_name", relName),
+			slog.Bool("is_relation", rel != nil),
+			slog.Bool("is_reference", false),
+			slog.String("dest", "primary"),
+		)
+		primary = append(primary, f)
+	}
+	resolved = primary
 
-			childCfg := idx.resources.Get(tgt.Resource)
-			if childCfg == nil {
-				return SearchResponse{}, ErrUnknownResource
-			}
+	// Resolve each child target into a terms filter on the parent key.
+	// Iterate config order (not map order) so behavior is deterministic.
+	for _, rel := range vc.Relations {
+		tgt, ok := targets[rel.Resource]
+		if !ok {
+			continue
+		}
 
-			logger.Debug("reference resolve: child search",
-				slog.String("child_resource", tgt.Resource),
-				slog.String("foreign_field", tgt.ForeignField),
-				slog.String("parent_key_field", tgt.ParentKeyField),
-				slog.String("parent_key_nested_path", tgt.ParentKeyNestedPath),
-				slog.Any("child_filters", summarizeFilters(tgt.Filters)),
-			)
+		childCfg := idx.resources.Get(tgt.Resource)
+		if childCfg == nil {
+			return nil, false, ErrUnknownResource
+		}
 
-			// The child search requests PageSize: maxReferenceTerms. The logic below
-			// assumes the backend returns all matching hits (len(Hits) == Total) up to
-			// that ceiling. A backend that caps its page size below maxReferenceTerms
-			// would under-populate the terms filter silently.
-			childResp, err := idx.es.Search(ctx, SearchRequest{
-				Resource: tgt.Resource,
-				Filters:  tgt.Filters,
-				PageSize: maxReferenceTerms,
-			}, AliasName(tgt.Resource), childCfg.ReadVersionConfig())
-			if err != nil {
-				return SearchResponse{}, err
-			}
+		logger.Debug("reference resolve: child search",
+			slog.String("child_resource", tgt.Resource),
+			slog.String("foreign_field", tgt.ForeignField),
+			slog.String("parent_key_field", tgt.ParentKeyField),
+			slog.String("parent_key_nested_path", tgt.ParentKeyNestedPath),
+			slog.Any("child_filters", summarizeFilters(tgt.Filters)),
+		)
 
-			logger.Debug("reference resolve: child result",
+		// The child search requests PageSize: maxReferenceTerms. The logic below
+		// assumes the backend returns all matching hits (len(Hits) == Total) up to
+		// that ceiling. A backend that caps its page size below maxReferenceTerms
+		// would under-populate the terms filter silently.
+		childResp, err := idx.es.Search(ctx, SearchRequest{
+			Resource: tgt.Resource,
+			Filters:  tgt.Filters,
+			PageSize: maxReferenceTerms,
+		}, AliasName(tgt.Resource), childCfg.ReadVersionConfig())
+		if err != nil {
+			return nil, false, err
+		}
+
+		logger.Debug("reference resolve: child result",
+			slog.String("child_resource", tgt.Resource),
+			slog.Int64("total", childResp.Total),
+			slog.Int("hit_count", len(childResp.Hits)),
+		)
+
+		if childResp.Total > maxReferenceTerms {
+			logger.Warn("reference resolve: child exceeds term ceiling",
 				slog.String("child_resource", tgt.Resource),
 				slog.Int64("total", childResp.Total),
-				slog.Int("hit_count", len(childResp.Hits)),
+				slog.Int("ceiling", maxReferenceTerms),
 			)
+			return nil, false, &InvalidArgumentError{Msg: fmt.Sprintf(
+				"reference relation to %q matched %d children, exceeding the %d-term ceiling; this child is not low-count enough for strategy: reference",
+				tgt.Resource, childResp.Total, maxReferenceTerms)}
+		}
 
-			if childResp.Total > maxReferenceTerms {
-				logger.Warn("reference resolve: child exceeds term ceiling",
-					slog.String("child_resource", tgt.Resource),
-					slog.Int64("total", childResp.Total),
-					slog.Int("ceiling", maxReferenceTerms),
-				)
-				return SearchResponse{}, &InvalidArgumentError{Msg: fmt.Sprintf(
-					"reference relation to %q matched %d children, exceeding the %d-term ceiling; this child is not low-count enough for strategy: reference",
-					tgt.Resource, childResp.Total, maxReferenceTerms)}
+		values := make([]string, 0, len(childResp.Hits))
+		for _, h := range childResp.Hits {
+			if v := foreignValue(h, tgt.ForeignField); v != "" {
+				values = append(values, v)
 			}
-
-			values := make([]string, 0, len(childResp.Hits))
-			for _, h := range childResp.Hits {
-				if v := foreignValue(h, tgt.ForeignField); v != "" {
-					values = append(values, v)
-				}
-			}
-			if len(values) < len(childResp.Hits) {
-				logger.Warn("reference resolve: some child hits yielded no join key",
-					slog.String("child_resource", tgt.Resource),
-					slog.String("foreign_field", tgt.ForeignField),
-					slog.Int("hit_count", len(childResp.Hits)),
-					slog.Int("value_count", len(values)),
-				)
-			}
-			if len(values) == 0 {
-				// No child matches -> no parent can match this reference.
-				logger.Debug("reference resolve: no child matches, short-circuiting",
-					slog.String("child_resource", tgt.Resource),
-				)
-				return SearchResponse{}, nil
-			}
-
-			req.Filters = append(req.Filters, Filter{
-				Field:      tgt.ParentKeyField,
-				Op:         FilterOpIn,
-				Values:     values,
-				NestedPath: tgt.ParentKeyNestedPath,
-			})
-			logger.Debug("reference resolve: folded terms filter",
-				slog.String("parent_key_field", tgt.ParentKeyField),
-				slog.String("nested_path", tgt.ParentKeyNestedPath),
+		}
+		if len(values) < len(childResp.Hits) {
+			logger.Warn("reference resolve: some child hits yielded no join key",
+				slog.String("child_resource", tgt.Resource),
+				slog.String("foreign_field", tgt.ForeignField),
+				slog.Int("hit_count", len(childResp.Hits)),
 				slog.Int("value_count", len(values)),
 			)
 		}
+		if len(values) == 0 {
+			// No child matches -> no parent can match this reference.
+			logger.Debug("reference resolve: no child matches, short-circuiting",
+				slog.String("child_resource", tgt.Resource),
+			)
+			return nil, true, nil
+		}
 
-		return next(ctx, req)
+		resolved = append(resolved, Filter{
+			Field:      tgt.ParentKeyField,
+			Op:         FilterOpIn,
+			Values:     values,
+			NestedPath: tgt.ParentKeyNestedPath,
+		})
+		logger.Debug("reference resolve: folded terms filter",
+			slog.String("parent_key_field", tgt.ParentKeyField),
+			slog.String("nested_path", tgt.ParentKeyNestedPath),
+			slog.Int("value_count", len(values)),
+		)
 	}
+
+	return resolved, false, nil
 }
 
 // splitRelationField splits "rel.field" into ("rel", "field", true). A field

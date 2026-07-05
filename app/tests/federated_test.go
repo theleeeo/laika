@@ -7,6 +7,7 @@ import (
 
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // indexRaw writes a document directly into a concrete index and refreshes, so a
@@ -71,6 +72,146 @@ func (t *TestSuite) Test_FederatedSearch_CrossTypeRankedAndCounts() {
 		t.Require().Len(paged.Hits, 1)
 		t.Require().Equal("b1", paged.Hits[0].ID)
 		t.Require().Equal([]core.ResourceCount{{Resource: "a", Count: 1}, {Resource: "b", Count: 1}}, paged.Counts)
+	})
+}
+
+// referenceScopeConfig mirrors the vx-fiber harness domain: an access-point
+// references a population (cardinality one, strategy reference) by
+// population_id == population.id, and population carries fiber_operator_id as a
+// root field. The reference relation's fields are NOT indexed on the
+// access-point document, so scoping access-points by population.fiber_operator_id
+// requires a separate population query — exactly the case a single-index term
+// filter cannot express.
+var referenceScopeConfig = func() resource.Configs {
+	cfgs := resource.Configs{
+		{
+			Resource: "pop",
+			Versions: []resource.VersionConfig{{
+				Version: 1,
+				Fields:  []resource.FieldConfig{{Name: "name"}, {Name: "fiber_operator_id"}},
+			}},
+		},
+		{
+			Resource: "ap",
+			Versions: []resource.VersionConfig{{
+				Version: 1,
+				Fields:  []resource.FieldConfig{{Name: "population_id"}},
+				Relations: []resource.RelationConfig{{
+					Resource:    "pop",
+					Join:        resource.JoinConfig{Local: "population_id", Foreign: "id"},
+					Cardinality: "one",
+					Strategy:    resource.StrategyReference,
+					Fields:      []resource.FieldConfig{{Name: "fiber_operator_id"}},
+				}},
+			}},
+		},
+	}
+	for _, c := range cfgs {
+		c.ApplyDefaults()
+	}
+	return cfgs
+}()
+
+// Test_FederatedSearch_ResolvesReferenceRelationFilter proves a federated search
+// resolves a filter naming a reference relation's field by issuing a separate
+// query to the referenced Type and folding the matching join keys into a terms
+// filter on the parent — instead of applying the (unmapped) reference field as a
+// term on the parent index, which silently matches nothing.
+func (t *TestSuite) Test_FederatedSearch_ResolvesReferenceRelationFilter() {
+	t.setResourceConfig(referenceScopeConfig)
+
+	// Seed the searchable surface + join keys directly (Build pipeline covered
+	// elsewhere). pop-A/ap-1 belong to operator op-A; pop-B/ap-2 to op-B.
+	t.indexRaw(core.IndexName("pop", 1), "pop-A", map[string]any{
+		"search": "fiber", "fields": map[string]any{"name": "alpha", "fiber_operator_id": "op-A"},
+	})
+	t.indexRaw(core.IndexName("pop", 1), "pop-B", map[string]any{
+		"search": "fiber", "fields": map[string]any{"name": "beta", "fiber_operator_id": "op-B"},
+	})
+	t.indexRaw(core.IndexName("ap", 1), "ap-1", map[string]any{
+		"search": "fiber", "fields": map[string]any{"population_id": "pop-A"},
+	})
+	t.indexRaw(core.IndexName("ap", 1), "ap-2", map[string]any{
+		"search": "fiber", "fields": map[string]any{"population_id": "pop-B"},
+	})
+
+	// scopeFor builds an indexer whose consumer middleware scopes each Type to a
+	// fiber operator the way authz does: population by its own root field,
+	// access-point through the referenced population's field.
+	scopeFor := func(operator string) *core.Indexer {
+		mw := func(next core.SearchHandler) core.SearchHandler {
+			return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
+				switch req.Resource {
+				case "pop":
+					req.AddFilter(core.Filter{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: operator})
+				case "ap":
+					req.AddFilter(core.Filter{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: operator})
+				}
+				return next(ctx, req)
+			}
+		}
+		return core.New(core.Config{
+			Resources:         referenceScopeConfig,
+			ES:                elasticsearch.New(t.esClient, true),
+			SearchMiddlewares: []core.SearchMiddleware{mw},
+		})
+	}
+
+	resp, err := scopeFor("op-A").FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
+		Query:     "fiber",
+		Resources: []string{"pop", "ap"},
+	})
+	t.Require().NoError(err)
+
+	ids := map[string]bool{}
+	for _, h := range resp.Hits {
+		ids[h.ID] = true
+	}
+	// Only op-A's data: pop-A directly, ap-1 via the referenced pop-A. pop-B and
+	// ap-2 (op-B) are excluded — ap-2 only via the separate population query.
+	t.Require().Len(resp.Hits, 2)
+	t.Require().True(ids["pop-A"], "pop-A matches op-A on its own field")
+	t.Require().True(ids["ap-1"], "ap-1 matches via referenced pop-A (separate population query)")
+	t.Require().False(ids["ap-2"], "ap-2 belongs to op-B and must be excluded")
+	t.Require().EqualValues(2, resp.Total)
+	t.Require().ElementsMatch(
+		[]core.ResourceCount{{Resource: "pop", Count: 1}, {Resource: "ap", Count: 1}},
+		resp.Counts,
+	)
+
+	t.Run("a reference matching no children excludes only that Type", func() {
+		// Scope to an operator with a population (none) but... use a mixed scope:
+		// pop scoped to op-A (matches pop-A), ap scoped to op-none (no population),
+		// so the ap group resolves to zero children and must contribute nothing
+		// while pop still returns.
+		mw := func(next core.SearchHandler) core.SearchHandler {
+			return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
+				switch req.Resource {
+				case "pop":
+					req.AddFilter(core.Filter{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: "op-A"})
+				case "ap":
+					req.AddFilter(core.Filter{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: "op-none"})
+				}
+				return next(ctx, req)
+			}
+		}
+		idx := core.New(core.Config{
+			Resources:         referenceScopeConfig,
+			ES:                elasticsearch.New(t.esClient, true),
+			SearchMiddlewares: []core.SearchMiddleware{mw},
+		})
+		resp, err := idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
+			Query:     "fiber",
+			Resources: []string{"pop", "ap"},
+		})
+		t.Require().NoError(err)
+		t.Require().EqualValues(1, resp.Total)
+		t.Require().Len(resp.Hits, 1)
+		t.Require().Equal("pop-A", resp.Hits[0].ID)
+		t.Require().ElementsMatch(
+			[]core.ResourceCount{{Resource: "pop", Count: 1}, {Resource: "ap", Count: 0}},
+			resp.Counts,
+		)
 	})
 }
 

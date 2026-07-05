@@ -156,6 +156,11 @@ type IndexFilterGroup struct {
 	Resource string
 	Alias    string
 	Filters  []Filter
+	// MatchNothing marks a group that can match no document — e.g. a reference
+	// filter resolved to zero children. The query builder emits a clause that
+	// never satisfies minimum_should_match, excluding this Type while other
+	// Types in the federation still return.
+	MatchNothing bool
 }
 
 // collectIndexFilterGroups enforces per-Type document visibility for a Federated
@@ -167,10 +172,15 @@ type IndexFilterGroup struct {
 // Type's read alias, become an IndexFilterGroup.
 //
 // The internal query-shaping middlewares (deriveNestedPath, referenceResolve)
-// are deliberately excluded: they resolve single-resource query mechanics
-// (referenceResolve even issues its own ES searches), whereas collection only
-// needs the consumer's authorization and scoping. Federated query building
-// applies its own mapping-aware shaping to the collected Filters.
+// are deliberately excluded from the collect chain: they resolve single-resource
+// query mechanics, whereas the chain only needs to run the consumer's
+// authorization and scoping. Reference-relation filters, however, cannot be
+// expressed as a term on the multi-index query (the referenced field is not
+// mapped on the parent), so after collecting each Type's filters this resolves
+// them the same way referenceResolve does — a separate child search per
+// reference, folded into a terms filter on the parent key. A reference that
+// matches no children marks the group MatchNothing so that Type is excluded
+// while the rest of the federation still returns.
 //
 // Core stays policy-free: it cannot classify a middleware error as "denied"
 // versus "failed", so any error propagates and fails the whole Federated Search
@@ -207,11 +217,23 @@ func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []st
 			scope = entryScope
 		}
 
-		groups = append(groups, IndexFilterGroup{
-			Resource: name,
-			Alias:    AliasName(r.Resource),
-			Filters:  filters,
-		})
+		// The collect chain excludes referenceResolve, so a filter naming a
+		// reference relation's field is still unresolved here. Resolve it now —
+		// issuing the same separate child search the single-resource path does —
+		// so the group carries a terms filter on the parent key (a mapped field)
+		// rather than a term on the reference field (never mapped on the parent).
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, filters)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve reference filters for %q: %w", name, err)
+		}
+
+		group := IndexFilterGroup{Resource: name, Alias: AliasName(r.Resource)}
+		if matchedNothing {
+			group.MatchNothing = true
+		} else {
+			group.Filters = resolved
+		}
+		groups = append(groups, group)
 	}
 	return groups, scope, nil
 }

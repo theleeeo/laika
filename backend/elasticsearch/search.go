@@ -378,6 +378,13 @@ func buildSecondaryClause(query, scope string) any {
 func buildIndexFilterGroups(groups []core.IndexFilterGroup) (any, error) {
 	should := make([]any, 0, len(groups))
 	for _, g := range groups {
+		if g.MatchNothing {
+			// A reference filter for this Type resolved to zero children, so no
+			// document of this Type can match. match_none never satisfies
+			// minimum_should_match, excluding the Type while other groups return.
+			should = append(should, map[string]any{"match_none": map[string]any{}})
+			continue
+		}
 		clauses := []any{
 			map[string]any{"term": map[string]any{"_index": g.Alias}},
 		}
