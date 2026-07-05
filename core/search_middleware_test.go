@@ -15,6 +15,11 @@ type recordingBackend struct {
 	called   bool
 	gotReq   SearchRequest
 	response SearchResponse
+
+	// Federated search capture + canned result.
+	fedCalled   bool
+	fedParams   FederatedSearchParams
+	fedResponse FederatedSearchResult
 }
 
 func (b *recordingBackend) Upsert(ctx context.Context, index, docID string, doc any, version int64) error {
@@ -26,6 +31,11 @@ func (b *recordingBackend) Search(ctx context.Context, req SearchRequest, indexA
 	b.called = true
 	b.gotReq = req
 	return b.response, nil
+}
+func (b *recordingBackend) FederatedSearch(ctx context.Context, params FederatedSearchParams) (FederatedSearchResult, error) {
+	b.fedCalled = true
+	b.fedParams = params
+	return b.fedResponse, nil
 }
 
 // newSearchIndexer builds an Indexer with a single "product" resource, the

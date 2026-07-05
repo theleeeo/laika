@@ -740,3 +740,155 @@ func TestBuildSecondaryClause_EmptyScopeUnscoped(t *testing.T) {
 		}
 	}
 }
+
+// captureFederated runs FederatedSearch against a mock transport, returning the
+// decoded request body, the request URL (for search_type / index path), and the
+// parsed result. The transport replies with a fixed two-index response so both
+// the built query and the response parsing can be asserted.
+func captureFederated(t *testing.T, p core.FederatedSearchParams) (body map[string]any, url string, _ core.FederatedSearchResult) {
+	t.Helper()
+	var captured map[string]any
+	var capturedURL string
+
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		capturedURL = r.URL.String()
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		if err := json.Unmarshal(raw, &captured); err != nil {
+			t.Fatalf("unmarshal body: %v", err)
+		}
+		headers := make(http.Header)
+		headers.Set("X-Elastic-Product", "Elasticsearch")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     headers,
+			Body: io.NopCloser(strings.NewReader(`{
+				"hits": {"total": {"value": 2}, "hits": [
+					{"_index": "product_search_v1", "_id": "p1", "_score": 9.0, "_source": {"n": "x"}},
+					{"_index": "order_search_v1", "_id": "o1", "_score": 4.0}
+				]},
+				"aggregations": {"per_index": {"buckets": [
+					{"key": "product_search_v1", "doc_count": 5},
+					{"key": "order_search_v1", "doc_count": 3}
+				]}}
+			}`)),
+		}, nil
+	})
+
+	esClient, err := esv8.NewClient(esv8.Config{
+		Addresses: []string{"http://example.invalid"},
+		Transport: rt,
+	})
+	if err != nil {
+		t.Fatalf("new es client: %v", err)
+	}
+	res, err := New(esClient, false).FederatedSearch(context.Background(), p)
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	return captured, capturedURL, res
+}
+
+func fedGroups() []core.IndexFilterGroup {
+	return []core.IndexFilterGroup{
+		{Resource: "product", Alias: "product_search", Filters: []core.Filter{{Field: "fields.tenant_id", Op: core.FilterOpEq, Value: "t1"}}},
+		{Resource: "order", Alias: "order_search"},
+	}
+}
+
+func TestFederatedSearch_QueryShapeAndSearchType(t *testing.T) {
+	body, url, _ := captureFederated(t, core.FederatedSearchParams{
+		Query:        "acme",
+		FilterGroups: fedGroups(),
+		Filters:      []core.Filter{{Field: "fields.region", Op: core.FilterOpEq, Value: "eu"}},
+		Page:         0,
+		PageSize:     25,
+	})
+
+	// dfs_query_then_fetch for comparable cross-index scores (D13).
+	if !strings.Contains(url, "search_type=dfs_query_then_fetch") {
+		t.Errorf("expected dfs_query_then_fetch in URL, got %q", url)
+	}
+	// Multi-index over both aliases.
+	if !strings.Contains(url, "product_search") || !strings.Contains(url, "order_search") {
+		t.Errorf("expected both aliases in index path, got %q", url)
+	}
+
+	boolQ := body["query"].(map[string]any)["bool"].(map[string]any)
+
+	// must = a single should(primary, secondary) with minimum_should_match:1.
+	must := boolQ["must"].([]any)
+	if len(must) != 1 {
+		t.Fatalf("expected 1 must clause, got %#v", must)
+	}
+	should := must[0].(map[string]any)["bool"].(map[string]any)
+	if should["minimum_should_match"] != float64(1) {
+		t.Errorf("minimum_should_match = %v, want 1", should["minimum_should_match"])
+	}
+	shoulds := should["should"].([]any)
+	if len(shoulds) != 2 {
+		t.Fatalf("expected primary + secondary should clauses, got %#v", shoulds)
+	}
+	primaryFields := shoulds[0].(map[string]any)["multi_match"].(map[string]any)["fields"].([]any)
+	if primaryFields[0] != "search.full^9" || primaryFields[1] != "search^3" {
+		t.Errorf("primary fields = %#v, want [search.full^9 search^3]", primaryFields)
+	}
+	if _, ok := shoulds[1].(map[string]any)["nested"]; !ok {
+		t.Errorf("expected secondary nested clause, got %#v", shoulds[1])
+	}
+
+	// filter = [global region filter, per-index groups].
+	filter := boolQ["filter"].([]any)
+	if len(filter) != 2 {
+		t.Fatalf("expected [global filter, groups], got %#v", filter)
+	}
+	if _, ok := filter[0].(map[string]any)["term"]; !ok {
+		t.Errorf("expected global term filter first, got %#v", filter[0])
+	}
+	if _, ok := filter[1].(map[string]any)["bool"].(map[string]any)["should"]; !ok {
+		t.Errorf("expected index-group should clause, got %#v", filter[1])
+	}
+
+	// Per-resource counts aggregation on _index.
+	aggField := body["aggs"].(map[string]any)["per_index"].(map[string]any)["terms"].(map[string]any)["field"]
+	if aggField != "_index" {
+		t.Errorf("agg field = %v, want _index", aggField)
+	}
+}
+
+func TestFederatedSearch_IncludeSourceToggle(t *testing.T) {
+	off, _, _ := captureFederated(t, core.FederatedSearchParams{Query: "q", FilterGroups: fedGroups(), PageSize: 25})
+	if src, ok := off["_source"]; !ok || src != false {
+		t.Errorf("expected _source:false when IncludeSource is false, got %v (present=%v)", src, ok)
+	}
+	on, _, _ := captureFederated(t, core.FederatedSearchParams{Query: "q", FilterGroups: fedGroups(), PageSize: 25, IncludeSource: true})
+	if _, ok := on["_source"]; ok {
+		t.Error("expected no _source key when IncludeSource is true")
+	}
+}
+
+func TestFederatedSearch_ParsesHitsAndCounts(t *testing.T) {
+	_, _, res := captureFederated(t, core.FederatedSearchParams{Query: "q", FilterGroups: fedGroups(), PageSize: 25})
+	if res.Total != 2 {
+		t.Errorf("Total = %d, want 2", res.Total)
+	}
+	if len(res.Hits) != 2 || res.Hits[0].Index != "product_search_v1" || res.Hits[0].ID != "p1" {
+		t.Fatalf("hits parsed wrong: %#v", res.Hits)
+	}
+	if res.IndexCounts["product_search_v1"] != 5 || res.IndexCounts["order_search_v1"] != 3 {
+		t.Errorf("index counts = %#v, want product=5 order=3", res.IndexCounts)
+	}
+}
+
+func TestFederatedSearch_EmptyQueryOmitsMust(t *testing.T) {
+	body, _, _ := captureFederated(t, core.FederatedSearchParams{Query: "", FilterGroups: fedGroups(), PageSize: 25})
+	boolQ := body["query"].(map[string]any)["bool"].(map[string]any)
+	if _, ok := boolQ["must"]; ok {
+		t.Errorf("expected no must clause for empty query (filter-only browse), got %#v", boolQ["must"])
+	}
+	if _, ok := boolQ["filter"]; !ok {
+		t.Error("expected filter groups even with empty query")
+	}
+}

@@ -14,6 +14,7 @@ type SearchBackend interface {
 	BulkUpsert(ctx context.Context, items []BulkItem) error
 	Delete(ctx context.Context, index, docID string) error
 	Search(ctx context.Context, req SearchRequest, indexAlias string, vc *resource.VersionConfig) (SearchResponse, error)
+	FederatedSearch(ctx context.Context, params FederatedSearchParams) (FederatedSearchResult, error)
 }
 
 // BulkItem is a single document to write in a bulk upsert.

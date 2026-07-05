@@ -25,6 +25,9 @@ func (stubBackend) Delete(context.Context, string, string) error             { r
 func (stubBackend) Search(context.Context, core.SearchRequest, string, *resource.VersionConfig) (core.SearchResponse, error) {
 	return core.SearchResponse{}, nil
 }
+func (stubBackend) FederatedSearch(context.Context, core.FederatedSearchParams) (core.FederatedSearchResult, error) {
+	return core.FederatedSearchResult{}, nil
+}
 
 // TestUI_ServedAndCoexistsWithServiceRoutes verifies the exact wiring main.go
 // uses: the demo console is served at "/" while the Connect service routes stay

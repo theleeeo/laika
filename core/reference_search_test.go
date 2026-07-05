@@ -16,6 +16,9 @@ type fakeBackend struct {
 func (f *fakeBackend) Upsert(context.Context, string, string, any, int64) error { return nil }
 func (f *fakeBackend) BulkUpsert(context.Context, []BulkItem) error             { return nil }
 func (f *fakeBackend) Delete(context.Context, string, string) error             { return nil }
+func (f *fakeBackend) FederatedSearch(context.Context, FederatedSearchParams) (FederatedSearchResult, error) {
+	return FederatedSearchResult{}, nil
+}
 func (f *fakeBackend) Search(_ context.Context, req SearchRequest, alias string, _ *resource.VersionConfig) (SearchResponse, error) {
 	f.calls++
 	if hits, ok := f.childHits[alias]; ok {

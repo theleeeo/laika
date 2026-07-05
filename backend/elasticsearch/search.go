@@ -114,6 +114,149 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 	return out, nil
 }
 
+// federatedSearchType is the ES search_type for Federated Search. DFS gathers
+// global term statistics across all queried indices before scoring so cross-type
+// BM25 scores are comparable (spec D13). Kept as a single constant so the
+// documented future experiment — dropping to plain query_then_fetch — is a
+// one-line flip.
+const federatedSearchType = "dfs_query_then_fetch"
+
+// FederatedSearch runs a single multi-index query across the FilterGroups'
+// aliases and returns results keyed by concrete index (spec D3, D12, D13).
+func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
+	indices := make([]string, 0, len(p.FilterGroups))
+	for _, g := range p.FilterGroups {
+		indices = append(indices, g.Alias)
+	}
+
+	filter := []any{}
+	for _, f := range p.Filters {
+		if f.Field == "" {
+			continue
+		}
+		clause, err := buildFilterClause(f)
+		if err != nil {
+			return core.FederatedSearchResult{}, err
+		}
+		filter = append(filter, clause)
+	}
+	groups, err := buildIndexFilterGroups(p.FilterGroups)
+	if err != nil {
+		return core.FederatedSearchResult{}, err
+	}
+	filter = append(filter, groups)
+
+	boolQ := map[string]any{"filter": filter}
+	if p.Query != "" {
+		boolQ["must"] = []any{buildFederatedTextQuery(p.Query, p.SecondaryScope)}
+	}
+
+	body := map[string]any{
+		"query": map[string]any{"bool": boolQ},
+		"from":  p.Page * p.PageSize,
+		"size":  p.PageSize,
+		// Per-resource counts (D12): one bucket per concrete index, folded back
+		// to Types by core. size covers at most one index per requested Type.
+		"aggs": map[string]any{
+			"per_index": map[string]any{
+				"terms": map[string]any{"field": "_index", "size": len(indices)},
+			},
+		},
+	}
+	if !p.IncludeSource {
+		body["_source"] = false
+	}
+
+	b, err := json.Marshal(body)
+	if err != nil {
+		return core.FederatedSearchResult{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	res, err := c.es.Search(
+		c.es.Search.WithContext(ctx),
+		c.es.Search.WithIndex(indices...),
+		c.es.Search.WithBody(bytes.NewReader(b)),
+		c.es.Search.WithSearchType(federatedSearchType),
+	)
+	if err != nil {
+		return core.FederatedSearchResult{}, err
+	}
+	defer res.Body.Close()
+
+	if res.IsError() {
+		if res.StatusCode == 404 {
+			return core.FederatedSearchResult{}, nil
+		}
+		raw, _ := io.ReadAll(res.Body)
+		return core.FederatedSearchResult{}, fmt.Errorf("es federated search error: %s %s", res.Status(), string(raw))
+	}
+
+	var decoded map[string]any
+	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
+		return core.FederatedSearchResult{}, err
+	}
+
+	result := core.FederatedSearchResult{IndexCounts: map[string]int64{}}
+
+	hitsObj, _ := decoded["hits"].(map[string]any)
+	if t, ok := hitsObj["total"].(map[string]any); ok {
+		if v, ok := t["value"].(float64); ok {
+			result.Total = int64(v)
+		}
+	}
+	for _, h := range hitsObj["hits"].([]any) {
+		m, _ := h.(map[string]any)
+		index, _ := m["_index"].(string)
+		id, _ := m["_id"].(string)
+		score, _ := m["_score"].(float64)
+		src, _ := m["_source"].(map[string]any)
+		result.Hits = append(result.Hits, core.FederatedRawHit{
+			Index:  index,
+			ID:     id,
+			Score:  score,
+			Source: src,
+		})
+	}
+
+	if aggs, ok := decoded["aggregations"].(map[string]any); ok {
+		if perIndex, ok := aggs["per_index"].(map[string]any); ok {
+			if buckets, ok := perIndex["buckets"].([]any); ok {
+				for _, bk := range buckets {
+					b, _ := bk.(map[string]any)
+					key, _ := b["key"].(string)
+					dc, _ := b["doc_count"].(float64)
+					result.IndexCounts[key] = int64(dc)
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// buildFederatedTextQuery is the scoring core of a federated query: a document
+// matches on its own primary text (search) OR on secondary text (search_scoped),
+// with a query-time boost so a primary match outranks a secondary one (spec D13,
+// D15). The .full standard-analyzed subfields are boosted over the n-grammed
+// bodies so whole-token/exact matches beat incidental infix hits.
+func buildFederatedTextQuery(query, scope string) any {
+	primary := map[string]any{
+		"multi_match": map[string]any{
+			"query":  query,
+			"fields": []any{"search.full^9", "search^3"},
+		},
+	}
+	return map[string]any{
+		"bool": map[string]any{
+			"should":               []any{primary, buildSecondaryClause(query, scope)},
+			"minimum_should_match": 1,
+		},
+	}
+}
+
 func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 	var shouldClauses []any
 

@@ -24,15 +24,22 @@ func (idx *Indexer) searchBase(ctx context.Context, req SearchRequest) (SearchRe
 		return SearchResponse{}, ErrUnknownResource
 	}
 
-	if req.PageSize <= 0 {
-		req.PageSize = 25
-	}
-	if req.PageSize > 100 {
-		req.PageSize = 100
-	}
-	if req.Page < 0 {
-		req.Page = 0
-	}
+	req.Page, req.PageSize = normalizePaging(req.Page, req.PageSize)
 
 	return idx.es.Search(ctx, req, AliasName(r.Resource), r.ReadVersionConfig())
+}
+
+// normalizePaging clamps paging to the shared defaults: page size defaults to
+// 25, caps at 100, and page is never negative. Both search paths use it.
+func normalizePaging(page, pageSize int32) (int32, int32) {
+	if pageSize <= 0 {
+		pageSize = 25
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	if page < 0 {
+		page = 0
+	}
+	return page, pageSize
 }
