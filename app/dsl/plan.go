@@ -58,29 +58,29 @@ func buildPlanForVersion(provider source.Provider, resourceName string, vc *reso
 		return result, nil
 	})
 
-	// Resolve the topological order of relations.
-	ordered, err := resolveOrder(vc.Relations)
-	if err != nil {
-		// If the config is invalid the plan will never execute successfully,
-		// but we defer the error to execution time rather than panicking at
-		// startup so that validation can catch it first.
-		// TODO: Error here? Or at least log it so it's not silent?
-		return projection.Plan{
-			Version:  vc.Version,
-			Executer: rootPlan,
+	// Chain a SubPlan for each relation, in topological order.
+	var current aggregation.Executer[projection.BuildRequest, projection.BuildDoc] = rootPlan
+	// Resolve the topological order of relations. If the config is invalid the
+	// plan will never execute successfully, but we defer the error to execution
+	// time rather than panicking at startup so that validation can catch it
+	// first — the root plan alone (no relations) becomes the chain.
+	// TODO: Error here? Or at least log it so it's not silent?
+	if ordered, err := resolveOrder(vc.Relations); err == nil {
+		for _, rel := range ordered {
+			if rel.IsReference() {
+				// reference relations are resolved at search time; never fetched
+				// or denormalized into the document.
+				continue
+			}
+			current = buildRelationSubPlan(provider, current, rel)
 		}
 	}
 
-	// Chain a SubPlan for each relation.
-	var current aggregation.Executer[projection.BuildRequest, projection.BuildDoc] = rootPlan
-	for _, rel := range ordered {
-		if rel.IsReference() {
-			// reference relations are resolved at search time; never fetched
-			// or denormalized into the document.
-			continue
-		}
-		current = buildRelationSubPlan(provider, current, rel)
-	}
+	// Terminal stage: populate the standardized search surfaces from the
+	// per-field tier selectors, once every relation is denormalized into Doc.
+	current = aggregation.NewMapPlan(current, func(d projection.BuildDoc) projection.BuildDoc {
+		return populateStandardizedSearchFields(vc, d)
+	})
 
 	return projection.Plan{
 		Version:  vc.Version,

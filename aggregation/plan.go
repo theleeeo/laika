@@ -94,6 +94,37 @@ func (p *SubPlan[Req, P, R]) Execute(ctx context.Context, rootParams Req) <-chan
 	return ch
 }
 
+// NewMapPlan wraps a parent plan with a pure transform applied to every item.
+// It fetches nothing; it exists for terminal shaping stages that derive fields
+// once all upstream relations are resolved (e.g. the standardized search
+// surfaces). An error result from the parent is forwarded untouched.
+func NewMapPlan[Req any, P any](parent Executer[Req, P], mapFn func(P) P) *MapPlan[Req, P] {
+	return &MapPlan[Req, P]{parent: parent, mapFn: mapFn}
+}
+
+type MapPlan[Req any, P any] struct {
+	parent Executer[Req, P]
+	mapFn  func(P) P
+}
+
+func (p *MapPlan[Req, P]) Execute(ctx context.Context, params Req) <-chan ExecutionResult[P] {
+	ch := make(chan ExecutionResult[P])
+	go func() {
+		defer close(ch)
+		for res := range p.parent.Execute(ctx, params) {
+			if res.Err != nil {
+				ch <- res
+				return
+			}
+			for i := range res.Items {
+				res.Items[i] = p.mapFn(res.Items[i])
+			}
+			ch <- res
+		}
+	}()
+	return ch
+}
+
 type ExecutionResult[P any] struct {
 	Items []P
 	Err   error
