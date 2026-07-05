@@ -171,6 +171,41 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 	}
 }
 
+// buildIndexFilterGroups assembles the per-index filter groups of a Federated
+// Search into a single bool query. Each group becomes a should-clause that pins
+// documents to that Type's read alias (a term on the _index metadata field) and
+// applies that Type's harvested visibility filters; minimum_should_match: 1
+// requires a document to satisfy exactly one group, so a Type's filters never
+// constrain another Type's documents. The result is meant to sit in the outer
+// query's filter (non-scoring) context.
+func buildIndexFilterGroups(groups []core.IndexFilterGroup) (any, error) {
+	should := make([]any, 0, len(groups))
+	for _, g := range groups {
+		clauses := []any{
+			map[string]any{"term": map[string]any{"_index": g.Alias}},
+		}
+		for _, f := range g.Filters {
+			if f.Field == "" {
+				continue
+			}
+			clause, err := buildFilterClause(f)
+			if err != nil {
+				return nil, err
+			}
+			clauses = append(clauses, clause)
+		}
+		should = append(should, map[string]any{
+			"bool": map[string]any{"filter": clauses},
+		})
+	}
+	return map[string]any{
+		"bool": map[string]any{
+			"should":               should,
+			"minimum_should_match": 1,
+		},
+	}, nil
+}
+
 func buildFilterClause(f core.Filter) (any, error) {
 	var inner any
 

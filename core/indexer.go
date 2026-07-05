@@ -71,6 +71,12 @@ type Indexer struct {
 	// wrapped around searchBase. When no middlewares are registered it equals
 	// searchBase, so the search path has zero overhead.
 	searchChain SearchHandler
+
+	// searchMiddlewares are the consumer-supplied middlewares only (not the
+	// internal deriveNestedPath/referenceResolve). Federated Search re-runs
+	// them in collect-only mode to harvest each Type's visibility filters; see
+	// collectIndexFilterGroups.
+	searchMiddlewares []SearchMiddleware
 }
 
 // New creates a new Indexer with the given configuration.
@@ -88,6 +94,7 @@ func New(cfg Config) *Indexer {
 	mws = append(mws, idx.referenceResolve)     // innermost: route filters by path, run child searches, fold terms
 
 	idx.searchChain = chainSearch(idx.searchBase, mws)
+	idx.searchMiddlewares = cfg.SearchMiddlewares
 	return idx
 }
 

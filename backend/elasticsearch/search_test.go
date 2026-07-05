@@ -630,3 +630,54 @@ func TestSearch_HitsDecoded(t *testing.T) {
 		t.Errorf("expected name=alice, got %q", v)
 	}
 }
+
+func TestBuildIndexFilterGroups_ScopesFiltersToIndex(t *testing.T) {
+	groups := []core.IndexFilterGroup{
+		{
+			Resource: "product",
+			Alias:    "product_search",
+			Filters:  []core.Filter{{Field: "fields.tenant_id", Op: core.FilterOpEq, Value: "t1"}},
+		},
+		{
+			Resource: "order",
+			Alias:    "order_search",
+			Filters:  nil, // unscoped Type: only the _index constraint
+		},
+	}
+
+	clause, err := buildIndexFilterGroups(groups)
+	if err != nil {
+		t.Fatalf("buildIndexFilterGroups: %v", err)
+	}
+
+	boolQ, ok := clause.(map[string]any)["bool"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected bool clause, got %#v", clause)
+	}
+	if boolQ["minimum_should_match"] != 1 {
+		t.Errorf("minimum_should_match = %v, want 1", boolQ["minimum_should_match"])
+	}
+	should, ok := boolQ["should"].([]any)
+	if !ok || len(should) != 2 {
+		t.Fatalf("expected 2 should clauses, got %#v", boolQ["should"])
+	}
+
+	// Each should-clause pins its group to its own _index alias and carries only
+	// that group's filters.
+	assertIndexTerm := func(leg any, wantIndex string, wantFilters int) {
+		t.Helper()
+		filter, ok := leg.(map[string]any)["bool"].(map[string]any)["filter"].([]any)
+		if !ok {
+			t.Fatalf("leg missing bool.filter: %#v", leg)
+		}
+		term, ok := filter[0].(map[string]any)["term"].(map[string]any)
+		if !ok || term["_index"] != wantIndex {
+			t.Errorf("first clause = %#v, want term _index=%q", filter[0], wantIndex)
+		}
+		if got := len(filter) - 1; got != wantFilters {
+			t.Errorf("index %s: got %d filters, want %d", wantIndex, got, wantFilters)
+		}
+	}
+	assertIndexTerm(should[0], "product_search", 1)
+	assertIndexTerm(should[1], "order_search", 0)
+}
