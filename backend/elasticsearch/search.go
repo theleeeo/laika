@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/theleeeo/laika/core"
@@ -13,6 +14,9 @@ import (
 )
 
 func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias string, vc *resource.VersionConfig) (core.SearchResponse, error) {
+	start := time.Now()
+	logger := core.LoggerFromContext(ctx)
+
 	boolQ := map[string]any{
 		"must":   []any{},
 		"filter": []any{},
@@ -63,6 +67,11 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		return core.SearchResponse{}, err
 	}
 
+	logger.Debug("es query",
+		slog.String("index", indexAlias),
+		slog.String("body", string(b)),
+	)
+
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -111,6 +120,12 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		})
 	}
 
+	logger.Debug("es result",
+		slog.String("index", indexAlias),
+		slog.Int64("total", total),
+		slog.Int("hit_count", len(out.Hits)),
+		slog.Duration("duration", time.Since(start)),
+	)
 	return out, nil
 }
 
@@ -171,6 +186,8 @@ func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchPara
 	if err != nil {
 		return core.FederatedSearchResult{}, err
 	}
+
+	core.LoggerFromContext(ctx).Debug("federated es query", slog.String("body", string(b)))
 
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
