@@ -67,6 +67,9 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		return core.SearchResponse{}, err
 	}
 
+	// body contains the full ES query, including filter values (actor ids,
+	// search terms). Debug-only; gate behind an explicit opt-in before shipping
+	// these logs to a shared aggregator.
 	logger.Debug("es query",
 		slog.String("index", indexAlias),
 		slog.String("body", string(b)),

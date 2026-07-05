@@ -117,6 +117,10 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 				slog.Any("child_filters", summarizeFilters(tgt.Filters)),
 			)
 
+			// The child search requests PageSize: maxReferenceTerms. The logic below
+			// assumes the backend returns all matching hits (len(Hits) == Total) up to
+			// that ceiling. A backend that caps its page size below maxReferenceTerms
+			// would under-populate the terms filter silently.
 			childResp, err := idx.es.Search(ctx, SearchRequest{
 				Resource: tgt.Resource,
 				Filters:  tgt.Filters,
