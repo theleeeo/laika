@@ -103,6 +103,57 @@ func TestGenerateMapping_RootFieldsWrappedWithESType(t *testing.T) {
 	require.Equal(t, "text", fieldProps["body"].(map[string]any)["type"])
 }
 
+func TestGenerateMapping_StandardizedSearchSurfaces(t *testing.T) {
+	// Standardized surfaces exist on every index, independent of field config.
+	props := GenerateMapping(&resource.VersionConfig{})["mappings"].(map[string]any)["properties"].(map[string]any)
+
+	// Primary: flat n-grammed text with a standard-analyzed .full subfield.
+	search := props["search"].(map[string]any)
+	require.Equal(t, "text", search["type"])
+	require.Equal(t, ngramIndexAnalyzer, search["analyzer"])
+	require.Equal(t, ngramSearchAnalyzer, search["search_analyzer"])
+	searchFull := search["fields"].(map[string]any)["full"].(map[string]any)
+	require.Equal(t, "text", searchFull["type"])
+	require.Equal(t, "standard", searchFull["analyzer"])
+
+	// Secondary: nested { text (same analyzer + .full), scope keyword[] }.
+	scoped := props["search_scoped"].(map[string]any)
+	require.Equal(t, "nested", scoped["type"])
+	scopedProps := scoped["properties"].(map[string]any)
+	scopedText := scopedProps["text"].(map[string]any)
+	require.Equal(t, "text", scopedText["type"])
+	require.Equal(t, ngramIndexAnalyzer, scopedText["analyzer"])
+	require.Equal(t, ngramSearchAnalyzer, scopedText["search_analyzer"])
+	require.Equal(t, "standard", scopedText["fields"].(map[string]any)["full"].(map[string]any)["analyzer"])
+	// scope is a keyword field; keyword natively accepts arrays.
+	require.Equal(t, "keyword", scopedProps["scope"].(map[string]any)["type"])
+}
+
+func TestGenerateMapping_NgramAnalysisSettings(t *testing.T) {
+	settings := GenerateMapping(&resource.VersionConfig{})["settings"].(map[string]any)
+
+	// max_ngram_diff must cover the tokenizer's gram range or ES rejects it.
+	require.Equal(t, ngramMaxGram-ngramMinGram, settings["index"].(map[string]any)["max_ngram_diff"])
+
+	analysis := settings["analysis"].(map[string]any)
+
+	tok := analysis["tokenizer"].(map[string]any)[ngramTokenizer].(map[string]any)
+	require.Equal(t, "ngram", tok["type"])
+	require.Equal(t, ngramMinGram, tok["min_gram"])
+	require.Equal(t, ngramMaxGram, tok["max_gram"])
+	require.Equal(t, []any{"letter", "digit"}, tok["token_chars"])
+
+	analyzers := analysis["analyzer"].(map[string]any)
+	// Index-time: n-gram tokenizer + lowercase.
+	idx := analyzers[ngramIndexAnalyzer].(map[string]any)
+	require.Equal(t, ngramTokenizer, idx["tokenizer"])
+	require.Equal(t, []any{"lowercase"}, idx["filter"])
+	// Search-time: standard tokenizer + lowercase, NOT n-grammed.
+	srch := analyzers[ngramSearchAnalyzer].(map[string]any)
+	require.Equal(t, "standard", srch["tokenizer"])
+	require.Equal(t, []any{"lowercase"}, srch["filter"])
+}
+
 // GenerateMappings (used by gen-mapping for the all-resources path) must produce
 // one entry per version keyed by IndexName, each with the correct relation type.
 func TestGenerateMappings_PerVersionWithCardinality(t *testing.T) {
