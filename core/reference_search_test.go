@@ -1,7 +1,10 @@
 package core
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/theleeeo/laika/core/resource"
@@ -240,6 +243,39 @@ func TestNewReferenceTarget(t *testing.T) {
 	}
 	if tgt.ParentKeyField != "a.b_id" || tgt.ParentKeyNestedPath != "a" {
 		t.Fatalf("bad parent key path: field=%q nested=%q", tgt.ParentKeyField, tgt.ParentKeyNestedPath)
+	}
+}
+
+func TestReferenceResolveEmitsTrace(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	be := &fakeBackend{childHits: map[string][]SearchHit{
+		AliasName("b"): {{ID: "b1"}, {ID: "b2"}},
+	}}
+	idx := New(Config{Resources: refResources(), ES: be})
+
+	ctx := WithLogger(context.Background(), logger)
+	_, err := idx.Search(ctx, SearchRequest{
+		Resource: "c",
+		Filters:  []Filter{{Field: "b.name", Op: FilterOpEq, Value: "acme"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := buf.String()
+	for _, want := range []string{
+		"search request received",
+		"search_id=",
+		"reference resolve: filter routed",
+		"is_reference=true",
+		"reference resolve: child result",
+		"reference resolve: folded terms filter",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("trace missing %q; full log:\n%s", want, out)
+		}
 	}
 }
 

@@ -3,11 +3,22 @@ package core
 import (
 	"context"
 	"errors"
+	"log/slog"
 )
 
 // Search executes a search query against the indexed documents for the given
 // resource, running it through the registered search middleware chain.
 func (idx *Indexer) Search(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+	logger := LoggerFromContext(ctx).With(
+		slog.String("search_id", newSearchID()),
+		slog.String("resource", req.Resource),
+	)
+	ctx = WithLogger(ctx, logger)
+	logger.Debug("search request received",
+		slog.String("query", req.Query),
+		slog.Int("filter_count", len(req.Filters)),
+		slog.Any("filters", summarizeFilters(req.Filters)),
+	)
 	return idx.searchChain(ctx, req)
 }
 
@@ -25,6 +36,14 @@ func (idx *Indexer) searchBase(ctx context.Context, req SearchRequest) (SearchRe
 	}
 
 	req.Page, req.PageSize = normalizePaging(req.Page, req.PageSize)
+
+	LoggerFromContext(ctx).Debug("search base: issuing primary query",
+		slog.String("alias", AliasName(r.Resource)),
+		slog.Int("page", int(req.Page)),
+		slog.Int("page_size", int(req.PageSize)),
+		slog.Int("filter_count", len(req.Filters)),
+		slog.Any("filters", summarizeFilters(req.Filters)),
+	)
 
 	return idx.es.Search(ctx, req, AliasName(r.Resource), r.ReadVersionConfig())
 }

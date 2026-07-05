@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/theleeeo/laika/core/resource"
@@ -40,6 +41,7 @@ type referenceTarget struct {
 // without recomposing the search chain.
 func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 	return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+		logger := LoggerFromContext(ctx)
 		cfg := idx.resources.Get(req.Resource)
 		if cfg == nil {
 			return next(ctx, req)
@@ -49,26 +51,47 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 			return next(ctx, req)
 		}
 
+		logger.Debug("reference resolve: start", slog.Int("filter_count", len(req.Filters)))
+
 		// Partition filters by field path: reference-relation filters become
 		// child targets; everything else stays on the primary.
 		var primary []Filter
 		targets := map[string]*referenceTarget{}
 		for _, f := range req.Filters {
-			relName, field, ok := splitRelationField(f.Field)
-			if ok {
-				if rel := vc.GetRelation(relName); rel != nil && rel.IsReference() {
-					tgt := targets[relName]
-					if tgt == nil {
-						tgt = newReferenceTarget(*rel, vc)
-						targets[relName] = tgt
-					}
-					childFilter := f
-					childFilter.Field = "fields." + field
-					childFilter.NestedPath = ""
-					tgt.Filters = append(tgt.Filters, childFilter)
-					continue
-				}
+			relName, field, isPath := splitRelationField(f.Field)
+			var rel *resource.RelationConfig
+			if isPath {
+				rel = vc.GetRelation(relName)
 			}
+			isReference := rel != nil && rel.IsReference()
+
+			if isReference {
+				tgt := targets[relName]
+				if tgt == nil {
+					tgt = newReferenceTarget(*rel, vc)
+					targets[relName] = tgt
+				}
+				childFilter := f
+				childFilter.Field = "fields." + field
+				childFilter.NestedPath = ""
+				tgt.Filters = append(tgt.Filters, childFilter)
+				logger.Debug("reference resolve: filter routed",
+					slog.String("field", f.Field),
+					slog.String("rel_name", relName),
+					slog.Bool("is_relation", rel != nil),
+					slog.Bool("is_reference", true),
+					slog.String("dest", "child:"+relName),
+				)
+				continue
+			}
+
+			logger.Debug("reference resolve: filter routed",
+				slog.String("field", f.Field),
+				slog.String("rel_name", relName),
+				slog.Bool("is_relation", rel != nil),
+				slog.Bool("is_reference", false),
+				slog.String("dest", "primary"),
+			)
 			primary = append(primary, f)
 		}
 		req.Filters = primary
@@ -86,10 +109,14 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 				return SearchResponse{}, ErrUnknownResource
 			}
 
-			// The child search requests PageSize: maxReferenceTerms. The logic below
-			// assumes the backend returns all matching hits (len(Hits) == Total) up to
-			// that ceiling. A backend that caps its page size below maxReferenceTerms
-			// would under-populate the terms filter silently.
+			logger.Debug("reference resolve: child search",
+				slog.String("child_resource", tgt.Resource),
+				slog.String("foreign_field", tgt.ForeignField),
+				slog.String("parent_key_field", tgt.ParentKeyField),
+				slog.String("parent_key_nested_path", tgt.ParentKeyNestedPath),
+				slog.Any("child_filters", summarizeFilters(tgt.Filters)),
+			)
+
 			childResp, err := idx.es.Search(ctx, SearchRequest{
 				Resource: tgt.Resource,
 				Filters:  tgt.Filters,
@@ -98,7 +125,19 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 			if err != nil {
 				return SearchResponse{}, err
 			}
+
+			logger.Debug("reference resolve: child result",
+				slog.String("child_resource", tgt.Resource),
+				slog.Int64("total", childResp.Total),
+				slog.Int("hit_count", len(childResp.Hits)),
+			)
+
 			if childResp.Total > maxReferenceTerms {
+				logger.Warn("reference resolve: child exceeds term ceiling",
+					slog.String("child_resource", tgt.Resource),
+					slog.Int64("total", childResp.Total),
+					slog.Int("ceiling", maxReferenceTerms),
+				)
 				return SearchResponse{}, &InvalidArgumentError{Msg: fmt.Sprintf(
 					"reference relation to %q matched %d children, exceeding the %d-term ceiling; this child is not low-count enough for strategy: reference",
 					tgt.Resource, childResp.Total, maxReferenceTerms)}
@@ -110,8 +149,19 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 					values = append(values, v)
 				}
 			}
+			if len(values) < len(childResp.Hits) {
+				logger.Warn("reference resolve: some child hits yielded no join key",
+					slog.String("child_resource", tgt.Resource),
+					slog.String("foreign_field", tgt.ForeignField),
+					slog.Int("hit_count", len(childResp.Hits)),
+					slog.Int("value_count", len(values)),
+				)
+			}
 			if len(values) == 0 {
 				// No child matches -> no parent can match this reference.
+				logger.Debug("reference resolve: no child matches, short-circuiting",
+					slog.String("child_resource", tgt.Resource),
+				)
 				return SearchResponse{}, nil
 			}
 
@@ -121,6 +171,11 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 				Values:     values,
 				NestedPath: tgt.ParentKeyNestedPath,
 			})
+			logger.Debug("reference resolve: folded terms filter",
+				slog.String("parent_key_field", tgt.ParentKeyField),
+				slog.String("nested_path", tgt.ParentKeyNestedPath),
+				slog.Int("value_count", len(values)),
+			)
 		}
 
 		return next(ctx, req)

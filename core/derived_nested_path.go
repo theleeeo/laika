@@ -1,6 +1,9 @@
 package core
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // deriveNestedPath is a search middleware that fills in Filter.NestedPath for
 // filters naming a many-cardinality denormalized relation field, so callers
@@ -45,6 +48,10 @@ func (idx *Indexer) deriveNestedPath(next SearchHandler) SearchHandler {
 			}
 			if rel.IsMany() {
 				f.NestedPath = relName
+				LoggerFromContext(ctx).Debug("nested path derived",
+					slog.String("field", f.Field),
+					slog.String("nested_path", relName),
+				)
 			}
 		}
 
