@@ -61,6 +61,25 @@ resource_config_path: "resources.from.file.yml"
 	}
 }
 
+func TestLoadAppConfig_LogLevelDefaultAndOverride(t *testing.T) {
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.Log.Level != "info" {
+		t.Fatalf("default log level = %q, want %q", cfg.Log.Level, "info")
+	}
+
+	t.Setenv("LOG_LEVEL", "debug")
+	cfg, err = loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig with env: %v", err)
+	}
+	if cfg.Log.Level != "debug" {
+		t.Fatalf("LOG_LEVEL override = %q, want %q", cfg.Log.Level, "debug")
+	}
+}
+
 func TestLoadAppConfigEnvOverridesFile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "indexer.yml")
 	content := []byte(`

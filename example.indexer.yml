@@ -30,3 +30,8 @@ provider:
   addr: "localhost:50051"
 
 resource_config_path: "resources.yml"
+
+# Log level: debug | info | warn | error (default: info).
+# Set to debug to trace the full search path, including reference resolution.
+log:
+  level: info

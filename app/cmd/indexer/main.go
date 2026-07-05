@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -74,7 +73,11 @@ func main() {
 	}
 	defer dbpool.Close()
 
-	slog.SetLogLoggerLevel(slog.LevelDebug)
+	logLevel, err := core.ParseLevel(cfg.Log.Level)
+	if err != nil {
+		log.Fatalf("parse log level: %v", err)
+	}
+	core.InitTextLogging(os.Stderr, logLevel)
 
 	st := postgres.NewStore(dbpool)
 

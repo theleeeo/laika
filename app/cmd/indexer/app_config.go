@@ -21,12 +21,18 @@ import (
 //	pg.addr             → PG_ADDR
 //	provider.addr       → PROVIDER_ADDR
 //	resource_config_path → RESOURCE_CONFIG_PATH
+//	log.level           → LOG_LEVEL
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
 	PG                 pgConfig       `mapstructure:"pg"`
 	Provider           providerConfig `mapstructure:"provider"`
 	ResourceConfigPath string         `mapstructure:"resource_config_path"`
+	Log                logConfig      `mapstructure:"log"`
+}
+
+type logConfig struct {
+	Level string `mapstructure:"level"`
 }
 
 type grpcConfig struct {
@@ -65,6 +71,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("pg.addr", "postgres://user:pass@localhost:5432/indexer")
 	v.SetDefault("provider.addr", "")
 	v.SetDefault("resource_config_path", "resources.yml")
+	v.SetDefault("log.level", "info")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {
