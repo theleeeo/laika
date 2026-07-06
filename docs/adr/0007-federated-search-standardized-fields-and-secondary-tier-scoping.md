@@ -1,5 +1,16 @@
 # Federated Search rides standardized, Build-time searchable fields; tenancy scoping lives only in the secondary tier and only in library consumers
 
+> **Superseded in part (2026-07-06):** per-Type document visibility is no
+> longer harvested by replaying the single-resource middleware chain
+> ("collect mode", mechanism point 1 below). Federated Search now has its own
+> middleware chain (`Config.FederatedSearchMiddlewares`); a federated
+> middleware supplies per-Type filters via
+> `FederatedSearchRequest.ResourceFilters` and the scope value via
+> `FederatedSearchRequest.SecondaryScope`. Authorization is written once by
+> the consumer as a shared policy evaluator feeding both chains. See
+> [the federated-search-middleware spec](../superpowers/specs/2026-07-06-federated-search-middleware-design.md).
+> Everything else in this ADR stands.
+
 Single-resource Search names one Resource Type and runs a `multi_match` over that
 Type's own field set. A search bar needs one query matched across *several* Types
 at once, returning a single relevance-ranked cross-type list. Merging raw scores
