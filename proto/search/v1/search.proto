@@ -88,8 +88,19 @@ message FederatedSearchResponse {
 
 enum FilterOp {
   FILTER_OP_UNSPECIFIED = 0;
-  FILTER_OP_EQ = 1; // term query
-  FILTER_OP_IN = 2; // terms query
+  FILTER_OP_EQ = 1;          // term
+  FILTER_OP_IN = 2;          // terms
+  FILTER_OP_NEQ = 3;         // must_not(term); on nested relations: "no child matches"
+  FILTER_OP_NOT_IN = 4;      // must_not(terms); on nested relations: "no child matches"
+  FILTER_OP_GT = 5;          // range — numeric, date, ip fields
+  FILTER_OP_GTE = 6;         // range
+  FILTER_OP_LT = 7;          // range
+  FILTER_OP_LTE = 8;         // range
+  FILTER_OP_PREFIX = 9;      // prefix — keyword fields
+  FILTER_OP_SUFFIX = 10;     // wildcard *v — keyword fields
+  FILTER_OP_CONTAINS = 11;   // wildcard *v* — keyword fields
+  FILTER_OP_EXISTS = 12;     // exists — takes no value
+  FILTER_OP_NOT_EXISTS = 13; // must_not(exists) — takes no value
 }
 
 message Filter {
@@ -98,17 +109,19 @@ message Filter {
 
   FilterOp op = 2;
 
-  // For EQ
+  // Single-value ops: EQ, NEQ, GT, GTE, LT, LTE, PREFIX, SUFFIX, CONTAINS.
+  // Values are strings for every field type; the server coerces them against
+  // the field's mapping (numbers as "42", dates as ISO-8601 / epoch millis /
+  // ES date math such as "now-7d"). EXISTS / NOT_EXISTS take no value.
   string value = 3;
 
-  // For IN
+  // Set ops: IN, NOT_IN.
   repeated string values = 4;
 
   // If you need nested filtering (e.g. c is mapped as "nested"):
   // nested_path="c", field="c.state", op=EQ, value="active"
-  // TODO: Can it be more ergonomic to specify nested filters? Maybe a separate
-  // message for nested filters? Or calculate on the fly based on the resource
-  // configured
+  // Usually unnecessary: the server derives it for denormalized
+  // many-relations.
   string nested_path = 5;
 }
 

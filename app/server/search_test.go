@@ -127,3 +127,33 @@ func TestGetCapabilities_EmptyConfigReturnsNoResources(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, resp.Msg.Resources)
 }
+
+func TestFilterOpProtoMapping_RoundTrip(t *testing.T) {
+	// Every proto op maps to a distinct core op and back.
+	seen := map[core.FilterOp]bool{}
+	for p, c := range opFromProto {
+		require.Equal(t, c, protoFilterOp(p))
+		require.False(t, seen[c], "core op %s mapped twice", c)
+		seen[c] = true
+		back, ok := opToProto[c]
+		require.True(t, ok, "core op %s missing from opToProto", c)
+		require.Equal(t, p, back)
+	}
+	require.Len(t, opFromProto, 13)
+
+	// UNSPECIFIED keeps the legacy default.
+	require.Equal(t, core.FilterOpEq, protoFilterOp(search.FilterOp_FILTER_OP_UNSPECIFIED))
+}
+
+func TestSearch_InvalidFilterMapsToInvalidArgument(t *testing.T) {
+	// "a" has keyword fields region/name; GT is not in the string family.
+	srv := federatedSearcher(&fakeBackend{})
+
+	_, err := srv.Search(context.Background(), connect.NewRequest(&search.SearchRequest{
+		Resource: "a",
+		Filters:  []*search.Filter{{Field: "fields.region", Op: search.FilterOp_FILTER_OP_GT, Value: "x"}},
+	}))
+
+	require.Error(t, err)
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}

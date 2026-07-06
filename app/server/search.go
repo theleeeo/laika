@@ -23,10 +23,15 @@ func NewSearcher(idx *core.Indexer) *SearcherServer {
 func (s *SearcherServer) Search(ctx context.Context, req *connect.Request[search.SearchRequest]) (*connect.Response[search.SearchResponse], error) {
 	resp, err := s.idx.Search(ctx, protoToSearchRequest(req.Msg))
 	if err != nil {
-		if errors.Is(err, core.ErrUnknownResource) {
+		var invalid *core.InvalidArgumentError
+		switch {
+		case errors.As(err, &invalid):
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		case errors.Is(err, core.ErrUnknownResource):
 			return nil, connect.NewError(connect.CodeFailedPrecondition, core.ErrUnknownResource)
+		default:
+			return nil, connect.NewError(connect.CodeInternal, err)
 		}
-		return nil, connect.NewError(connect.CodeInternal, err)
 	}
 	return connect.NewResponse(searchResponseToProto(resp)), nil
 }
@@ -186,13 +191,40 @@ func protoToSearchRequest(req *search.SearchRequest) core.SearchRequest {
 	}
 }
 
-func protoFilterOp(op search.FilterOp) core.FilterOp {
-	switch op {
-	case search.FilterOp_FILTER_OP_IN:
-		return core.FilterOpIn
-	default:
-		return core.FilterOpEq
+// opFromProto / opToProto convert the wire enum to core ops and back; keep
+// them in sync with proto/search/v1/search.proto and core/search_types.go.
+var opFromProto = map[search.FilterOp]core.FilterOp{
+	search.FilterOp_FILTER_OP_EQ:         core.FilterOpEq,
+	search.FilterOp_FILTER_OP_IN:         core.FilterOpIn,
+	search.FilterOp_FILTER_OP_NEQ:        core.FilterOpNeq,
+	search.FilterOp_FILTER_OP_NOT_IN:     core.FilterOpNotIn,
+	search.FilterOp_FILTER_OP_GT:         core.FilterOpGt,
+	search.FilterOp_FILTER_OP_GTE:        core.FilterOpGte,
+	search.FilterOp_FILTER_OP_LT:         core.FilterOpLt,
+	search.FilterOp_FILTER_OP_LTE:        core.FilterOpLte,
+	search.FilterOp_FILTER_OP_PREFIX:     core.FilterOpPrefix,
+	search.FilterOp_FILTER_OP_SUFFIX:     core.FilterOpSuffix,
+	search.FilterOp_FILTER_OP_CONTAINS:   core.FilterOpContains,
+	search.FilterOp_FILTER_OP_EXISTS:     core.FilterOpExists,
+	search.FilterOp_FILTER_OP_NOT_EXISTS: core.FilterOpNotExists,
+}
+
+var opToProto = func() map[core.FilterOp]search.FilterOp {
+	m := make(map[core.FilterOp]search.FilterOp, len(opFromProto))
+	for p, c := range opFromProto {
+		m[c] = p
 	}
+	return m
+}()
+
+// protoFilterOp maps a wire op to the core op. UNSPECIFIED (and any unknown
+// future value) maps to EQ — the pre-extension behavior for old clients;
+// core validation still rejects an EQ that doesn't fit the field.
+func protoFilterOp(op search.FilterOp) core.FilterOp {
+	if c, ok := opFromProto[op]; ok {
+		return c
+	}
+	return core.FilterOpEq
 }
 
 func searchResponseToProto(resp core.SearchResponse) *search.SearchResponse {
@@ -223,11 +255,8 @@ func capabilitiesToProto(caps core.CapabilitiesResponse) *search.GetCapabilities
 				Sortable:   f.Sortable,
 			}
 			for _, op := range f.FilterOps {
-				switch op {
-				case core.FilterOpEq:
-					pf.FilterOps = append(pf.FilterOps, search.FilterOp_FILTER_OP_EQ)
-				case core.FilterOpIn:
-					pf.FilterOps = append(pf.FilterOps, search.FilterOp_FILTER_OP_IN)
+				if p, ok := opToProto[op]; ok {
+					pf.FilterOps = append(pf.FilterOps, p)
 				}
 			}
 			cap.Fields = append(cap.Fields, pf)

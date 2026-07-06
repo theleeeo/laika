@@ -26,21 +26,54 @@ type FilterOp int32
 
 const (
 	FilterOp_FILTER_OP_UNSPECIFIED FilterOp = 0
-	FilterOp_FILTER_OP_EQ          FilterOp = 1 // term query
-	FilterOp_FILTER_OP_IN          FilterOp = 2 // terms query
+	FilterOp_FILTER_OP_EQ          FilterOp = 1  // term
+	FilterOp_FILTER_OP_IN          FilterOp = 2  // terms
+	FilterOp_FILTER_OP_NEQ         FilterOp = 3  // must_not(term); on nested relations: "no child matches"
+	FilterOp_FILTER_OP_NOT_IN      FilterOp = 4  // must_not(terms); on nested relations: "no child matches"
+	FilterOp_FILTER_OP_GT          FilterOp = 5  // range — numeric, date, ip fields
+	FilterOp_FILTER_OP_GTE         FilterOp = 6  // range
+	FilterOp_FILTER_OP_LT          FilterOp = 7  // range
+	FilterOp_FILTER_OP_LTE         FilterOp = 8  // range
+	FilterOp_FILTER_OP_PREFIX      FilterOp = 9  // prefix — keyword fields
+	FilterOp_FILTER_OP_SUFFIX      FilterOp = 10 // wildcard *v — keyword fields
+	FilterOp_FILTER_OP_CONTAINS    FilterOp = 11 // wildcard *v* — keyword fields
+	FilterOp_FILTER_OP_EXISTS      FilterOp = 12 // exists — takes no value
+	FilterOp_FILTER_OP_NOT_EXISTS  FilterOp = 13 // must_not(exists) — takes no value
 )
 
 // Enum value maps for FilterOp.
 var (
 	FilterOp_name = map[int32]string{
-		0: "FILTER_OP_UNSPECIFIED",
-		1: "FILTER_OP_EQ",
-		2: "FILTER_OP_IN",
+		0:  "FILTER_OP_UNSPECIFIED",
+		1:  "FILTER_OP_EQ",
+		2:  "FILTER_OP_IN",
+		3:  "FILTER_OP_NEQ",
+		4:  "FILTER_OP_NOT_IN",
+		5:  "FILTER_OP_GT",
+		6:  "FILTER_OP_GTE",
+		7:  "FILTER_OP_LT",
+		8:  "FILTER_OP_LTE",
+		9:  "FILTER_OP_PREFIX",
+		10: "FILTER_OP_SUFFIX",
+		11: "FILTER_OP_CONTAINS",
+		12: "FILTER_OP_EXISTS",
+		13: "FILTER_OP_NOT_EXISTS",
 	}
 	FilterOp_value = map[string]int32{
 		"FILTER_OP_UNSPECIFIED": 0,
 		"FILTER_OP_EQ":          1,
 		"FILTER_OP_IN":          2,
+		"FILTER_OP_NEQ":         3,
+		"FILTER_OP_NOT_IN":      4,
+		"FILTER_OP_GT":          5,
+		"FILTER_OP_GTE":         6,
+		"FILTER_OP_LT":          7,
+		"FILTER_OP_LTE":         8,
+		"FILTER_OP_PREFIX":      9,
+		"FILTER_OP_SUFFIX":      10,
+		"FILTER_OP_CONTAINS":    11,
+		"FILTER_OP_EXISTS":      12,
+		"FILTER_OP_NOT_EXISTS":  13,
 	}
 )
 
@@ -560,15 +593,17 @@ type Filter struct {
 	// Example: "b.name.keyword" or "a_status" or "c.state"
 	Field string   `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
 	Op    FilterOp `protobuf:"varint,2,opt,name=op,proto3,enum=search.v1.FilterOp" json:"op,omitempty"`
-	// For EQ
+	// Single-value ops: EQ, NEQ, GT, GTE, LT, LTE, PREFIX, SUFFIX, CONTAINS.
+	// Values are strings for every field type; the server coerces them against
+	// the field's mapping (numbers as "42", dates as ISO-8601 / epoch millis /
+	// ES date math such as "now-7d"). EXISTS / NOT_EXISTS take no value.
 	Value string `protobuf:"bytes,3,opt,name=value,proto3" json:"value,omitempty"`
-	// For IN
+	// Set ops: IN, NOT_IN.
 	Values []string `protobuf:"bytes,4,rep,name=values,proto3" json:"values,omitempty"`
 	// If you need nested filtering (e.g. c is mapped as "nested"):
 	// nested_path="c", field="c.state", op=EQ, value="active"
-	// TODO: Can it be more ergonomic to specify nested filters? Maybe a separate
-	// message for nested filters? Or calculate on the fly based on the resource
-	// configured
+	// Usually unnecessary: the server derives it for denormalized
+	// many-relations.
 	NestedPath    string `protobuf:"bytes,5,opt,name=nested_path,json=nestedPath,proto3" json:"nested_path,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -968,11 +1003,23 @@ const file_search_v1_search_proto_rawDesc = "" +
 	"\n" +
 	"searchable\x18\x04 \x01(\bR\n" +
 	"searchable\x12\x1a\n" +
-	"\bsortable\x18\x05 \x01(\bR\bsortable*I\n" +
+	"\bsortable\x18\x05 \x01(\bR\bsortable*\xb0\x02\n" +
 	"\bFilterOp\x12\x19\n" +
 	"\x15FILTER_OP_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fFILTER_OP_EQ\x10\x01\x12\x10\n" +
-	"\fFILTER_OP_IN\x10\x022\x82\x02\n" +
+	"\fFILTER_OP_IN\x10\x02\x12\x11\n" +
+	"\rFILTER_OP_NEQ\x10\x03\x12\x14\n" +
+	"\x10FILTER_OP_NOT_IN\x10\x04\x12\x10\n" +
+	"\fFILTER_OP_GT\x10\x05\x12\x11\n" +
+	"\rFILTER_OP_GTE\x10\x06\x12\x10\n" +
+	"\fFILTER_OP_LT\x10\a\x12\x11\n" +
+	"\rFILTER_OP_LTE\x10\b\x12\x14\n" +
+	"\x10FILTER_OP_PREFIX\x10\t\x12\x14\n" +
+	"\x10FILTER_OP_SUFFIX\x10\n" +
+	"\x12\x16\n" +
+	"\x12FILTER_OP_CONTAINS\x10\v\x12\x14\n" +
+	"\x10FILTER_OP_EXISTS\x10\f\x12\x18\n" +
+	"\x14FILTER_OP_NOT_EXISTS\x10\r2\x82\x02\n" +
 	"\rSearchService\x12=\n" +
 	"\x06Search\x12\x18.search.v1.SearchRequest\x1a\x19.search.v1.SearchResponse\x12X\n" +
 	"\x0fFederatedSearch\x12!.search.v1.FederatedSearchRequest\x1a\".search.v1.FederatedSearchResponse\x12X\n" +
