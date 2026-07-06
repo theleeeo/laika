@@ -64,10 +64,10 @@ func summarizeFilters(fs []Filter) []string {
 	out := make([]string, 0, len(fs))
 	for _, f := range fs {
 		val := any(f.Value)
-		if f.Op == FilterOpIn {
+		if f.Op == FilterOpIn || f.Op == FilterOpNotIn {
 			val = f.Values
 		}
-		out = append(out, fmt.Sprintf("%s %v %v", f.Field, f.Op, val))
+		out = append(out, fmt.Sprintf("%s %s %v", f.Field, f.Op, val))
 	}
 	return out
 }

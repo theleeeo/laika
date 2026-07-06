@@ -1,19 +1,33 @@
 package core
 
-// FilterOp is the comparison operator for a structured search filter.
+// FilterOp is the comparison operator for a structured search filter. The
+// ops a field supports are derived from its type family; see opsByFamily in
+// filter_ops.go.
 type FilterOp int
 
 const (
-	FilterOpEq FilterOp = iota
-	FilterOpIn
+	FilterOpEq FilterOp = iota // term
+	FilterOpIn                 // terms
+	// New ops are appended so FilterOpEq/FilterOpIn keep their original values.
+	FilterOpNeq       // must_not(term)
+	FilterOpNotIn     // must_not(terms)
+	FilterOpGt        // range
+	FilterOpGte       // range
+	FilterOpLt        // range
+	FilterOpLte       // range
+	FilterOpPrefix    // prefix
+	FilterOpSuffix    // wildcard *v
+	FilterOpContains  // wildcard *v*
+	FilterOpExists    // exists
+	FilterOpNotExists // must_not(exists)
 )
 
 // Filter is a structured field-level filter for a search request.
 type Filter struct {
 	Field      string
 	Op         FilterOp
-	Value      string   // used by FilterOpEq
-	Values     []string // used by FilterOpIn
+	Value      string   // single-value ops (eq, neq, ranges, prefix, suffix, contains)
+	Values     []string // set ops (in, not_in)
 	NestedPath string   // non-empty when the field lives inside a nested object
 }
 
