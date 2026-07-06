@@ -135,25 +135,23 @@ func (t *TestSuite) Test_FederatedSearch_ResolvesReferenceRelationFilter() {
 		"search": "fiber", "fields": map[string]any{"population_id": "pop-B"},
 	})
 
-	// scopeFor builds an indexer whose consumer middleware scopes each Type to a
-	// fiber operator the way authz does: population by its own root field,
+	// scopeFor builds an indexer whose federated middleware scopes each Type to
+	// a fiber operator the way authz does: population by its own root field,
 	// access-point through the referenced population's field.
 	scopeFor := func(operator string) *core.Indexer {
-		mw := func(next core.SearchHandler) core.SearchHandler {
-			return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
-				switch req.Resource {
-				case "pop":
-					req.AddFilter(core.Filter{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: operator})
-				case "ap":
-					req.AddFilter(core.Filter{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: operator})
+		mw := func(next core.FederatedSearchHandler) core.FederatedSearchHandler {
+			return func(ctx context.Context, req core.FederatedSearchRequest) (core.FederatedSearchResponse, error) {
+				req.ResourceFilters = map[string][]core.Filter{
+					"pop": {{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: operator}},
+					"ap":  {{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: operator}},
 				}
 				return next(ctx, req)
 			}
 		}
 		return core.New(core.Config{
-			Resources:         referenceScopeConfig,
-			ES:                elasticsearch.New(t.esClient, true),
-			SearchMiddlewares: []core.SearchMiddleware{mw},
+			Resources:                  referenceScopeConfig,
+			ES:                         elasticsearch.New(t.esClient, true),
+			FederatedSearchMiddlewares: []core.FederatedSearchMiddleware{mw},
 		})
 	}
 
@@ -184,21 +182,19 @@ func (t *TestSuite) Test_FederatedSearch_ResolvesReferenceRelationFilter() {
 		// pop scoped to op-A (matches pop-A), ap scoped to op-none (no population),
 		// so the ap group resolves to zero children and must contribute nothing
 		// while pop still returns.
-		mw := func(next core.SearchHandler) core.SearchHandler {
-			return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
-				switch req.Resource {
-				case "pop":
-					req.AddFilter(core.Filter{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: "op-A"})
-				case "ap":
-					req.AddFilter(core.Filter{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: "op-none"})
+		mw := func(next core.FederatedSearchHandler) core.FederatedSearchHandler {
+			return func(ctx context.Context, req core.FederatedSearchRequest) (core.FederatedSearchResponse, error) {
+				req.ResourceFilters = map[string][]core.Filter{
+					"pop": {{Field: "fields.fiber_operator_id", Op: core.FilterOpEq, Value: "op-A"}},
+					"ap":  {{Field: "pop.fiber_operator_id", Op: core.FilterOpEq, Value: "op-none"}},
 				}
 				return next(ctx, req)
 			}
 		}
 		idx := core.New(core.Config{
-			Resources:         referenceScopeConfig,
-			ES:                elasticsearch.New(t.esClient, true),
-			SearchMiddlewares: []core.SearchMiddleware{mw},
+			Resources:                  referenceScopeConfig,
+			ES:                         elasticsearch.New(t.esClient, true),
+			FederatedSearchMiddlewares: []core.FederatedSearchMiddleware{mw},
 		})
 		resp, err := idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
 			Query:     "fiber",
@@ -232,9 +228,10 @@ func (t *TestSuite) Test_FederatedSearch_SecondaryScopeCorrelation() {
 		},
 	})
 
-	// A consumer middleware that supplies the caller's tenant scope from context.
-	scopeMW := func(next core.SearchHandler) core.SearchHandler {
-		return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
+	// A consumer federated middleware that supplies the caller's tenant scope
+	// from context.
+	scopeMW := func(next core.FederatedSearchHandler) core.FederatedSearchHandler {
+		return func(ctx context.Context, req core.FederatedSearchRequest) (core.FederatedSearchResponse, error) {
 			if s, ok := ctx.Value(scopeCtxKey{}).(string); ok {
 				req.SecondaryScope = s
 			}
@@ -242,9 +239,9 @@ func (t *TestSuite) Test_FederatedSearch_SecondaryScopeCorrelation() {
 		}
 	}
 	scopedIdx := core.New(core.Config{
-		Resources:         DefaultResourceConfig,
-		ES:                elasticsearch.New(t.esClient, true),
-		SearchMiddlewares: []core.SearchMiddleware{scopeMW},
+		Resources:                  DefaultResourceConfig,
+		ES:                         elasticsearch.New(t.esClient, true),
+		FederatedSearchMiddlewares: []core.FederatedSearchMiddleware{scopeMW},
 	})
 
 	search := func(query, tenant string) core.FederatedSearchResponse {
