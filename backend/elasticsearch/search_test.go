@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -890,5 +891,86 @@ func TestFederatedSearch_EmptyQueryOmitsMust(t *testing.T) {
 	}
 	if _, ok := boolQ["filter"]; !ok {
 		t.Error("expected filter groups even with empty query")
+	}
+}
+
+// ---- buildFilterClause op matrix ----
+
+func TestBuildFilterClause_Ops(t *testing.T) {
+	term := map[string]any{"term": map[string]any{"fields.a": "x"}}
+	terms := map[string]any{"terms": map[string]any{"fields.a": []string{"x", "y"}}}
+	exists := map[string]any{"exists": map[string]any{"field": "fields.a"}}
+	mustNot := func(inner any) map[string]any {
+		return map[string]any{"bool": map[string]any{"must_not": []any{inner}}}
+	}
+	nested := func(inner any) map[string]any {
+		return map[string]any{"nested": map[string]any{"path": "rel", "query": inner}}
+	}
+	rangeClause := func(key string) map[string]any {
+		return map[string]any{"range": map[string]any{"fields.a": map[string]any{key: "5"}}}
+	}
+
+	cases := []struct {
+		name string
+		f    core.Filter
+		want any
+	}{
+		{"eq", core.Filter{Field: "fields.a", Op: core.FilterOpEq, Value: "x"}, term},
+		{"neq", core.Filter{Field: "fields.a", Op: core.FilterOpNeq, Value: "x"}, mustNot(term)},
+		{"in", core.Filter{Field: "fields.a", Op: core.FilterOpIn, Values: []string{"x", "y"}}, terms},
+		{"not_in", core.Filter{Field: "fields.a", Op: core.FilterOpNotIn, Values: []string{"x", "y"}}, mustNot(terms)},
+		{"gt", core.Filter{Field: "fields.a", Op: core.FilterOpGt, Value: "5"}, rangeClause("gt")},
+		{"gte", core.Filter{Field: "fields.a", Op: core.FilterOpGte, Value: "5"}, rangeClause("gte")},
+		{"lt", core.Filter{Field: "fields.a", Op: core.FilterOpLt, Value: "5"}, rangeClause("lt")},
+		{"lte", core.Filter{Field: "fields.a", Op: core.FilterOpLte, Value: "5"}, rangeClause("lte")},
+		{"prefix", core.Filter{Field: "fields.a", Op: core.FilterOpPrefix, Value: "vx-"},
+			map[string]any{"prefix": map[string]any{"fields.a": map[string]any{"value": "vx-"}}}},
+		{"suffix", core.Filter{Field: "fields.a", Op: core.FilterOpSuffix, Value: "east"},
+			map[string]any{"wildcard": map[string]any{"fields.a": map[string]any{"value": "*east"}}}},
+		{"contains", core.Filter{Field: "fields.a", Op: core.FilterOpContains, Value: "mid"},
+			map[string]any{"wildcard": map[string]any{"fields.a": map[string]any{"value": "*mid*"}}}},
+		{"suffix escapes wildcard metacharacters",
+			core.Filter{Field: "fields.a", Op: core.FilterOpSuffix, Value: `a*b?c\d`},
+			map[string]any{"wildcard": map[string]any{"fields.a": map[string]any{"value": `*a\*b\?c\\d`}}}},
+		{"exists", core.Filter{Field: "fields.a", Op: core.FilterOpExists}, exists},
+		{"not_exists", core.Filter{Field: "fields.a", Op: core.FilterOpNotExists}, mustNot(exists)},
+		{"nested positive wraps in nested",
+			core.Filter{Field: "rel.a", Op: core.FilterOpEq, Value: "x", NestedPath: "rel"},
+			map[string]any{"nested": map[string]any{"path": "rel",
+				"query": map[string]any{"term": map[string]any{"rel.a": "x"}}}}},
+		{"nested negation puts must_not outside nested (no child matches)",
+			core.Filter{Field: "fields.a", Op: core.FilterOpNeq, Value: "x", NestedPath: "rel"},
+			mustNot(nested(term))},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := buildFilterClause(c.f)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("got  %#v\nwant %#v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestBuildFilterClause_OperandErrors(t *testing.T) {
+	cases := []core.Filter{
+		{Field: "f", Op: core.FilterOpEq},                    // missing value
+		{Field: "f", Op: core.FilterOpNeq},                   // missing value
+		{Field: "f", Op: core.FilterOpIn},                    // missing values
+		{Field: "f", Op: core.FilterOpNotIn},                 // missing values
+		{Field: "f", Op: core.FilterOpGte},                   // missing value
+		{Field: "f", Op: core.FilterOpPrefix},                // missing value
+		{Field: "f", Op: core.FilterOpSuffix},                // missing value
+		{Field: "f", Op: core.FilterOpContains},              // missing value
+		{Field: "f", Op: core.FilterOp(99), Value: "x"},      // unknown op
+	}
+	for _, f := range cases {
+		if _, err := buildFilterClause(f); err == nil {
+			t.Errorf("filter %+v: expected error", f)
+		}
 	}
 }

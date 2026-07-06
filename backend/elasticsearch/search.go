@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/theleeeo/laika/core"
@@ -410,34 +411,100 @@ func buildIndexFilterGroups(groups []core.IndexFilterGroup) (any, error) {
 	}, nil
 }
 
+// rangeKeys maps range ops to their ES range-clause keys.
+var rangeKeys = map[core.FilterOp]string{
+	core.FilterOpGt:  "gt",
+	core.FilterOpGte: "gte",
+	core.FilterOpLt:  "lt",
+	core.FilterOpLte: "lte",
+}
+
+// buildFilterClause translates one filter into an ES bool-filter clause.
+// Assembly order matters for negation ops: the positive clause is wrapped in
+// nested first (when NestedPath is set) and must_not second, so a negation on
+// a nested field is document-level — "no child matches" — rather than "some
+// child differs" (spec: Semantics / Negation on relations).
 func buildFilterClause(f core.Filter) (any, error) {
-	var inner any
+	clause, err := buildOpClause(f)
+	if err != nil {
+		return nil, err
+	}
+	if f.NestedPath != "" {
+		clause = map[string]any{
+			"nested": map[string]any{"path": f.NestedPath, "query": clause},
+		}
+	}
+	if f.Op.IsNegation() {
+		clause = map[string]any{
+			"bool": map[string]any{"must_not": []any{clause}},
+		}
+	}
+	return clause, nil
+}
 
+// buildOpClause builds the positive form of a filter's op — a negation op
+// maps to its positive counterpart's query (neq→term, not_in→terms,
+// not_exists→exists); buildFilterClause adds the must_not.
+func buildOpClause(f core.Filter) (any, error) {
 	switch f.Op {
-	case core.FilterOpEq:
+	case core.FilterOpEq, core.FilterOpNeq:
 		if f.Value == "" {
-			return nil, fmt.Errorf("EQ filter requires value for field %q", f.Field)
+			return nil, opError(f, "requires value")
 		}
-		inner = map[string]any{"term": map[string]any{f.Field: f.Value}}
+		return map[string]any{"term": map[string]any{f.Field: f.Value}}, nil
 
-	case core.FilterOpIn:
+	case core.FilterOpIn, core.FilterOpNotIn:
 		if len(f.Values) == 0 {
-			return nil, fmt.Errorf("IN filter requires values for field %q", f.Field)
+			return nil, opError(f, "requires values")
 		}
-		inner = map[string]any{"terms": map[string]any{f.Field: f.Values}}
+		return map[string]any{"terms": map[string]any{f.Field: f.Values}}, nil
+
+	case core.FilterOpGt, core.FilterOpGte, core.FilterOpLt, core.FilterOpLte:
+		if f.Value == "" {
+			return nil, opError(f, "requires value")
+		}
+		return map[string]any{"range": map[string]any{
+			f.Field: map[string]any{rangeKeys[f.Op]: f.Value},
+		}}, nil
+
+	case core.FilterOpPrefix:
+		if f.Value == "" {
+			return nil, opError(f, "requires value")
+		}
+		return map[string]any{"prefix": map[string]any{
+			f.Field: map[string]any{"value": f.Value},
+		}}, nil
+
+	case core.FilterOpSuffix:
+		if f.Value == "" {
+			return nil, opError(f, "requires value")
+		}
+		return map[string]any{"wildcard": map[string]any{
+			f.Field: map[string]any{"value": "*" + escapeWildcard(f.Value)},
+		}}, nil
+
+	case core.FilterOpContains:
+		if f.Value == "" {
+			return nil, opError(f, "requires value")
+		}
+		return map[string]any{"wildcard": map[string]any{
+			f.Field: map[string]any{"value": "*" + escapeWildcard(f.Value) + "*"},
+		}}, nil
+
+	case core.FilterOpExists, core.FilterOpNotExists:
+		return map[string]any{"exists": map[string]any{"field": f.Field}}, nil
 
 	default:
 		return nil, fmt.Errorf("unsupported filter op for field %q", f.Field)
 	}
+}
 
-	if f.NestedPath != "" {
-		return map[string]any{
-			"nested": map[string]any{
-				"path":  f.NestedPath,
-				"query": inner,
-			},
-		}, nil
-	}
+func opError(f core.Filter, msg string) error {
+	return fmt.Errorf("%s filter %s for field %q", f.Op, msg, f.Field)
+}
 
-	return inner, nil
+// escapeWildcard backslash-escapes ES wildcard metacharacters so a
+// user-supplied value always matches literally inside a wildcard query.
+func escapeWildcard(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`).Replace(s)
 }
