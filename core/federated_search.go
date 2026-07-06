@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // FederatedSearchRequest is the core-level federated search request: one query
@@ -84,6 +85,20 @@ type FederatedSearchResult struct {
 func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
 	if len(req.Resources) == 0 {
 		return FederatedSearchResponse{}, &InvalidArgumentError{Msg: "at least one resource is required"}
+	}
+
+	// Global filters are root-only (fields.*, spec D7): they are applied raw
+	// to the multi-index query, never routed through deriveNestedPath or
+	// referenceResolve, so a relation-field path would silently match nothing
+	// (or, negated, everything) instead of what capabilities advertise.
+	for _, f := range req.Filters {
+		if f.Field == "" {
+			continue
+		}
+		if !strings.HasPrefix(f.Field, "fields.") {
+			return FederatedSearchResponse{}, &InvalidArgumentError{Msg: fmt.Sprintf(
+				"federated filter field %q: global filters must target root fields (fields.*)", f.Field)}
+		}
 	}
 
 	// Map every concrete version index of each requested Type back to its Type,

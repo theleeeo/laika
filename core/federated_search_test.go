@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/theleeeo/laika/core/resource"
@@ -277,5 +278,26 @@ func TestCollectIndexFilterGroups_UnknownResource(t *testing.T) {
 	_, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"nope"}, SearchRequest{})
 	if !errors.Is(err, ErrUnknownResource) {
 		t.Fatalf("expected ErrUnknownResource, got %v", err)
+	}
+}
+
+func TestFederatedSearch_RelationFieldGlobalFilterRejected(t *testing.T) {
+	backend := &recordingBackend{}
+	idx := newFederatedIndexer(backend, []string{"product"})
+
+	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
+		Query:     "x",
+		Resources: []string{"product"},
+		Filters:   []Filter{{Field: "b.name", Op: FilterOpEq, Value: "acme"}},
+	})
+	var inv *InvalidArgumentError
+	if !errors.As(err, &inv) {
+		t.Fatalf("expected InvalidArgumentError for relation-field global filter, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "root fields") {
+		t.Fatalf("error should explain the root-only rule, got %q", err.Error())
+	}
+	if backend.fedCalled {
+		t.Error("backend must not be called for an invalid federated filter")
 	}
 }

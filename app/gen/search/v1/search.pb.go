@@ -590,7 +590,7 @@ func (x *FederatedSearchResponse) GetCounts() []*ResourceCount {
 
 type Filter struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Example: "b.name.keyword" or "a_status" or "c.state"
+	// Example: "fields.status" (root field) or "b.name" (relation field)
 	Field string   `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
 	Op    FilterOp `protobuf:"varint,2,opt,name=op,proto3,enum=search.v1.FilterOp" json:"op,omitempty"`
 	// Single-value ops: EQ, NEQ, GT, GTE, LT, LTE, PREFIX, SUFFIX, CONTAINS.

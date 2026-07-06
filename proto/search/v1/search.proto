@@ -104,7 +104,7 @@ enum FilterOp {
 }
 
 message Filter {
-  // Example: "b.name.keyword" or "a_status" or "c.state"
+  // Example: "fields.status" (root field) or "b.name" (relation field)
   string field = 1;
 
   FilterOp op = 2;

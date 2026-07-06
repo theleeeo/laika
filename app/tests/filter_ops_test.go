@@ -146,3 +146,63 @@ func (t *TestSuite) Test_FilterOps_TypedFields() {
 		t.Require().True(errors.As(err, &inv), "expected InvalidArgumentError, got %v", err)
 	})
 }
+
+func (t *TestSuite) Test_FilterOps_NestedNegation() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "p1"})
+	t.fakeProvider.SetResource("a", "2", map[string]any{"id": "2", "field1": "p2"})
+	t.fakeProvider.SetResource("a", "3", map[string]any{"id": "3", "field1": "p3"})
+	t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{
+		{"id": "b1", "field1": "active"},
+		{"id": "b2", "field1": "inactive"},
+	})
+	t.fakeProvider.SetRelated("b", []string{"2"}, []map[string]any{
+		{"id": "b3", "field1": "inactive"},
+	})
+	// Parent 3 has no children at all.
+
+	for _, id := range []string{"1", "2", "3"} {
+		err := t.idx.RegisterChange(t.T().Context(), core.Notification{
+			ResourceType: "a", ResourceID: id, Kind: core.ChangeCreated,
+		})
+		t.Require().NoError(err)
+	}
+	t.worker.Drain(t.T().Context())
+
+	search := func(filters ...core.Filter) []string {
+		t.T().Helper()
+		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
+			Resource: "a",
+			Filters:  filters,
+			Sort:     []core.SortOption{{Field: "fields.field1"}},
+		})
+		t.Require().NoError(err)
+		ids := make([]string, 0, len(resp.Hits))
+		for _, h := range resp.Hits {
+			ids = append(ids, h.ID)
+		}
+		return ids
+	}
+
+	t.Run("eq on nested relation matches parents with some matching child", func() {
+		t.Require().Equal([]string{"1"}, search(
+			core.Filter{Field: "b.field1", Op: core.FilterOpEq, Value: "active"},
+		))
+	})
+
+	// Document-level negation: "no child matches", so a parent with one
+	// active and one inactive child is excluded, and a childless parent
+	// is included.
+	t.Run("neq on nested relation means no child matches", func() {
+		t.Require().Equal([]string{"2", "3"}, search(
+			core.Filter{Field: "b.field1", Op: core.FilterOpNeq, Value: "active"},
+		))
+	})
+
+	t.Run("not_in on nested relation means no child matches any value", func() {
+		t.Require().Equal([]string{"3"}, search(
+			core.Filter{Field: "b.field1", Op: core.FilterOpNotIn, Values: []string{"active", "inactive"}},
+		))
+	})
+}
