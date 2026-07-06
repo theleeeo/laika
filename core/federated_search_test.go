@@ -9,116 +9,9 @@ import (
 	"github.com/theleeeo/laika/core/resource"
 )
 
-// newFederatedIndexer builds an Indexer with the given resource types (each a
-// single-version config with one text field) and search middlewares.
-func newFederatedIndexer(backend SearchBackend, resources []string, mws ...SearchMiddleware) *Indexer {
-	cfgs := make(resource.Configs, 0, len(resources))
-	for _, name := range resources {
-		cfg := &resource.Config{
-			Resource: name,
-			Versions: []resource.VersionConfig{
-				{Version: 1, Fields: []resource.FieldConfig{
-					{Name: "name", Type: "text"},
-					{Name: "region"}, // keyword; global-filter target in tests
-				}},
-			},
-		}
-		cfg.ApplyDefaults()
-		cfgs = append(cfgs, cfg)
-	}
-	return New(Config{
-		Resources:         cfgs,
-		ES:                backend,
-		SearchMiddlewares: mws,
-	})
-}
-
-func TestCollectIndexFilterGroups_CapturesFilterWithAlias(t *testing.T) {
-	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"}, appendFilter("tenant_id"))
-
-	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product"}, SearchRequest{})
-	if err != nil {
-		t.Fatalf("collectIndexFilterGroups: %v", err)
-	}
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(groups))
-	}
-	g := groups[0]
-	if g.Resource != "product" {
-		t.Errorf("Resource = %q, want %q", g.Resource, "product")
-	}
-	if g.Alias != AliasName("product") {
-		t.Errorf("Alias = %q, want %q", g.Alias, AliasName("product"))
-	}
-	if len(g.Filters) != 1 || g.Filters[0].Field != "tenant_id" {
-		t.Fatalf("expected collected filter on tenant_id, got %+v", g.Filters)
-	}
-	if backend.called {
-		t.Error("backend must not be called in collect-only mode")
-	}
-}
-
-func TestCollectIndexFilterGroups_PerTypeFiltersIndependent(t *testing.T) {
-	backend := &recordingBackend{}
-	// A middleware that tags each Type with a filter naming that Type, so we can
-	// prove filters are collected per-Type and not shared across Types.
-	perType := func(next SearchHandler) SearchHandler {
-		return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-			req.Filters = append(req.Filters, Filter{Field: req.Resource + "_scope", Op: FilterOpEq, Value: "x"})
-			return next(ctx, req)
-		}
-	}
-	idx := newFederatedIndexer(backend, []string{"product", "order"}, perType)
-
-	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
-	if err != nil {
-		t.Fatalf("collectIndexFilterGroups: %v", err)
-	}
-	if len(groups) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(groups))
-	}
-	for _, g := range groups {
-		if len(g.Filters) != 1 {
-			t.Fatalf("%s: expected 1 filter, got %+v", g.Resource, g.Filters)
-		}
-		if want := g.Resource + "_scope"; g.Filters[0].Field != want {
-			t.Errorf("%s: filter field = %q, want %q (filters must be scoped per-Type)", g.Resource, g.Filters[0].Field, want)
-		}
-		if g.Alias != AliasName(g.Resource) {
-			t.Errorf("%s: alias = %q, want %q", g.Resource, g.Alias, AliasName(g.Resource))
-		}
-	}
-}
-
-func TestCollectIndexFilterGroups_DeniedTypeFailsClosed(t *testing.T) {
-	backend := &recordingBackend{}
-	denied := errors.New("permission denied")
-	deny := func(next SearchHandler) SearchHandler {
-		return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-			if req.Resource == "order" {
-				return SearchResponse{}, denied
-			}
-			return next(ctx, req)
-		}
-	}
-	idx := newFederatedIndexer(backend, []string{"product", "order"}, deny)
-
-	groups, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
-	if !errors.Is(err, denied) {
-		t.Fatalf("expected denied error to propagate, got %v", err)
-	}
-	if groups != nil {
-		t.Errorf("expected no groups on denial, got %+v", groups)
-	}
-	if backend.called {
-		t.Error("backend must not be called when a Type fails closed")
-	}
-}
-
 func TestFederatedSearch_EmptyResources_InvalidArgument(t *testing.T) {
 	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"})
+	idx := newFederatedIndexerMW(backend, []string{"product"})
 
 	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{Query: "x"})
 	var inv *InvalidArgumentError
@@ -132,7 +25,7 @@ func TestFederatedSearch_EmptyResources_InvalidArgument(t *testing.T) {
 
 func TestFederatedSearch_UnknownResource(t *testing.T) {
 	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"})
+	idx := newFederatedIndexerMW(backend, []string{"product"})
 
 	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{Query: "x", Resources: []string{"nope"}})
 	if !errors.Is(err, ErrUnknownResource) {
@@ -140,16 +33,21 @@ func TestFederatedSearch_UnknownResource(t *testing.T) {
 	}
 }
 
-func TestFederatedSearch_WiresCollectedGroupsScopeAndPaging(t *testing.T) {
+func TestFederatedSearch_WiresGroupsScopeAndPaging(t *testing.T) {
 	backend := &recordingBackend{}
-	setScope := func(next SearchHandler) SearchHandler {
-		return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
+	// A federated middleware scopes each Type and sets the caller's secondary
+	// scope — the per-Type channel that replaced collect mode.
+	scope := func(next FederatedSearchHandler) FederatedSearchHandler {
+		return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
 			req.SecondaryScope = "tenant-7"
-			req.Filters = append(req.Filters, Filter{Field: "fields.tenant_id", Op: FilterOpEq, Value: "tenant-7"})
+			req.ResourceFilters = make(map[string][]Filter, len(req.Resources))
+			for _, r := range req.Resources {
+				req.ResourceFilters[r] = []Filter{{Field: "fields.tenant_id", Op: FilterOpEq, Value: "tenant-7"}}
+			}
 			return next(ctx, req)
 		}
 	}
-	idx := newFederatedIndexer(backend, []string{"product", "order"}, setScope)
+	idx := newFederatedIndexerMW(backend, []string{"product", "order"}, scope)
 
 	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
 		Query:     "q",
@@ -200,7 +98,7 @@ func TestFederatedSearch_MapsIndexToResourceAndCounts(t *testing.T) {
 			},
 		},
 	}
-	idx := newFederatedIndexer(backend, []string{"product", "order", "invoice"})
+	idx := newFederatedIndexerMW(backend, []string{"product", "order", "invoice"})
 
 	resp, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
 		Query:     "q",
@@ -237,52 +135,9 @@ func TestFederatedSearch_MapsIndexToResourceAndCounts(t *testing.T) {
 	}
 }
 
-func TestCollectIndexFilterGroups_HarvestsSecondaryScope(t *testing.T) {
-	backend := &recordingBackend{}
-	// A middleware that sets the caller's tenant scope value on the request —
-	// the dedicated channel Federated Search harvests for the secondary tier.
-	setScope := func(next SearchHandler) SearchHandler {
-		return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-			req.SecondaryScope = "tenant-42"
-			return next(ctx, req)
-		}
-	}
-	idx := newFederatedIndexer(backend, []string{"product", "order"}, setScope)
-
-	_, scope, err := idx.collectIndexFilterGroups(context.Background(), []string{"product", "order"}, SearchRequest{})
-	if err != nil {
-		t.Fatalf("collectIndexFilterGroups: %v", err)
-	}
-	if scope != "tenant-42" {
-		t.Errorf("harvested scope = %q, want %q", scope, "tenant-42")
-	}
-}
-
-func TestCollectIndexFilterGroups_NoScopeChannel_Empty(t *testing.T) {
-	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"}, appendFilter("tenant_id"))
-
-	_, scope, err := idx.collectIndexFilterGroups(context.Background(), []string{"product"}, SearchRequest{})
-	if err != nil {
-		t.Fatalf("collectIndexFilterGroups: %v", err)
-	}
-	if scope != "" {
-		t.Errorf("expected empty scope when no middleware sets it, got %q", scope)
-	}
-}
-
-func TestCollectIndexFilterGroups_UnknownResource(t *testing.T) {
-	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"})
-
-	_, _, err := idx.collectIndexFilterGroups(context.Background(), []string{"nope"}, SearchRequest{})
-	if !errors.Is(err, ErrUnknownResource) {
-		t.Fatalf("expected ErrUnknownResource, got %v", err)
-	}
-}
-
-// newFederatedIndexerMW builds an Indexer with the given resource types (same
-// shape as newFederatedIndexer) and federated search middlewares.
+// newFederatedIndexerMW builds an Indexer with the given resource types (each
+// a single-version config with one text field and one keyword field) and
+// federated search middlewares.
 func newFederatedIndexerMW(backend SearchBackend, resources []string, mws ...FederatedSearchMiddleware) *Indexer {
 	cfgs := make(resource.Configs, 0, len(resources))
 	for _, name := range resources {
@@ -427,7 +282,7 @@ func TestFederatedSearch_MiddlewareNarrowsResources(t *testing.T) {
 
 func TestFederatedSearch_RelationFieldGlobalFilterRejected(t *testing.T) {
 	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"})
+	idx := newFederatedIndexerMW(backend, []string{"product"})
 
 	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
 		Query:     "x",
@@ -443,5 +298,126 @@ func TestFederatedSearch_RelationFieldGlobalFilterRejected(t *testing.T) {
 	}
 	if backend.fedCalled {
 		t.Error("backend must not be called for an invalid federated filter")
+	}
+}
+
+func TestBuildIndexFilterGroups_TagsFiltersWithAlias(t *testing.T) {
+	backend := &recordingBackend{}
+	idx := newFederatedIndexerMW(backend, []string{"product", "order"})
+
+	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"product", "order"}, map[string][]Filter{
+		"product": {{Field: "fields.tenant_id", Op: FilterOpEq, Value: "t1"}},
+		// "order" has no entry: it must get an unfiltered group.
+	})
+	if err != nil {
+		t.Fatalf("buildIndexFilterGroups: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
+	}
+	if groups[0].Resource != "product" || groups[0].Alias != AliasName("product") {
+		t.Errorf("group[0] = %+v, want product with its alias", groups[0])
+	}
+	if len(groups[0].Filters) != 1 || groups[0].Filters[0].Field != "fields.tenant_id" {
+		t.Errorf("product group filters = %+v, want the per-Type filter", groups[0].Filters)
+	}
+	if groups[1].Resource != "order" || len(groups[1].Filters) != 0 || groups[1].MatchNothing {
+		t.Errorf("order group = %+v, want unfiltered (Type membership only)", groups[1])
+	}
+	if backend.called || backend.fedCalled {
+		t.Error("group building alone must not hit the backend for plain filters")
+	}
+}
+
+func TestBuildIndexFilterGroups_UnknownResource(t *testing.T) {
+	backend := &recordingBackend{}
+	idx := newFederatedIndexerMW(backend, []string{"product"})
+
+	_, err := idx.buildIndexFilterGroups(context.Background(), []string{"nope"}, nil)
+	if !errors.Is(err, ErrUnknownResource) {
+		t.Fatalf("expected ErrUnknownResource, got %v", err)
+	}
+}
+
+// newReferenceIndexerMW mirrors the harness domain: "ap" references "pop"
+// (population_id == pop.id), so a per-Type filter on pop.fiber_operator_id
+// must resolve via a child search into a terms filter on fields.population_id.
+func newReferenceIndexerMW(backend SearchBackend, mws ...FederatedSearchMiddleware) *Indexer {
+	pop := &resource.Config{
+		Resource: "pop",
+		Versions: []resource.VersionConfig{{
+			Version: 1,
+			Fields:  []resource.FieldConfig{{Name: "name"}, {Name: "fiber_operator_id"}},
+		}},
+	}
+	ap := &resource.Config{
+		Resource: "ap",
+		Versions: []resource.VersionConfig{{
+			Version: 1,
+			Fields:  []resource.FieldConfig{{Name: "population_id"}},
+			Relations: []resource.RelationConfig{{
+				Resource:    "pop",
+				Join:        resource.JoinConfig{Local: "population_id", Foreign: "id"},
+				Cardinality: "one",
+				Strategy:    resource.StrategyReference,
+				Fields:      []resource.FieldConfig{{Name: "fiber_operator_id"}},
+			}},
+		}},
+	}
+	pop.ApplyDefaults()
+	ap.ApplyDefaults()
+	return New(Config{
+		Resources:                  resource.Configs{pop, ap},
+		ES:                         backend,
+		FederatedSearchMiddlewares: mws,
+	})
+}
+
+func TestBuildIndexFilterGroups_ResolvesReferenceFilter(t *testing.T) {
+	backend := &recordingBackend{response: SearchResponse{
+		Total: 1,
+		Hits:  []SearchHit{{ID: "pop-A"}},
+	}}
+	idx := newReferenceIndexerMW(backend)
+
+	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"ap"}, map[string][]Filter{
+		"ap": {{Field: "pop.fiber_operator_id", Op: FilterOpEq, Value: "op-A"}},
+	})
+	if err != nil {
+		t.Fatalf("buildIndexFilterGroups: %v", err)
+	}
+	if !backend.called {
+		t.Fatal("expected a child search against the referenced Type")
+	}
+	if len(groups) != 1 || groups[0].MatchNothing {
+		t.Fatalf("expected one live group, got %+v", groups)
+	}
+	fs := groups[0].Filters
+	if len(fs) != 1 || fs[0].Field != "fields.population_id" || fs[0].Op != FilterOpIn {
+		t.Fatalf("expected folded terms filter on fields.population_id, got %+v", fs)
+	}
+	if len(fs[0].Values) != 1 || fs[0].Values[0] != "pop-A" {
+		t.Fatalf("expected folded child key [pop-A], got %v", fs[0].Values)
+	}
+}
+
+func TestBuildIndexFilterGroups_ReferenceZeroChildrenMatchNothing(t *testing.T) {
+	backend := &recordingBackend{} // child search returns no hits
+	idx := newReferenceIndexerMW(backend)
+
+	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"ap", "pop"}, map[string][]Filter{
+		"ap": {{Field: "pop.fiber_operator_id", Op: FilterOpEq, Value: "op-none"}},
+	})
+	if err != nil {
+		t.Fatalf("buildIndexFilterGroups: %v", err)
+	}
+	if len(groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(groups))
+	}
+	if !groups[0].MatchNothing {
+		t.Errorf("ap group should be MatchNothing when the reference matches no children, got %+v", groups[0])
+	}
+	if groups[1].MatchNothing || groups[1].Resource != "pop" {
+		t.Errorf("pop group must stay live, got %+v", groups[1])
 	}
 }

@@ -16,6 +16,24 @@ type FederatedSearchRequest struct {
 	Page          int32
 	PageSize      int32
 	IncludeSource bool
+
+	// ResourceFilters are per-Type visibility filters, keyed by Resource Type
+	// name — the channel a trusted federated middleware scopes each Type
+	// through. They are core-API-only (never exposed over proto) and exempt
+	// from strict request-time filter validation: the same trust model as
+	// middleware-appended filters on the single-resource path. Reference-
+	// relation paths are resolved via child searches (see
+	// buildIndexFilterGroups); a Type with no entry gets an unfiltered group
+	// (Type membership only). Denial is the middleware's concern: fail the
+	// whole search with an error, or drop the Type from Resources to exclude
+	// just it.
+	ResourceFilters map[string][]Filter
+
+	// SecondaryScope is the caller's single tenant scope value for the
+	// secondary tier (spec D11.2, D14), set by a trusted federated middleware.
+	// The query builder weaves it into the nested search_scoped clause. Empty
+	// means unscoped secondary (standalone-app behaviour).
+	SecondaryScope string
 }
 
 // FederatedHit is a single cross-type hit, tagged with the Resource Type it
@@ -86,10 +104,10 @@ func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequ
 // and returns a single relevance-ranked cross-type list (spec D3, D12, D13).
 //
 // It is a single multi-index query: per-Type document visibility is enforced by
-// collecting each Type's middleware filters in-process (collectIndexFilterGroups)
-// and combining them as per-index filter groups, not by fanning out one query
-// per Type. The backend applies dfs_query_then_fetch so cross-type scores share
-// global term statistics and are genuinely comparable.
+// the per-Type filters a federated middleware supplies on the request
+// (ResourceFilters), combined as per-index filter groups (buildIndexFilterGroups),
+// not by fanning out one query per Type. The backend applies dfs_query_then_fetch
+// so cross-type scores share global term statistics and are genuinely comparable.
 func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
 	if len(req.Resources) == 0 {
 		return FederatedSearchResponse{}, &InvalidArgumentError{Msg: "at least one resource is required"}
@@ -133,9 +151,9 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 
 	page, pageSize := normalizePaging(req.Page, req.PageSize)
 
-	// Collect each Type's visibility filters + the caller's secondary scope by
-	// re-running its single-resource middleware chain in collect mode.
-	groups, scope, err := idx.collectIndexFilterGroups(ctx, req.Resources, SearchRequest{Query: req.Query})
+	// Build each Type's visibility group from the per-Type filters a federated
+	// middleware supplied on the request (ResourceFilters).
+	groups, err := idx.buildIndexFilterGroups(ctx, req.Resources, req.ResourceFilters)
 	if err != nil {
 		return FederatedSearchResponse{}, err
 	}
@@ -144,7 +162,7 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 		Query:          req.Query,
 		Filters:        req.Filters,
 		FilterGroups:   groups,
-		SecondaryScope: scope,
+		SecondaryScope: req.SecondaryScope,
 		Page:           page,
 		PageSize:       pageSize,
 		IncludeSource:  req.IncludeSource,
@@ -179,8 +197,9 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 }
 
 // IndexFilterGroup is one leg of a Federated Search's per-index filter groups:
-// a Resource Type's read alias paired with the visibility Filters harvested
-// from its single-resource middleware chain. The federated query builder scopes
+// a Resource Type's read alias paired with the visibility Filters a federated
+// middleware supplied for it (FederatedSearchRequest.ResourceFilters, reference
+// paths resolved). The federated query builder scopes
 // each group's Filters to its Alias and combines the groups in a
 // bool.filter.should with minimum_should_match: 1, so a Document matches only
 // when it belongs to a requested Type and satisfies that Type's filters.
@@ -195,68 +214,31 @@ type IndexFilterGroup struct {
 	MatchNothing bool
 }
 
-// collectIndexFilterGroups enforces per-Type document visibility for a Federated
-// Search without fanning out into one ES query per Type. For each requested
-// Type it re-runs that Type's consumer search middleware chain in collect-only
-// mode: the chain still enforces access (a middleware may fail closed by
-// returning an error) but a terminal handler captures the Filters the chain
-// appends instead of hitting the backend. The captured Filters, tagged with the
-// Type's read alias, become an IndexFilterGroup.
+// buildIndexFilterGroups builds a Federated Search's per-index visibility
+// groups from the per-Type filters supplied on the request. For each requested
+// Type it resolves reference-relation filter paths the same way the
+// single-resource path does — a separate child search per reference, folded
+// into a terms filter on the parent key (the referenced field is never mapped
+// on the parent, so it cannot be a term on the multi-index query) — and tags
+// the result with the Type's read alias. A reference that matches no children
+// marks the group MatchNothing so that Type is excluded while other Types in
+// the federation still return. A Type with no perType entry gets an unfiltered
+// group (Type membership only).
 //
-// The internal query-shaping middlewares (deriveNestedPath, referenceResolve)
-// are deliberately excluded from the collect chain: they resolve single-resource
-// query mechanics, whereas the chain only needs to run the consumer's
-// authorization and scoping. Reference-relation filters, however, cannot be
-// expressed as a term on the multi-index query (the referenced field is not
-// mapped on the parent), so after collecting each Type's filters this resolves
-// them the same way referenceResolve does — a separate child search per
-// reference, folded into a terms filter on the parent key. A reference that
-// matches no children marks the group MatchNothing so that Type is excluded
-// while the rest of the federation still returns.
-//
-// Core stays policy-free: it cannot classify a middleware error as "denied"
-// versus "failed", so any error propagates and fails the whole Federated Search
-// closed. A consumer that instead wants a denied Type merely excluded (its
-// documents contributing nothing while other Types still return) fails closed by
-// appending a match-nothing filter rather than returning an error, yielding an
-// empty group for that Type.
-//
-// The same collect pass also harvests the caller's secondary scope value (spec
-// D11.2, D14): a consumer middleware sets req.SecondaryScope from the caller
-// identity, which is the caller's tenant regardless of Type, so it is a single
-// value across all groups. The last non-empty value seen is returned; empty
-// means unscoped secondary. The Federated Search query builder weaves it into
-// the nested search_scoped clause.
-func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []string, base SearchRequest) ([]IndexFilterGroup, string, error) {
+// Nested-path derivation (deriveNestedPath) is deliberately not applied here,
+// matching the former collect mode: per-Type filters targeting
+// denormalized-many nested fields are unsupported on the federated path.
+func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []string, perType map[string][]Filter) ([]IndexFilterGroup, error) {
 	groups := make([]IndexFilterGroup, 0, len(resources))
-	var scope string
 	for _, name := range resources {
 		r := idx.resources.Get(name)
 		if r == nil {
-			return nil, "", fmt.Errorf("%q: %w", name, ErrUnknownResource)
+			return nil, fmt.Errorf("%q: %w", name, ErrUnknownResource)
 		}
 
-		req := base
-		req.Resource = name
-		req.Filters = nil       // start clean; the chain appends this Type's own filters
-		req.SecondaryScope = "" // start clean; the chain sets the caller's scope
-
-		filters, entryScope, err := idx.collectFilters(ctx, req)
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, perType[name])
 		if err != nil {
-			return nil, "", fmt.Errorf("collect filters for %q: %w", name, err)
-		}
-		if entryScope != "" {
-			scope = entryScope
-		}
-
-		// The collect chain excludes referenceResolve, so a filter naming a
-		// reference relation's field is still unresolved here. Resolve it now —
-		// issuing the same separate child search the single-resource path does —
-		// so the group carries a terms filter on the parent key (a mapped field)
-		// rather than a term on the reference field (never mapped on the parent).
-		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, filters)
-		if err != nil {
-			return nil, "", fmt.Errorf("resolve reference filters for %q: %w", name, err)
+			return nil, fmt.Errorf("resolve reference filters for %q: %w", name, err)
 		}
 
 		group := IndexFilterGroup{Resource: name, Alias: AliasName(r.Resource)}
@@ -267,26 +249,5 @@ func (idx *Indexer) collectIndexFilterGroups(ctx context.Context, resources []st
 		}
 		groups = append(groups, group)
 	}
-	return groups, scope, nil
-}
-
-// collectFilters runs the consumer middleware chain around a collect-only
-// terminal that captures the request's Filters and SecondaryScope instead of
-// searching. Any error raised by the chain (enforcement failing closed) is
-// returned to the caller.
-func (idx *Indexer) collectFilters(ctx context.Context, req SearchRequest) ([]Filter, string, error) {
-	var (
-		collected []Filter
-		scope     string
-	)
-	terminal := func(_ context.Context, r SearchRequest) (SearchResponse, error) {
-		collected = r.Filters
-		scope = r.SecondaryScope
-		return SearchResponse{}, nil
-	}
-	handler := chain(terminal, idx.searchMiddlewares)
-	if _, err := handler(ctx, req); err != nil {
-		return nil, "", err
-	}
-	return collected, scope, nil
+	return groups, nil
 }

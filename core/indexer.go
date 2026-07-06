@@ -86,11 +86,6 @@ type Indexer struct {
 	// When no middlewares are registered it equals federatedSearchBase.
 	federatedSearchChain FederatedSearchHandler
 
-	// searchMiddlewares are the consumer-supplied middlewares only (not the
-	// internal deriveNestedPath/referenceResolve). Federated Search re-runs
-	// them in collect-only mode to harvest each Type's visibility filters; see
-	// collectIndexFilterGroups.
-	searchMiddlewares []SearchMiddleware
 }
 
 // New creates a new Indexer with the given configuration.
@@ -109,7 +104,6 @@ func New(cfg Config) *Indexer {
 
 	idx.searchChain = chain(idx.searchBase, mws)
 	idx.federatedSearchChain = chain(idx.federatedSearchBase, cfg.FederatedSearchMiddlewares)
-	idx.searchMiddlewares = cfg.SearchMiddlewares
 	return idx
 }
 

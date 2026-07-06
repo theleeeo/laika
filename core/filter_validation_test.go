@@ -153,7 +153,7 @@ func TestValidateFilters_MiddlewareFiltersExempt(t *testing.T) {
 
 func TestFederatedSearch_InvalidGlobalFilter(t *testing.T) {
 	backend := &recordingBackend{}
-	idx := newFederatedIndexer(backend, []string{"product"})
+	idx := newFederatedIndexerMW(backend, []string{"product"})
 
 	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
 		Query:     "x",
