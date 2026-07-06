@@ -281,6 +281,150 @@ func TestCollectIndexFilterGroups_UnknownResource(t *testing.T) {
 	}
 }
 
+// newFederatedIndexerMW builds an Indexer with the given resource types (same
+// shape as newFederatedIndexer) and federated search middlewares.
+func newFederatedIndexerMW(backend SearchBackend, resources []string, mws ...FederatedSearchMiddleware) *Indexer {
+	cfgs := make(resource.Configs, 0, len(resources))
+	for _, name := range resources {
+		cfg := &resource.Config{
+			Resource: name,
+			Versions: []resource.VersionConfig{
+				{Version: 1, Fields: []resource.FieldConfig{
+					{Name: "name", Type: "text"},
+					{Name: "region"},
+				}},
+			},
+		}
+		cfg.ApplyDefaults()
+		cfgs = append(cfgs, cfg)
+	}
+	return New(Config{
+		Resources:                  cfgs,
+		ES:                         backend,
+		FederatedSearchMiddlewares: mws,
+	})
+}
+
+func TestFederatedSearch_MiddlewareOrdering(t *testing.T) {
+	backend := &recordingBackend{}
+	var order []string
+	tag := func(name string) FederatedSearchMiddleware {
+		return func(next FederatedSearchHandler) FederatedSearchHandler {
+			return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+				order = append(order, name)
+				return next(ctx, req)
+			}
+		}
+	}
+	idx := newFederatedIndexerMW(backend, []string{"product"}, tag("A"), tag("B"))
+
+	if _, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
+		Query: "q", Resources: []string{"product"},
+	}); err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	if len(order) != 2 || order[0] != "A" || order[1] != "B" {
+		t.Fatalf("expected call order [A B], got %v", order)
+	}
+	if !backend.fedCalled {
+		t.Fatal("expected backend.FederatedSearch to be called")
+	}
+}
+
+func TestFederatedSearch_MiddlewareShortCircuit(t *testing.T) {
+	backend := &recordingBackend{}
+	denied := errors.New("denied")
+	deny := func(next FederatedSearchHandler) FederatedSearchHandler {
+		return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+			return FederatedSearchResponse{}, denied
+		}
+	}
+	idx := newFederatedIndexerMW(backend, []string{"product"}, deny)
+
+	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
+		Query: "q", Resources: []string{"product"},
+	})
+	if !errors.Is(err, denied) {
+		t.Fatalf("expected denied error, got %v", err)
+	}
+	if backend.fedCalled {
+		t.Fatal("backend must not be called when a middleware short-circuits")
+	}
+}
+
+func TestFederatedSearch_MiddlewareResponseModification(t *testing.T) {
+	backend := &recordingBackend{fedResponse: FederatedSearchResult{Total: 1}}
+	bump := func(next FederatedSearchHandler) FederatedSearchHandler {
+		return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+			resp, err := next(ctx, req)
+			if err != nil {
+				return resp, err
+			}
+			resp.Total += 100
+			return resp, nil
+		}
+	}
+	idx := newFederatedIndexerMW(backend, []string{"product"}, bump)
+
+	resp, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
+		Query: "q", Resources: []string{"product"},
+	})
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	if resp.Total != 101 {
+		t.Fatalf("expected modified Total 101, got %d", resp.Total)
+	}
+}
+
+// The chain wraps the base handler INCLUDING its validation, so an observing
+// middleware sees validation failures too (spec: validation-in-base).
+func TestFederatedSearch_MiddlewareObservesValidationError(t *testing.T) {
+	backend := &recordingBackend{}
+	var seen error
+	observe := func(next FederatedSearchHandler) FederatedSearchHandler {
+		return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+			resp, err := next(ctx, req)
+			seen = err
+			return resp, err
+		}
+	}
+	idx := newFederatedIndexerMW(backend, []string{"product"}, observe)
+
+	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{Query: "q"}) // no Resources
+	var inv *InvalidArgumentError
+	if !errors.As(err, &inv) {
+		t.Fatalf("expected InvalidArgumentError for empty resource set, got %v", err)
+	}
+	if !errors.As(seen, &inv) {
+		t.Fatalf("middleware should observe the validation error, saw %v", seen)
+	}
+	if backend.fedCalled {
+		t.Fatal("backend must not be called for an invalid request")
+	}
+}
+
+func TestFederatedSearch_MiddlewareNarrowsResources(t *testing.T) {
+	backend := &recordingBackend{}
+	narrow := func(next FederatedSearchHandler) FederatedSearchHandler {
+		return func(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+			req.Resources = []string{"product"}
+			return next(ctx, req)
+		}
+	}
+	idx := newFederatedIndexerMW(backend, []string{"product", "order"}, narrow)
+
+	_, err := idx.FederatedSearch(context.Background(), FederatedSearchRequest{
+		Query: "q", Resources: []string{"product", "order"},
+	})
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	if len(backend.fedParams.FilterGroups) != 1 || backend.fedParams.FilterGroups[0].Resource != "product" {
+		t.Fatalf("expected only the narrowed Type's group, got %+v", backend.fedParams.FilterGroups)
+	}
+}
+
 func TestFederatedSearch_RelationFieldGlobalFilterRejected(t *testing.T) {
 	backend := &recordingBackend{}
 	idx := newFederatedIndexer(backend, []string{"product"})

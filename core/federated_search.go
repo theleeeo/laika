@@ -74,7 +74,15 @@ type FederatedSearchResult struct {
 	IndexCounts map[string]int64
 }
 
-// FederatedSearch runs one query across a caller-supplied set of Resource Types
+// FederatedSearch runs one query across a caller-supplied set of Resource
+// Types through the registered federated middleware chain (see
+// Config.FederatedSearchMiddlewares). The base handler validates, builds
+// per-index filter groups, and queries the backend; see federatedSearchBase.
+func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+	return idx.federatedSearchChain(ctx, req)
+}
+
+// federatedSearchBase runs one query across a caller-supplied set of Resource Types
 // and returns a single relevance-ranked cross-type list (spec D3, D12, D13).
 //
 // It is a single multi-index query: per-Type document visibility is enforced by
@@ -82,7 +90,7 @@ type FederatedSearchResult struct {
 // and combining them as per-index filter groups, not by fanning out one query
 // per Type. The backend applies dfs_query_then_fetch so cross-type scores share
 // global term statistics and are genuinely comparable.
-func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
+func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
 	if len(req.Resources) == 0 {
 		return FederatedSearchResponse{}, &InvalidArgumentError{Msg: "at least one resource is required"}
 	}
@@ -276,7 +284,7 @@ func (idx *Indexer) collectFilters(ctx context.Context, req SearchRequest) ([]Fi
 		scope = r.SecondaryScope
 		return SearchResponse{}, nil
 	}
-	handler := chainSearch(terminal, idx.searchMiddlewares)
+	handler := chain(terminal, idx.searchMiddlewares)
 	if _, err := handler(ctx, req); err != nil {
 		return nil, "", err
 	}

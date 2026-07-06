@@ -52,6 +52,15 @@ type Config struct {
 	// short-circuit with an error, mutate the SearchRequest, and inspect or
 	// modify the SearchResponse. The chain is composed once at construction.
 	SearchMiddlewares []SearchMiddleware
+
+	// FederatedSearchMiddlewares wrap the federated search path, independently
+	// of SearchMiddlewares — neither chain ever runs on the other path. They
+	// run outermost-first in registration order: []{A, B} executes A → B → the
+	// Indexer's own validate/group-build/backend call, so a middleware also
+	// observes validation failures. A middleware may deny the request with an
+	// error, mutate the FederatedSearchRequest, and inspect or modify the
+	// response. The chain is composed once at construction.
+	FederatedSearchMiddlewares []FederatedSearchMiddleware
 }
 
 // Indexer is the core indexing engine. It receives change notifications,
@@ -71,6 +80,11 @@ type Indexer struct {
 	// wrapped around searchBase. When no middlewares are registered it equals
 	// searchBase, so the search path has zero overhead.
 	searchChain SearchHandler
+
+	// federatedSearchChain is the composed federated search handler: the
+	// registered FederatedSearchMiddlewares wrapped around federatedSearchBase.
+	// When no middlewares are registered it equals federatedSearchBase.
+	federatedSearchChain FederatedSearchHandler
 
 	// searchMiddlewares are the consumer-supplied middlewares only (not the
 	// internal deriveNestedPath/referenceResolve). Federated Search re-runs
@@ -93,7 +107,8 @@ func New(cfg Config) *Indexer {
 	mws = append(mws, idx.deriveNestedPath)     // fill NestedPath for denormalized-many relation fields, before referenceResolve strips reference filters
 	mws = append(mws, idx.referenceResolve)     // innermost: route filters by path, run child searches, fold terms
 
-	idx.searchChain = chainSearch(idx.searchBase, mws)
+	idx.searchChain = chain(idx.searchBase, mws)
+	idx.federatedSearchChain = chain(idx.federatedSearchBase, cfg.FederatedSearchMiddlewares)
 	idx.searchMiddlewares = cfg.SearchMiddlewares
 	return idx
 }
