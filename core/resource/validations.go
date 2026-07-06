@@ -2,6 +2,7 @@ package resource
 
 import (
 	"fmt"
+	"strings"
 )
 
 func (c Configs) Validate() error {
@@ -186,6 +187,10 @@ func (vc VersionConfig) Validate(resourceName string, version int) error {
 func (c FieldConfig) Validate() error {
 	if c.Name == "" {
 		return fmt.Errorf("name required")
+	}
+	if _, ok := c.Family(); !ok {
+		return fmt.Errorf("type %q is not supported; must be one of: %s",
+			c.Type, strings.Join(SupportedFieldTypes(), ", "))
 	}
 	switch c.Query.Search {
 	case "", SearchTierNone, SearchTierPrimary, SearchTierSecondary:
