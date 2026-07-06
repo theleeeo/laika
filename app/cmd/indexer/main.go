@@ -16,7 +16,6 @@ import (
 	"github.com/theleeeo/laika/app/gen/search/v1/searchconnect"
 	"github.com/theleeeo/laika/app/server"
 	"github.com/theleeeo/laika/app/source"
-	"github.com/theleeeo/laika/app/webui"
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/storage/postgres"
@@ -137,10 +136,6 @@ func main() {
 	mux.Handle(grpcreflect.NewHandlerV1(reflector))
 	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
 
-	// Serve the self-contained demo search console at "/". The service routes
-	// above are registered on longer prefixes, so ServeMux keeps them intact.
-	mux.Handle("/", webui.Handler())
-
 	// Enable unencrypted (h2c) HTTP/2 so gRPC clients can speak HTTP/2 over
 	// cleartext on the same port, while HTTP/1.1 stays available for Connect/JSON.
 	protocols := new(http.Protocols)
@@ -149,7 +144,7 @@ func main() {
 
 	httpSrv := &http.Server{
 		Addr:      cfg.GRPC.Addr,
-		Handler:   mux,
+		Handler:   withCORS(mux),
 		Protocols: protocols,
 	}
 
@@ -205,4 +200,22 @@ func main() {
 	cancel()
 
 	wg.Wait()
+}
+
+// withCORS wraps h with permissive CORS headers so the standalone demo page,
+// loaded from a different origin (e.g. file:// or another host), can call the
+// Connect/JSON endpoints from a browser. The demo issues plain JSON POSTs, so
+// allowing the Connect protocol headers and answering preflight is enough; we
+// deliberately allow any origin because this is a development/demo surface.
+func withCORS(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Connect-Protocol-Version, Connect-Timeout-Ms")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
