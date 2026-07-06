@@ -16,7 +16,10 @@ func newFederatedIndexer(backend SearchBackend, resources []string, mws ...Searc
 		cfg := &resource.Config{
 			Resource: name,
 			Versions: []resource.VersionConfig{
-				{Version: 1, Fields: []resource.FieldConfig{{Name: "name", Type: "text"}}},
+				{Version: 1, Fields: []resource.FieldConfig{
+					{Name: "name", Type: "text"},
+					{Name: "region"}, // keyword; global-filter target in tests
+				}},
 			},
 		}
 		cfg.ApplyDefaults()

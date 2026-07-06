@@ -94,6 +94,15 @@ func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequ
 		if r == nil {
 			return FederatedSearchResponse{}, fmt.Errorf("%q: %w", name, ErrUnknownResource)
 		}
+		// A global filter must be valid on every requested Type (spec:
+		// Request validation): unknown-anywhere or op-mismatch-anywhere is a
+		// loud InvalidArgument naming the offending Type.
+		if vc := r.ReadVersionConfig(); vc != nil {
+			if err := validateRequestFilters(vc, req.Filters); err != nil {
+				return FederatedSearchResponse{}, &InvalidArgumentError{
+					Msg: fmt.Sprintf("resource %q: %v", name, err)}
+			}
+		}
 		for _, v := range r.SortedVersions() {
 			indexToResource[IndexName(name, v)] = name
 		}
