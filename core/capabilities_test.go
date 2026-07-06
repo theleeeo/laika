@@ -6,6 +6,18 @@ import (
 	"github.com/theleeeo/laika/core/resource"
 )
 
+// Expected op sets per family, mirroring opsByFamily. Declared once so
+// assertions read as intent.
+var (
+	stringOps = []FilterOp{FilterOpEq, FilterOpNeq, FilterOpIn, FilterOpNotIn,
+		FilterOpPrefix, FilterOpSuffix, FilterOpContains, FilterOpExists, FilterOpNotExists}
+	numericOps = []FilterOp{FilterOpEq, FilterOpNeq, FilterOpIn, FilterOpNotIn,
+		FilterOpGt, FilterOpGte, FilterOpLt, FilterOpLte, FilterOpExists, FilterOpNotExists}
+	// Reference-relation fields: their type's ops minus negations.
+	referenceStringOps = []FilterOp{FilterOpEq, FilterOpIn, FilterOpPrefix,
+		FilterOpSuffix, FilterOpContains, FilterOpExists}
+)
+
 func TestGetCapabilities_Empty(t *testing.T) {
 	idx := New(Config{})
 	resp := idx.GetCapabilities()
@@ -50,8 +62,7 @@ func TestGetCapabilities_SingleResource(t *testing.T) {
 	assertField(t, rc.Fields[0], "fields.title", "text", true, false, nil)
 
 	// status — keyword field (default)
-	assertField(t, rc.Fields[1], "fields.status", "keyword", true, true,
-		[]FilterOp{FilterOpEq, FilterOpIn})
+	assertField(t, rc.Fields[1], "fields.status", "keyword", true, true, stringOps)
 }
 
 func TestGetCapabilities_WithRelations(t *testing.T) {
@@ -86,11 +97,9 @@ func TestGetCapabilities_WithRelations(t *testing.T) {
 		t.Fatalf("expected 3 fields, got %d", len(rc.Fields))
 	}
 
-	assertField(t, rc.Fields[0], "fields.order_number", "keyword", true, true,
-		[]FilterOp{FilterOpEq, FilterOpIn})
+	assertField(t, rc.Fields[0], "fields.order_number", "keyword", true, true, stringOps)
 	assertField(t, rc.Fields[1], "customer.name", "text", true, false, nil)
-	assertField(t, rc.Fields[2], "customer.tier", "keyword", true, true,
-		[]FilterOp{FilterOpEq, FilterOpIn})
+	assertField(t, rc.Fields[2], "customer.tier", "keyword", true, true, stringOps)
 }
 
 func TestGetCapabilities_SearchDisabled(t *testing.T) {
@@ -112,8 +121,7 @@ func TestGetCapabilities_SearchDisabled(t *testing.T) {
 
 	resp := idx.GetCapabilities()
 	f := resp.Resources[0].Fields[0]
-	assertField(t, f, "fields.code", "keyword", false, true,
-		[]FilterOp{FilterOpEq, FilterOpIn})
+	assertField(t, f, "fields.code", "keyword", false, true, stringOps)
 }
 
 func TestGetCapabilities_MultipleResources(t *testing.T) {
@@ -134,8 +142,7 @@ func TestGetCapabilities_MultipleResources(t *testing.T) {
 	}
 
 	bField := resp.Resources[1].Fields[0]
-	assertField(t, bField, "fields.y", "integer", true, true,
-		[]FilterOp{FilterOpEq, FilterOpIn})
+	assertField(t, bField, "fields.y", "integer", true, true, numericOps)
 }
 
 func TestReferenceFieldsAreFilterOnly(t *testing.T) {
@@ -175,8 +182,13 @@ func TestReferenceFieldsAreFilterOnly(t *testing.T) {
 	if fc.Searchable || fc.Sortable {
 		t.Fatalf("reference field must be filter-only, got searchable=%v sortable=%v", fc.Searchable, fc.Sortable)
 	}
-	if len(fc.FilterOps) != 2 {
-		t.Fatalf("reference field must support Eq+In filters, got %v", fc.FilterOps)
+	if len(fc.FilterOps) != len(referenceStringOps) {
+		t.Fatalf("reference field ops: got %v, want %v", fc.FilterOps, referenceStringOps)
+	}
+	for i, op := range referenceStringOps {
+		if fc.FilterOps[i] != op {
+			t.Fatalf("reference field ops[%d]: got %s, want %s", i, fc.FilterOps[i], op)
+		}
 	}
 }
 

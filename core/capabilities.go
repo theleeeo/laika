@@ -22,9 +22,14 @@ func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
 			for _, f := range rel.Fields {
 				fc := fieldCapability(fmt.Sprintf("%s.%s", rel.Resource, f.Name), f)
 				if rel.IsReference() {
+					// Resolved via a child search at query time: never part of the
+					// parent's full-text surface or sort, and negation ops are not
+					// offered because the join gives them "some joined child
+					// differs" semantics instead of the document-level "no child
+					// matches" (see withoutNegations).
 					fc.Searchable = false
 					fc.Sortable = false
-					fc.FilterOps = []FilterOp{FilterOpEq, FilterOpIn}
+					fc.FilterOps = withoutNegations(fc.FilterOps)
 				}
 				cap.Fields = append(cap.Fields, fc)
 			}
@@ -38,18 +43,11 @@ func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
 
 func fieldCapability(path string, f resource.FieldConfig) FieldCapability {
 	esType := f.ESType()
-	searchable := f.Query.IsSearchable()
-
-	fc := FieldCapability{
+	return FieldCapability{
 		Field:      path,
 		Type:       esType,
-		Searchable: searchable,
+		Searchable: f.Query.IsSearchable(),
 		Sortable:   esType != "text",
+		FilterOps:  OpsForField(f),
 	}
-
-	if esType != "text" {
-		fc.FilterOps = []FilterOp{FilterOpEq, FilterOpIn}
-	}
-
-	return fc
 }
