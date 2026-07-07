@@ -40,13 +40,13 @@ func buildPlanForVersion(provider source.Provider, resourceName string, vc *reso
 	// pagination via provider.ListResources. When set, it fetches a single
 	// resource as before. After fetching, it derives the Parents to bootstrap
 	// from the root's own data (see ADR 0006).
-	rootPlan := aggregation.NewRootPlan(func(params aggregation.FetchParameters[projection.BuildRequest]) (aggregation.FetchResult[projection.BuildDoc], error) {
+	rootPlan := aggregation.NewRootPlan(func(ctx context.Context, params aggregation.FetchParameters[projection.BuildRequest]) (aggregation.FetchResult[projection.BuildDoc], error) {
 		var result aggregation.FetchResult[projection.BuildDoc]
 		var err error
 		if params.Request.ResourceID == "" {
-			result, err = fetchAllResources(provider, resourceName, vc.Fields, params)
+			result, err = fetchAllResources(ctx, provider, resourceName, vc.Fields, params)
 		} else {
-			result, err = fetchSingleResource(provider, resourceName, vc.Fields, params)
+			result, err = fetchSingleResource(ctx, provider, resourceName, vc.Fields, params)
 		}
 		if err != nil {
 			return result, err
@@ -213,12 +213,13 @@ func resolveOrder(relations []resource.RelationConfig) ([]resource.RelationConfi
 
 // fetchSingleResource fetches one resource by ID and wraps it in a BuildDoc.
 func fetchSingleResource(
+	ctx context.Context,
 	provider source.Provider,
 	resourceName string,
 	fields []resource.FieldConfig,
 	params aggregation.FetchParameters[projection.BuildRequest],
 ) (aggregation.FetchResult[projection.BuildDoc], error) {
-	data, err := provider.FetchResource(context.Background(), source.FetchResourceParams{
+	data, err := provider.FetchResource(ctx, source.FetchResourceParams{
 		ResourceType: params.Request.ResourceType,
 		ResourceID:   params.Request.ResourceID,
 		Metadata:     params.Request.Metadata,
@@ -258,6 +259,7 @@ func fetchSingleResource(
 // page of BuildDocs. The NextPageToken from the provider is passed through so
 // that the RootPlan's pagination loop keeps calling until exhausted.
 func fetchAllResources(
+	ctx context.Context,
 	provider source.Provider,
 	resourceName string,
 	fields []resource.FieldConfig,
@@ -268,7 +270,7 @@ func fetchAllResources(
 		pageToken = params.NextPageToken.(string)
 	}
 
-	resp, err := provider.ListResources(context.Background(), source.ListResourcesParams{
+	resp, err := provider.ListResources(ctx, source.ListResourcesParams{
 		ResourceType: params.Request.ResourceType,
 		PageToken:    pageToken,
 		PageSize:     100,

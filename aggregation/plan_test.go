@@ -11,12 +11,12 @@ type MockFetcher[Parent any, Result any] struct {
 	FetchFunc func(Parent) (any, error)
 }
 
-func (m *MockFetcher[Parent, Result]) Fetch(parent Parent) (any, error) {
+func (m *MockFetcher[Parent, Result]) Fetch(_ context.Context, parent Parent) (any, error) {
 	return m.FetchFunc(parent)
 }
 
 func Test_RootPlan(t *testing.T) {
-	fetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	fetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		if params.NextPageToken == nil {
 			return FetchResult[string]{Items: []string{"a", "b"}, NextPageToken: "token"}, nil
 		}
@@ -38,7 +38,7 @@ func Test_RootPlan(t *testing.T) {
 }
 
 func Test_SubPlan_Execute(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		if params.NextPageToken == nil {
 			return FetchResult[string]{Items: []string{"a", "b"}, NextPageToken: "token"}, nil
 		}
@@ -71,7 +71,7 @@ func Test_SubPlan_Execute(t *testing.T) {
 }
 
 func Test_RootPlan_Execute_WithError(t *testing.T) {
-	fetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	fetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: nil, NextPageToken: nil}, context.Canceled
 	}
 
@@ -89,7 +89,7 @@ func Test_RootPlan_Execute_WithError(t *testing.T) {
 }
 
 func Test_SubPlan_WithError(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: []string{"a", "b"}, NextPageToken: nil}, nil
 	}
 
@@ -121,7 +121,7 @@ func Test_SubPlan_WithError(t *testing.T) {
 }
 
 func Test_SubPlan_WithParentError(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: nil, NextPageToken: nil}, context.Canceled
 	}
 
@@ -150,7 +150,7 @@ func Test_SubPlan_WithParentError(t *testing.T) {
 }
 
 func Test_SubPlan_MultipleSubItems(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: []string{"a", "b"}, NextPageToken: nil}, nil
 	}
 
@@ -190,7 +190,7 @@ func Test_SubPlan_MultipleSubItems(t *testing.T) {
 }
 
 func Test_MultipleSubPlans(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: []string{"a", "b"}, NextPageToken: nil}, nil
 	}
 
@@ -246,7 +246,7 @@ func Test_MultipleSubPlans(t *testing.T) {
 }
 
 func Test_SubPlan_EmptyParentResults(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[string], error) {
 		return FetchResult[string]{Items: []string{}, NextPageToken: nil}, nil
 	}
 
@@ -275,7 +275,7 @@ func Test_SubPlan_EmptyParentResults(t *testing.T) {
 }
 
 func Test_SubPlan_WithMapResult(t *testing.T) {
-	rootFetcher := func(params FetchParameters[string]) (FetchResult[map[string]string], error) {
+	rootFetcher := func(_ context.Context, params FetchParameters[string]) (FetchResult[map[string]string], error) {
 		return FetchResult[map[string]string]{Items: []map[string]string{{"parent": "a"}, {"parent": "b"}}, NextPageToken: nil}, nil
 	}
 

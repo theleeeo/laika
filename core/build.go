@@ -320,6 +320,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs) error {
 			}
 
 			for _, doc := range page.Items {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+
 				id := doc.Root.Id
 
 				if !cleaned[id] {

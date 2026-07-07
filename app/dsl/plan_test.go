@@ -27,6 +27,18 @@ type mockProvider struct {
 	fetchedRelated map[string]bool
 	// pageSize controls how many items are returned per ListResources page.
 	pageSize int
+	// lastCtxValues records, per provider method, the test marker value found
+	// on the incoming ctx — for asserting the plan's ctx reaches the provider.
+	lastCtxValues map[string]any
+}
+
+type ctxMarkerKey struct{}
+
+func (m *mockProvider) recordCtx(method string, ctx context.Context) {
+	if m.lastCtxValues == nil {
+		m.lastCtxValues = make(map[string]any)
+	}
+	m.lastCtxValues[method] = ctx.Value(ctxMarkerKey{})
 }
 
 func newMockProvider() *mockProvider {
@@ -50,7 +62,8 @@ func copyMetadata(in map[string]string) map[string]string {
 	return out
 }
 
-func (m *mockProvider) FetchResource(_ context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
+func (m *mockProvider) FetchResource(ctx context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
+	m.recordCtx("FetchResource", ctx)
 	m.lastFetchResourceMetadata = copyMetadata(params.Metadata)
 	data, ok := m.resources[params.ResourceType+"|"+params.ResourceID]
 	if !ok {
@@ -59,7 +72,8 @@ func (m *mockProvider) FetchResource(_ context.Context, params source.FetchResou
 	return source.FetchResourceResult{Data: data}, nil
 }
 
-func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
+func (m *mockProvider) FetchRelated(ctx context.Context, params source.FetchRelatedParams) (source.FetchRelatedResult, error) {
+	m.recordCtx("FetchRelated", ctx)
 	m.lastFetchRelatedMetadata = copyMetadata(params.Metadata)
 	m.lastFetchRelatedKey = params.Key
 	m.fetchedRelated[params.ResourceType] = true
@@ -76,7 +90,8 @@ func (m *mockProvider) FetchRelated(_ context.Context, params source.FetchRelate
 	return source.FetchRelatedResult{Related: rr}, nil
 }
 
-func (m *mockProvider) ListResources(_ context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {
+func (m *mockProvider) ListResources(ctx context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {
+	m.recordCtx("ListResources", ctx)
 	m.lastListMetadata = copyMetadata(params.Metadata)
 	all, ok := m.listed[params.ResourceType]
 	if !ok {

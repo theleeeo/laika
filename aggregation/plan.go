@@ -14,13 +14,31 @@ type FetchResult[P any] struct {
 	NextPageToken any
 }
 
-// TODO: Cancellation + cleanup + drain
-func NewRootPlan[Req any, P any](fetcher func(FetchParameters[Req]) (FetchResult[P], error)) *RootPlan[Req, P] {
+// send delivers res on ch, honoring cancellation: when ctx is cancelled and no
+// receiver is ready, it gives up instead of blocking forever on an abandoned
+// channel. A receiver that is already parked on the channel is always served,
+// so terminal errors reach consumers that keep draining. Reports whether the
+// result was delivered.
+func send[P any](ctx context.Context, ch chan<- ExecutionResult[P], res ExecutionResult[P]) bool {
+	select {
+	case ch <- res:
+		return true
+	default:
+	}
+	select {
+	case ch <- res:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func NewRootPlan[Req any, P any](fetcher func(ctx context.Context, params FetchParameters[Req]) (FetchResult[P], error)) *RootPlan[Req, P] {
 	return &RootPlan[Req, P]{fetcher: fetcher}
 }
 
 type RootPlan[Req any, P any] struct {
-	fetcher func(FetchParameters[Req]) (FetchResult[P], error)
+	fetcher func(ctx context.Context, params FetchParameters[Req]) (FetchResult[P], error)
 }
 
 func (p *RootPlan[Req, P]) Execute(ctx context.Context, params Req) <-chan ExecutionResult[P] {
@@ -29,13 +47,20 @@ func (p *RootPlan[Req, P]) Execute(ctx context.Context, params Req) <-chan Execu
 	go func() {
 		defer close(ch)
 		for {
-			result, err := p.fetcher(FetchParameters[Req]{Request: params, NextPageToken: npt})
-			if err != nil {
-				ch <- ExecutionResult[P]{Err: err}
+			if err := ctx.Err(); err != nil {
+				send(ctx, ch, ExecutionResult[P]{Err: err})
 				return
 			}
 
-			ch <- ExecutionResult[P]{Items: result.Items}
+			result, err := p.fetcher(ctx, FetchParameters[Req]{Request: params, NextPageToken: npt})
+			if err != nil {
+				send(ctx, ch, ExecutionResult[P]{Err: err})
+				return
+			}
+
+			if !send(ctx, ch, ExecutionResult[P]{Items: result.Items}) {
+				return
+			}
 
 			if result.NextPageToken == nil {
 				return
@@ -47,7 +72,7 @@ func (p *RootPlan[Req, P]) Execute(ctx context.Context, params Req) <-chan Execu
 }
 
 type SubFetcher[Parent any] interface {
-	Fetch(Parent) (any, error)
+	Fetch(ctx context.Context, parent Parent) (any, error)
 }
 
 func NewSubPlan[Req any, Parent any, Result any](
@@ -73,22 +98,29 @@ func (p *SubPlan[Req, P, R]) Execute(ctx context.Context, rootParams Req) <-chan
 
 		for parentItems := range parentCh {
 			if parentItems.Err != nil {
-				ch <- ExecutionResult[R]{Err: parentItems.Err}
+				send(ctx, ch, ExecutionResult[R]{Err: parentItems.Err})
 				return
 			}
 
 			rowResult := make([]R, len(parentItems.Items))
 			for i, parentItem := range parentItems.Items {
-				fetchResult, err := p.Fetcher.Fetch(parentItem)
+				if err := ctx.Err(); err != nil {
+					send(ctx, ch, ExecutionResult[R]{Err: err})
+					return
+				}
+
+				fetchResult, err := p.Fetcher.Fetch(ctx, parentItem)
 				if err != nil {
-					ch <- ExecutionResult[R]{Err: err}
+					send(ctx, ch, ExecutionResult[R]{Err: err})
 					return
 				}
 
 				rowResult[i] = p.Builder(parentItem, fetchResult)
 			}
 
-			ch <- ExecutionResult[R]{Items: rowResult}
+			if !send(ctx, ch, ExecutionResult[R]{Items: rowResult}) {
+				return
+			}
 		}
 	}()
 	return ch
@@ -113,13 +145,15 @@ func (p *MapPlan[Req, P]) Execute(ctx context.Context, params Req) <-chan Execut
 		defer close(ch)
 		for res := range p.parent.Execute(ctx, params) {
 			if res.Err != nil {
-				ch <- res
+				send(ctx, ch, res)
 				return
 			}
 			for i := range res.Items {
 				res.Items[i] = p.mapFn(res.Items[i])
 			}
-			ch <- res
+			if !send(ctx, ch, res) {
+				return
+			}
 		}
 	}()
 	return ch

@@ -15,7 +15,7 @@ type relationFetcher struct {
 	rel      resource.RelationConfig
 }
 
-func (f *relationFetcher) Fetch(parent projection.BuildDoc) (any, error) {
+func (f *relationFetcher) Fetch(ctx context.Context, parent projection.BuildDoc) (any, error) {
 	if parent.Doc == nil {
 		return (*fetchedRelation)(nil), nil
 	}
@@ -37,7 +37,7 @@ func (f *relationFetcher) Fetch(parent projection.BuildDoc) (any, error) {
 		return &fetchedRelation{}, nil
 	}
 
-	relatedResp, err := f.provider.FetchRelated(context.Background(), source.FetchRelatedParams{
+	relatedResp, err := f.provider.FetchRelated(ctx, source.FetchRelatedParams{
 		RootResource: source.RootResource{
 			Type: parent.Root.Type,
 			Id:   parent.Root.Id,
