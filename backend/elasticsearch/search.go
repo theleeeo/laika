@@ -24,7 +24,7 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 	}
 
 	if req.Query != "" {
-		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query, vc))
+		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query))
 	}
 
 	for _, f := range req.Filters {
@@ -300,58 +300,25 @@ func infixClause(field, query string) any {
 	}
 }
 
-func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
-	var shouldClauses []any
-
-	var flatFields []string
-	for _, f := range vc.Fields {
-		if f.Query.IsSearchable() {
-			flatFields = append(flatFields, "fields."+f.Name)
-		}
-	}
-	if len(flatFields) > 0 {
-		shouldClauses = append(shouldClauses, map[string]any{
-			"multi_match": map[string]any{
-				"query":  query,
-				"fields": flatFields,
-			},
-		})
-	}
-
-	for _, rel := range vc.Relations {
-		var relFields []string
-		for _, f := range rel.Fields {
-			if f.Query.IsSearchable() {
-				relFields = append(relFields, rel.Resource+"."+f.Name)
-			}
-		}
-		if len(relFields) == 0 {
-			continue
-		}
-		mm := map[string]any{
-			"multi_match": map[string]any{
-				"query":  query,
-				"fields": relFields,
-			},
-		}
-		if rel.IsMany() {
-			shouldClauses = append(shouldClauses, map[string]any{
-				"nested": map[string]any{
-					"path":  rel.Resource,
-					"query": mm,
-				},
-			})
-		} else {
-			shouldClauses = append(shouldClauses, mm)
-		}
-	}
-
-	if len(shouldClauses) == 1 {
-		return shouldClauses[0]
+// buildFullTextQuery is the scoring core of a single-resource Search. It mirrors
+// the primary tier of Federated Search (see buildFederatedTextQuery) but stops
+// there: a Document matches on its own high-signal text — the standardized
+// primary `search` surface — and nothing else. A whole-word multi_match (with
+// the standard-analyzed .full subfield boosted for exact-token precision) is
+// paired with an unboosted infix clause (see infixClause), so any substring of
+// the indexed text matches while whole-word hits stay on top — e.g. "7135252"
+// finds "adrcd-7135252-34". The secondary (search_scoped) tier that Federated
+// Search also consults is intentionally excluded.
+func buildFullTextQuery(query string) any {
+	primary := map[string]any{
+		"multi_match": map[string]any{
+			"query":  query,
+			"fields": []any{"search.full^9", "search^3"},
+		},
 	}
 	return map[string]any{
 		"bool": map[string]any{
-			"should":               shouldClauses,
+			"should":               []any{primary, infixClause("search", query)},
 			"minimum_should_match": 1,
 		},
 	}

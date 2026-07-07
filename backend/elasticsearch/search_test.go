@@ -63,40 +63,6 @@ func vcFlatOnly() *resource.VersionConfig {
 	}
 }
 
-// vcWithNestedRelation returns a VersionConfig that has a flat field and one
-// many-cardinality (nested) relation with a searchable field.
-func vcWithNestedRelation() *resource.VersionConfig {
-	return &resource.VersionConfig{
-		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
-		Relations: []resource.RelationConfig{
-			{
-				Resource:    "tags",
-				Cardinality: "many",
-				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
-				Fields:      []resource.FieldConfig{{Name: "label", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
-			},
-		},
-	}
-}
-
-// vcWithObjectRelation returns a VersionConfig that has one one-cardinality
-// (object-mapped) relation with a searchable field.
-func vcWithObjectRelation() *resource.VersionConfig {
-	return &resource.VersionConfig{
-		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
-		Relations: []resource.RelationConfig{
-			{
-				Resource:    "owner",
-				Cardinality: "one",
-				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
-				Fields:      []resource.FieldConfig{{Name: "email", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
-			},
-		},
-	}
-}
-
 // getPath is a small helper to dig into a nested map by dot-separated key parts.
 func getPath(m map[string]any, keys ...string) any {
 	var cur any = m
@@ -129,7 +95,12 @@ func TestSearch_NoQuery_EmptyMustAndFilter(t *testing.T) {
 	}
 }
 
-func TestSearch_FlatFieldsOnly_MultiMatch(t *testing.T) {
+// A single-resource query matches the standardized primary `search` surface the
+// same way Federated Search's primary tier does: a boosted whole-word
+// multi_match paired with an infix clause, combined with minimum_should_match:1.
+// It does not consult the resource's per-field `fields.*` paths or any relation
+// path, and it never touches the secondary `search_scoped` tier.
+func TestSearch_PrimaryTextQueryShape(t *testing.T) {
 	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Query:    "hello",
@@ -143,164 +114,54 @@ func TestSearch_FlatFieldsOnly_MultiMatch(t *testing.T) {
 		t.Fatalf("expected 1 must clause, got %d", len(must))
 	}
 
-	mm := getPath(must[0].(map[string]any), "multi_match").(map[string]any)
+	should := getPath(must[0].(map[string]any), "bool", "should").([]any)
+	if len(should) != 2 {
+		t.Fatalf("expected [primary word, primary infix] should clauses, got %#v", should)
+	}
+	if msm := getPath(must[0].(map[string]any), "bool", "minimum_should_match"); msm != float64(1) && msm != 1 {
+		t.Errorf("minimum_should_match = %v, want 1", msm)
+	}
+
+	// Whole-word clause: boosted multi_match on the standardized primary surface.
+	mm := getPath(should[0].(map[string]any), "multi_match").(map[string]any)
 	if mm["query"] != "hello" {
 		t.Errorf("expected query=hello, got %v", mm["query"])
 	}
-
 	fields := mm["fields"].([]any)
-	if len(fields) != 2 {
-		t.Errorf("expected 2 fields, got %d: %v", len(fields), fields)
+	if len(fields) != 2 || fields[0] != "search.full^9" || fields[1] != "search^3" {
+		t.Errorf("primary fields = %#v, want [search.full^9 search^3]", fields)
 	}
+
+	// No leakage of per-field or secondary paths.
 	for _, f := range fields {
-		if !strings.HasPrefix(f.(string), "fields.") {
-			t.Errorf("flat field should be prefixed with 'fields.', got %q", f)
+		if s := f.(string); strings.HasPrefix(s, "fields.") || strings.HasPrefix(s, "search_scoped") {
+			t.Errorf("single-resource query must target only the primary `search` surface, got %q", s)
 		}
 	}
 }
 
-// Nested relation (IsMany=true) must produce a nested query wrapper.
-func TestSearch_NestedRelation_WrappedInNestedQuery(t *testing.T) {
+// The infix clause gives the single-resource query substring semantics against
+// the primary surface: e.g. "7135252" finds "adrcd-7135252-34". It shreds the
+// query through the index-side n-gram analyzer and requires every gram.
+func TestSearch_PrimaryInfixSubstringClause(t *testing.T) {
 	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
-		Query:    "golang",
-	}, vcWithNestedRelation())
+		Query:    "7135252",
+	}, vcFlatOnly())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	must := getPath(body, "query", "bool", "must").([]any)
-	if len(must) != 1 {
-		t.Fatalf("expected 1 must clause, got %d", len(must))
+	should := getPath(body, "query", "bool", "must").([]any)[0].(map[string]any)["bool"].(map[string]any)["should"].([]any)
+	infix := getPath(should[1].(map[string]any), "match", "search").(map[string]any)
+	if infix["query"] != "7135252" {
+		t.Errorf("infix query = %v, want 7135252", infix["query"])
 	}
-
-	// Two relations + flat → should wrapper
-	should := getPath(must[0].(map[string]any), "bool", "should").([]any)
-	if len(should) != 2 {
-		t.Fatalf("expected 2 should clauses (flat + nested), got %d", len(should))
+	if infix["analyzer"] != ngramIndexAnalyzer {
+		t.Errorf("infix analyzer = %v, want %v", infix["analyzer"], ngramIndexAnalyzer)
 	}
-
-	// Find the nested clause
-	var nestedClause map[string]any
-	for _, s := range should {
-		m := s.(map[string]any)
-		if _, ok := m["nested"]; ok {
-			nestedClause = m
-		}
-	}
-	if nestedClause == nil {
-		t.Fatal("expected a nested clause, found none")
-	}
-
-	nested := nestedClause["nested"].(map[string]any)
-	if nested["path"] != "tags" {
-		t.Errorf("expected path=tags, got %v", nested["path"])
-	}
-
-	innerFields := getPath(nested, "query", "multi_match", "fields").([]any)
-	if len(innerFields) != 1 || innerFields[0] != "tags.label" {
-		t.Errorf("expected fields=[tags.label], got %v", innerFields)
-	}
-}
-
-// Object relation (IsMany=false / cardinality=one) must NOT be wrapped in nested.
-func TestSearch_ObjectRelation_NotWrappedInNested(t *testing.T) {
-	body, _, err := captureSearch(t, core.SearchRequest{
-		PageSize: 10,
-		Query:    "alice",
-	}, vcWithObjectRelation())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	must := getPath(body, "query", "bool", "must").([]any)
-	should := getPath(must[0].(map[string]any), "bool", "should").([]any)
-
-	for _, s := range should {
-		if _, ok := s.(map[string]any)["nested"]; ok {
-			t.Error("object relation should not produce a nested query wrapper")
-		}
-	}
-
-	// one of the should clauses must target owner.email
-	found := false
-	for _, s := range should {
-		fields, _ := getPath(s.(map[string]any), "multi_match", "fields").([]any)
-		for _, f := range fields {
-			if f == "owner.email" {
-				found = true
-			}
-		}
-	}
-	if !found {
-		t.Error("expected owner.email in a multi_match fields list")
-	}
-}
-
-// A field with search=false must not appear in the query.
-func TestSearch_SearchDisabledField_ExcludedFromQuery(t *testing.T) {
-	vc := &resource.VersionConfig{
-		Version: 1,
-		Fields: []resource.FieldConfig{
-			{Name: "visible", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
-			{Name: "hidden", Query: resource.QueryConfig{Search: resource.SearchTierNone}},
-		},
-	}
-
-	body, _, err := captureSearch(t, core.SearchRequest{
-		PageSize: 10,
-		Query:    "x",
-	}, vc)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	must := getPath(body, "query", "bool", "must").([]any)
-	mm := getPath(must[0].(map[string]any), "multi_match").(map[string]any)
-	fields := mm["fields"].([]any)
-
-	for _, f := range fields {
-		if f.(string) == "fields.hidden" {
-			t.Error("search-disabled field 'hidden' should not appear in multi_match fields")
-		}
-	}
-	if len(fields) != 1 || fields[0] != "fields.visible" {
-		t.Errorf("expected only fields.visible, got %v", fields)
-	}
-}
-
-// A nested relation whose only field has search=false should produce no nested clause.
-func TestSearch_NestedRelation_AllFieldsSearchDisabled_NoClause(t *testing.T) {
-	vc := &resource.VersionConfig{
-		Version: 1,
-		Fields:  []resource.FieldConfig{{Name: "title", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}},
-		Relations: []resource.RelationConfig{
-			{
-				Resource:    "meta",
-				Cardinality: "many",
-				Join:        resource.JoinConfig{Local: "id", Foreign: "root_id"},
-				Fields: []resource.FieldConfig{
-					{Name: "internal", Query: resource.QueryConfig{Search: resource.SearchTierNone}},
-				},
-			},
-		},
-	}
-
-	body, _, err := captureSearch(t, core.SearchRequest{
-		PageSize: 10,
-		Query:    "x",
-	}, vc)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	must := getPath(body, "query", "bool", "must").([]any)
-	// Only one clause — the flat multi_match — no should wrapper needed.
-	if _, ok := must[0].(map[string]any)["multi_match"]; !ok {
-		t.Errorf("expected a plain multi_match when nested relation has no searchable fields, got %v", must[0])
-	}
-	if _, ok := must[0].(map[string]any)["nested"]; ok {
-		t.Error("unexpected nested clause when relation has no searchable fields")
+	if infix["minimum_should_match"] != "100%" {
+		t.Errorf("infix minimum_should_match = %v, want 100%%", infix["minimum_should_match"])
 	}
 }
 
