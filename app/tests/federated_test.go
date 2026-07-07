@@ -262,3 +262,54 @@ func (t *TestSuite) Test_FederatedSearch_SecondaryScopeCorrelation() {
 	// t2 matches "beta".
 	t.Require().EqualValues(1, search("beta", "t2").Total)
 }
+
+// Test_FederatedSearch_InfixMatches proves the federated query matches any
+// substring of the indexed text ("*query*" semantics): the query is shredded
+// with the same n-gram analysis the index side uses, and a document matches
+// when it contains every gram of the query (spec D15). Whole words keep
+// matching via the standard-analyzed .full subfield.
+func (t *TestSuite) Test_FederatedSearch_InfixMatches() {
+	t.setResourceConfig(DefaultResourceConfig)
+
+	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search": "Aichkirchen 2"})
+	t.indexRaw(core.IndexName("a", 1), "a2", map[string]any{"search": "Neustadtl an der Donau"})
+
+	search := func(query string) core.FederatedSearchResponse {
+		resp, err := t.idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
+			Query:     query,
+			Resources: []string{"a"},
+		})
+		t.Require().NoError(err)
+		return resp
+	}
+
+	// Prefix, infix, and suffix fragments longer than the gram size all match.
+	for _, q := range []string{"Aich", "Aichk", "chkirch", "kirchen", "Aichkirchen"} {
+		resp := search(q)
+		t.Require().EqualValuesf(1, resp.Total, "query %q", q)
+		t.Require().Equalf("a1", resp.Hits[0].ID, "query %q", q)
+	}
+
+	// A fragment that is not a substring of any document matches nothing.
+	t.Require().EqualValues(0, search("Aichx").Total)
+
+	// A multi-word query still matches word-wise: each word hits its document
+	// even though no single document contains both.
+	both := search("Aichkirchen Neustadtl")
+	t.Require().EqualValues(2, both.Total)
+
+	t.Run("secondary tier matches infix", func() {
+		t.indexRaw(core.IndexName("b", 1), "b1", map[string]any{
+			"search_scoped": []any{
+				map[string]any{"text": "Grieskirchen depot", "scope": []any{}},
+			},
+		})
+		resp, err := t.idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
+			Query:     "rieskirch",
+			Resources: []string{"b"},
+		})
+		t.Require().NoError(err)
+		t.Require().EqualValues(1, resp.Total)
+		t.Require().Equal("b1", resp.Hits[0].ID)
+	})
+}

@@ -13,9 +13,11 @@ const (
 	ngramMinGram = 2
 	ngramMaxGram = 3
 
-	// ngramIndexAnalyzer shreds indexed text into 2–3 char grams. The query
-	// term is matched against those grams but is not itself shredded, so it uses
-	// ngramSearchAnalyzer (standard + lowercase) at search time.
+	// ngramIndexAnalyzer shreds indexed text into 2–3 char grams. At search
+	// time the field's default is ngramSearchAnalyzer (standard + lowercase,
+	// whole tokens); the federated query's infix clause additionally reuses
+	// ngramIndexAnalyzer on the query text so any substring — all of its grams
+	// required — matches (search.go infixClause).
 	ngramIndexAnalyzer  = "search_ngram"
 	ngramSearchAnalyzer = "search_ngram_query"
 	ngramTokenizer      = "search_ngram_tokenizer"

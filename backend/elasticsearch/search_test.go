@@ -705,7 +705,10 @@ func TestBuildSecondaryClause_CorrelatesScopeWithinEntry(t *testing.T) {
 	var sawTextMatch, sawScopeTerm bool
 	for _, c := range must {
 		m := c.(map[string]any)
-		if mm, ok := m["multi_match"].(map[string]any); ok {
+		// The text clause is a bool pairing the word multi_match with the
+		// infix match.
+		if b, ok := m["bool"].(map[string]any); ok {
+			mm := b["should"].([]any)[0].(map[string]any)["multi_match"].(map[string]any)
 			fields, _ := mm["fields"].([]any)
 			if len(fields) == 0 || fields[0] != "search_scoped.text.full^3" {
 				t.Errorf("text match fields = %#v, want boosted search_scoped.text.full first", fields)
@@ -729,10 +732,14 @@ func TestBuildSecondaryClause_EmptyScopeUnscoped(t *testing.T) {
 
 	must := clause.(map[string]any)["nested"].(map[string]any)["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
 	if len(must) != 1 {
-		t.Fatalf("expected only the text match when scope is empty, got %#v", must)
+		t.Fatalf("expected only the text clause when scope is empty, got %#v", must)
 	}
-	if _, ok := must[0].(map[string]any)["multi_match"]; !ok {
-		t.Errorf("expected text multi_match, got %#v", must[0])
+	textShoulds := must[0].(map[string]any)["bool"].(map[string]any)["should"].([]any)
+	if _, ok := textShoulds[0].(map[string]any)["multi_match"]; !ok {
+		t.Errorf("expected text multi_match, got %#v", textShoulds[0])
+	}
+	if _, ok := textShoulds[1].(map[string]any)["match"]; !ok {
+		t.Errorf("expected text infix match, got %#v", textShoulds[1])
 	}
 	// No scope term anywhere.
 	for _, c := range must {
@@ -829,15 +836,18 @@ func TestFederatedSearch_QueryShapeAndSearchType(t *testing.T) {
 		t.Errorf("minimum_should_match = %v, want 1", should["minimum_should_match"])
 	}
 	shoulds := should["should"].([]any)
-	if len(shoulds) != 2 {
-		t.Fatalf("expected primary + secondary should clauses, got %#v", shoulds)
+	if len(shoulds) != 3 {
+		t.Fatalf("expected primary word + primary infix + secondary should clauses, got %#v", shoulds)
 	}
 	primaryFields := shoulds[0].(map[string]any)["multi_match"].(map[string]any)["fields"].([]any)
 	if primaryFields[0] != "search.full^9" || primaryFields[1] != "search^3" {
 		t.Errorf("primary fields = %#v, want [search.full^9 search^3]", primaryFields)
 	}
-	if _, ok := shoulds[1].(map[string]any)["nested"]; !ok {
-		t.Errorf("expected secondary nested clause, got %#v", shoulds[1])
+	if _, ok := shoulds[1].(map[string]any)["match"]; !ok {
+		t.Errorf("expected primary infix clause, got %#v", shoulds[1])
+	}
+	if _, ok := shoulds[2].(map[string]any)["nested"]; !ok {
+		t.Errorf("expected secondary nested clause, got %#v", shoulds[2])
 	}
 
 	// filter = [global region filter, per-index groups].
@@ -972,5 +982,53 @@ func TestBuildFilterClause_OperandErrors(t *testing.T) {
 		if _, err := buildFilterClause(f); err == nil {
 			t.Errorf("filter %+v: expected error", f)
 		}
+	}
+}
+
+// TestFederatedSearch_InfixQueryShape pins the infix ("*query*") clauses: each
+// tier pairs its whole-word multi_match with a match that shreds the query
+// through the index-side n-gram analyzer and requires every gram, so any
+// substring of the indexed text matches (spec D15).
+func TestFederatedSearch_InfixQueryShape(t *testing.T) {
+	body, _, _ := captureFederated(t, core.FederatedSearchParams{
+		Query:        "chkirch",
+		FilterGroups: fedGroups(),
+		PageSize:     25,
+	})
+
+	boolQ := body["query"].(map[string]any)["bool"].(map[string]any)
+	should := boolQ["must"].([]any)[0].(map[string]any)["bool"].(map[string]any)
+	shoulds := should["should"].([]any)
+	if len(shoulds) != 3 {
+		t.Fatalf("expected [primary word, primary infix, secondary] clauses, got %#v", shoulds)
+	}
+
+	// Primary infix: all query grams required on the ngrammed body.
+	infix := shoulds[1].(map[string]any)["match"].(map[string]any)["search"].(map[string]any)
+	if infix["query"] != "chkirch" {
+		t.Errorf("infix query = %v, want chkirch", infix["query"])
+	}
+	if infix["analyzer"] != ngramIndexAnalyzer {
+		t.Errorf("infix analyzer = %v, want %v", infix["analyzer"], ngramIndexAnalyzer)
+	}
+	if infix["minimum_should_match"] != "100%" {
+		t.Errorf("infix minimum_should_match = %v, want 100%%", infix["minimum_should_match"])
+	}
+
+	// Secondary: the nested bool pairs the word multi_match with the same infix
+	// treatment on search_scoped.text.
+	nested := shoulds[2].(map[string]any)["nested"].(map[string]any)
+	must := nested["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
+	text := must[0].(map[string]any)["bool"].(map[string]any)
+	if text["minimum_should_match"] != 1 && text["minimum_should_match"] != float64(1) {
+		t.Errorf("secondary text minimum_should_match = %v, want 1", text["minimum_should_match"])
+	}
+	textShoulds := text["should"].([]any)
+	if len(textShoulds) != 2 {
+		t.Fatalf("expected secondary [word, infix] clauses, got %#v", textShoulds)
+	}
+	secInfix := textShoulds[1].(map[string]any)["match"].(map[string]any)["search_scoped.text"].(map[string]any)
+	if secInfix["analyzer"] != ngramIndexAnalyzer || secInfix["minimum_should_match"] != "100%" {
+		t.Errorf("secondary infix = %#v, want ngram analyzer with 100%% msm", secInfix)
 	}
 }

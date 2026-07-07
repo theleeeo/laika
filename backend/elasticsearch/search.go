@@ -261,8 +261,10 @@ func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchPara
 // buildFederatedTextQuery is the scoring core of a federated query: a document
 // matches on its own primary text (search) OR on secondary text (search_scoped),
 // with a query-time boost so a primary match outranks a secondary one (spec D13,
-// D15). The .full standard-analyzed subfields are boosted over the n-grammed
-// bodies so whole-token/exact matches beat incidental infix hits.
+// D15). Each tier pairs a whole-word multi_match — whose .full standard-analyzed
+// subfield is boosted for exact-token precision — with an unboosted infix clause
+// (see infixClause), so any substring of the indexed text matches while
+// whole-word hits stay on top.
 func buildFederatedTextQuery(query, scope string) any {
 	primary := map[string]any{
 		"multi_match": map[string]any{
@@ -272,8 +274,28 @@ func buildFederatedTextQuery(query, scope string) any {
 	}
 	return map[string]any{
 		"bool": map[string]any{
-			"should":               []any{primary, buildSecondaryClause(query, scope)},
+			"should":               []any{primary, infixClause("search", query), buildSecondaryClause(query, scope)},
 			"minimum_should_match": 1,
+		},
+	}
+}
+
+// infixClause gives a searchable surface "*query*" semantics: the query is
+// shredded with the same n-gram analysis the index side uses, and every gram
+// must be present (minimum_should_match 100%). A document containing the query
+// as a substring necessarily contains all its grams, so any prefix/infix/suffix
+// fragment matches regardless of its length — the plain multi_match only
+// matches fragments that are whole words (via .full) or no longer than
+// max_gram. AND-of-grams admits rare false positives (all grams present but
+// scattered); acceptable for search (spec D15).
+func infixClause(field, query string) any {
+	return map[string]any{
+		"match": map[string]any{
+			field: map[string]any{
+				"query":                query,
+				"analyzer":             ngramIndexAnalyzer,
+				"minimum_should_match": "100%",
+			},
 		},
 	}
 }
@@ -337,8 +359,9 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 
 // buildSecondaryClause builds the nested query over a Federated Search's
 // secondary tier (the search_scoped nested field). It matches the query text
-// against each entry's n-grammed text, boosting the standard-analyzed .full
-// subfield for whole-token precision over incidental infix hits (spec D15).
+// against each entry's text the same two ways as the primary tier: whole words
+// via the multi_match (with the standard-analyzed .full subfield boosted for
+// whole-token precision) or any substring via infixClause (spec D15).
 //
 // When scope is non-empty it weaves a term on the same entry's scope[] keyword
 // array into the same nested bool.must (spec D11.2, D14). Because a nested query
@@ -350,9 +373,17 @@ func buildFullTextQuery(query string, vc *resource.VersionConfig) any {
 func buildSecondaryClause(query, scope string) any {
 	must := []any{
 		map[string]any{
-			"multi_match": map[string]any{
-				"query":  query,
-				"fields": []any{"search_scoped.text.full^3", "search_scoped.text"},
+			"bool": map[string]any{
+				"should": []any{
+					map[string]any{
+						"multi_match": map[string]any{
+							"query":  query,
+							"fields": []any{"search_scoped.text.full^3", "search_scoped.text"},
+						},
+					},
+					infixClause("search_scoped.text", query),
+				},
+				"minimum_should_match": 1,
 			},
 		},
 	}
