@@ -14,7 +14,8 @@ import (
 // Config file keys use dot-notation (e.g. es.addrs). Each key maps to an
 // upper-snake-case env var by replacing '.' with '_':
 //
-//	grpc.addr           → GRPC_ADDR
+//	grpc.public_addr    → GRPC_PUBLIC_ADDR
+//	grpc.admin_addr     → GRPC_ADMIN_ADDR
 //	es.addrs            → ES_ADDRS  (comma-separated when set via env)
 //	es.username         → ES_USERNAME
 //	es.password         → ES_PASSWORD
@@ -36,7 +37,13 @@ type logConfig struct {
 }
 
 type grpcConfig struct {
-	Addr string `mapstructure:"addr"`
+	// PublicAddr is the read/search surface (SearchService). It is browser-
+	// facing (CORS) and safe to expose publicly.
+	PublicAddr string `mapstructure:"public_addr"`
+	// AdminAddr is the write/control surface (IndexService: NotifyChange,
+	// NotifyChangeBatch, Rebuild). It carries no CORS and is meant for internal
+	// callers only.
+	AdminAddr string `mapstructure:"admin_addr"`
 }
 
 type esConfig struct {
@@ -60,11 +67,12 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetConfigFile(configFilePath)
 
 	// Env vars override file values. Dots in key names become underscores,
-	// so "es.addrs" → ES_ADDRS, "grpc.addr" → GRPC_ADDR, etc.
+	// so "es.addrs" → ES_ADDRS, "grpc.public_addr" → GRPC_PUBLIC_ADDR, etc.
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
-	v.SetDefault("grpc.addr", ":9000")
+	v.SetDefault("grpc.public_addr", ":9000")
+	v.SetDefault("grpc.admin_addr", ":9010")
 	v.SetDefault("es.addrs", []string{"http://localhost:9200"})
 	v.SetDefault("es.username", "")
 	v.SetDefault("es.password", "")

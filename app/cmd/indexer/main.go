@@ -122,19 +122,11 @@ func main() {
 	idxSrv := server.NewIndexer(idx)
 	searchSrv := server.NewSearcher(idx)
 
-	// A single Connect-backed HTTP server serves gRPC, gRPC-Web, and the
-	// Connect protocol (HTTP POST + JSON) from the same handlers. Existing
-	// plain-gRPC clients keep working; web clients get JSON for free.
-	mux := http.NewServeMux()
-	mux.Handle(indexconnect.NewIndexServiceHandler(idxSrv))
-	mux.Handle(searchconnect.NewSearchServiceHandler(searchSrv))
-
-	reflector := grpcreflect.NewStaticReflector(
-		indexconnect.IndexServiceName,
-		searchconnect.SearchServiceName,
-	)
-	mux.Handle(grpcreflect.NewHandlerV1(reflector))
-	mux.Handle(grpcreflect.NewHandlerV1Alpha(reflector))
+	// The surface is split across two listeners: a public port for the
+	// read/search surface (browser-facing, CORS) and an admin port for the
+	// write/control surface (IndexService). Both serve gRPC, gRPC-Web, and the
+	// Connect protocol (HTTP POST + JSON) from the same handlers.
+	publicMux, adminMux := newServeMuxes(idxSrv, searchSrv)
 
 	// Enable unencrypted (h2c) HTTP/2 so gRPC clients can speak HTTP/2 over
 	// cleartext on the same port, while HTTP/1.1 stays available for Connect/JSON.
@@ -142,9 +134,16 @@ func main() {
 	protocols.SetHTTP1(true)
 	protocols.SetUnencryptedHTTP2(true)
 
-	httpSrv := &http.Server{
-		Addr:      cfg.GRPC.Addr,
-		Handler:   withCORS(mux),
+	// Public port is CORS-wrapped for browsers; the admin port stays bare so the
+	// write API is never reachable from the CORS-open browser surface.
+	publicSrv := &http.Server{
+		Addr:      cfg.GRPC.PublicAddr,
+		Handler:   withCORS(publicMux),
+		Protocols: protocols,
+	}
+	adminSrv := &http.Server{
+		Addr:      cfg.GRPC.AdminAddr,
+		Handler:   adminMux,
 		Protocols: protocols,
 	}
 
@@ -167,11 +166,19 @@ func main() {
 	})
 
 	wg.Go(func() {
-		log.Printf("HTTP server (gRPC + gRPC-Web + Connect) listening on %s", cfg.GRPC.Addr)
-		if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("HTTP server error: %v", err)
+		log.Printf("public HTTP server (search) listening on %s", cfg.GRPC.PublicAddr)
+		if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("public HTTP server error: %v", err)
 		}
-		log.Printf("HTTP server stopped")
+		log.Printf("public HTTP server stopped")
+	})
+
+	wg.Go(func() {
+		log.Printf("admin HTTP server (writes) listening on %s", cfg.GRPC.AdminAddr)
+		if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("admin HTTP server error: %v", err)
+		}
+		log.Printf("admin HTTP server stopped")
 	})
 
 	<-stopChan
@@ -189,8 +196,11 @@ func main() {
 	defer stopCancel()
 
 	// Stop accepting new requests first, then drain River jobs.
-	if err := httpSrv.Shutdown(stopCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
+	if err := publicSrv.Shutdown(stopCtx); err != nil {
+		log.Printf("public HTTP server shutdown error: %v", err)
+	}
+	if err := adminSrv.Shutdown(stopCtx); err != nil {
+		log.Printf("admin HTTP server shutdown error: %v", err)
 	}
 
 	if err := riverClient.Stop(stopCtx); err != nil {
@@ -200,6 +210,26 @@ func main() {
 	cancel()
 
 	wg.Wait()
+}
+
+// newServeMuxes builds the two HTTP muxes for the split surface: the public
+// mux serves the read/search surface, the admin mux serves the write/control
+// surface (indexing + rebuild). gRPC reflection is served on both, scoped so
+// each port advertises only the services it actually hosts.
+func newServeMuxes(idxSrv indexconnect.IndexServiceHandler, searchSrv searchconnect.SearchServiceHandler) (public, admin *http.ServeMux) {
+	public = http.NewServeMux()
+	public.Handle(searchconnect.NewSearchServiceHandler(searchSrv))
+	publicReflector := grpcreflect.NewStaticReflector(searchconnect.SearchServiceName)
+	public.Handle(grpcreflect.NewHandlerV1(publicReflector))
+	public.Handle(grpcreflect.NewHandlerV1Alpha(publicReflector))
+
+	admin = http.NewServeMux()
+	admin.Handle(indexconnect.NewIndexServiceHandler(idxSrv))
+	adminReflector := grpcreflect.NewStaticReflector(indexconnect.IndexServiceName)
+	admin.Handle(grpcreflect.NewHandlerV1(adminReflector))
+	admin.Handle(grpcreflect.NewHandlerV1Alpha(adminReflector))
+
+	return public, admin
 }
 
 // withCORS wraps h with permissive CORS headers so the standalone demo page,

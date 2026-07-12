@@ -1,5 +1,7 @@
 .vscode/
 
+/indexer
+
 dev/
 tmp/
 

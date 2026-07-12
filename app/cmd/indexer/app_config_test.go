@@ -8,14 +8,15 @@ import (
 
 func TestLoadAppConfigFromFile(t *testing.T) {
 	// Ensure env vars don't bleed in from the environment.
-	for _, env := range []string{"GRPC_ADDR", "ES_ADDRS", "ES_USERNAME", "ES_PASSWORD", "RESOURCE_CONFIG_PATH", "PG_ADDR", "PROVIDER_ADDR"} {
+	for _, env := range []string{"GRPC_PUBLIC_ADDR", "GRPC_ADMIN_ADDR", "ES_ADDRS", "ES_USERNAME", "ES_PASSWORD", "RESOURCE_CONFIG_PATH", "PG_ADDR", "PROVIDER_ADDR"} {
 		t.Setenv(env, "")
 	}
 
 	configPath := filepath.Join(t.TempDir(), "indexer.yml")
 	content := []byte(`
 grpc:
-  addr: ":9100"
+  public_addr: ":9100"
+  admin_addr: ":9110"
 es:
   addrs:
     - "http://es-a:9200"
@@ -38,8 +39,11 @@ resource_config_path: "resources.from.file.yml"
 		t.Fatalf("loadAppConfig error: %v", err)
 	}
 
-	if cfg.GRPC.Addr != ":9100" {
-		t.Fatalf("GRPC.Addr mismatch: got %q", cfg.GRPC.Addr)
+	if cfg.GRPC.PublicAddr != ":9100" {
+		t.Fatalf("GRPC.PublicAddr mismatch: got %q", cfg.GRPC.PublicAddr)
+	}
+	if cfg.GRPC.AdminAddr != ":9110" {
+		t.Fatalf("GRPC.AdminAddr mismatch: got %q", cfg.GRPC.AdminAddr)
 	}
 	if len(cfg.ES.Addrs) != 2 || cfg.ES.Addrs[0] != "http://es-a:9200" || cfg.ES.Addrs[1] != "http://es-b:9200" {
 		t.Fatalf("ES.Addrs mismatch: got %#v", cfg.ES.Addrs)
@@ -84,7 +88,8 @@ func TestLoadAppConfigEnvOverridesFile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "indexer.yml")
 	content := []byte(`
 grpc:
-  addr: ":9100"
+  public_addr: ":9100"
+  admin_addr: ":9110"
 es:
   addrs:
     - "http://es-a:9200"
@@ -101,7 +106,8 @@ resource_config_path: "resources.from.file.yml"
 		t.Fatalf("write config file: %v", err)
 	}
 
-	t.Setenv("GRPC_ADDR", ":9200")
+	t.Setenv("GRPC_PUBLIC_ADDR", ":9200")
+	t.Setenv("GRPC_ADMIN_ADDR", ":9210")
 	t.Setenv("ES_ADDRS", "http://env-a:9200,http://env-b:9200")
 	t.Setenv("ES_USERNAME", "env-user")
 	t.Setenv("ES_PASSWORD", "env-pass")
@@ -114,8 +120,11 @@ resource_config_path: "resources.from.file.yml"
 		t.Fatalf("loadAppConfig error: %v", err)
 	}
 
-	if cfg.GRPC.Addr != ":9200" {
-		t.Fatalf("GRPC.Addr mismatch: got %q", cfg.GRPC.Addr)
+	if cfg.GRPC.PublicAddr != ":9200" {
+		t.Fatalf("GRPC.PublicAddr mismatch: got %q", cfg.GRPC.PublicAddr)
+	}
+	if cfg.GRPC.AdminAddr != ":9210" {
+		t.Fatalf("GRPC.AdminAddr mismatch: got %q", cfg.GRPC.AdminAddr)
 	}
 	if len(cfg.ES.Addrs) != 2 || cfg.ES.Addrs[0] != "http://env-a:9200" || cfg.ES.Addrs[1] != "http://env-b:9200" {
 		t.Fatalf("ES.Addrs mismatch: got %#v", cfg.ES.Addrs)

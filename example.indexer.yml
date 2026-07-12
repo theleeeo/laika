@@ -2,7 +2,8 @@
 # Start with: APP_CONFIG_PATH=example.indexer.yml GOEXPERIMENT=jsonv2 go run ./cmd/indexer
 #
 # Each key maps to an env var by uppercasing and replacing '.' with '_':
-#   grpc.addr        -> GRPC_ADDR
+#   grpc.public_addr -> GRPC_PUBLIC_ADDR
+#   grpc.admin_addr  -> GRPC_ADMIN_ADDR
 #   es.addrs         -> ES_ADDRS  (comma-separated when set via env)
 #   es.username      -> ES_USERNAME
 #   es.password      -> ES_PASSWORD
@@ -10,11 +11,14 @@
 #   provider.addr    -> PROVIDER_ADDR
 #   resource_config_path -> RESOURCE_CONFIG_PATH
 
-# Address of the HTTP server. It serves gRPC, gRPC-Web, and the Connect
-# protocol (HTTP POST + JSON, usable directly from a web client) from the same
-# port. gRPC clients connect over HTTP/2 cleartext (h2c) unchanged.
+# The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
+# Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
+#   public_addr — read/search surface (SearchService); browser-facing (CORS).
+#   admin_addr  — write/control surface (IndexService: NotifyChange,
+#                 NotifyChangeBatch, Rebuild); no CORS, meant for internal use.
 grpc:
-  addr: ":9000"
+  public_addr: ":9000"
+  admin_addr: ":9010"
 
 es:
   addrs:
