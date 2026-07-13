@@ -25,6 +25,22 @@ func New(client *esv8.Client, withRefresh bool) *Client {
 	return &Client{es: client, withRefresh: withRefresh}
 }
 
+// Dial constructs a Client connected to the given Elasticsearch address(es).
+// username/password may be empty for an unauthenticated cluster. It is a
+// convenience for standalone commands (e.g. gen-mapping, diff-mapping) that only
+// need a client to talk to a running cluster.
+func Dial(addrs []string, username, password string) (*Client, error) {
+	es, err := esv8.NewClient(esv8.Config{
+		Addresses: addrs,
+		Username:  username,
+		Password:  password,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return New(es, false), nil
+}
+
 func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, version int64) error {
 	now := time.Now()
 	defer func() {

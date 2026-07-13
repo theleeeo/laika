@@ -24,6 +24,10 @@ GOEXPERIMENT=jsonv2 go test ./...
 # Generate Elasticsearch mappings from resource config
 go run ./app/cmd/gen-mapping -config resources.yml
 
+# Diff running index mappings against what the current config would generate
+# (exits non-zero on actionable drift: added/changed fields or a missing index)
+go run ./app/cmd/diff-mapping -config resources.yml -es-addr http://localhost:9200
+
 # Regenerate protobuf bindings (outputs to app/gen/)
 buf generate
 ```
@@ -76,7 +80,7 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 | `app/gen/` | Generated protobuf Go bindings — do not edit manually |
 | `app/config/` | YAML resource DSL parsing |
 | `app/dsl/` | Builds `projection.Plan` trees from resource config + Provider |
-| `app/cmd/` | Entry points (`indexer`, `gen-mapping`, `cleanup`, `cutover`) |
+| `app/cmd/` | Entry points (`indexer`, `gen-mapping`, `diff-mapping`, `cleanup`, `cutover`) |
 
 ### Critical Invariants
 

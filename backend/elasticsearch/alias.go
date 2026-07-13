@@ -125,6 +125,49 @@ func (c *Client) GetAlias(ctx context.Context, aliasName string) (string, error)
 	return "", nil
 }
 
+// GetMapping returns the running "mappings" object for indexName (the value
+// under the index's "mappings" key, i.e. containing "properties"). The second
+// return is false, with a nil error, when the index does not exist.
+func (c *Client) GetMapping(ctx context.Context, indexName string) (map[string]any, bool, error) {
+	res, err := c.es.Indices.GetMapping(
+		c.es.Indices.GetMapping.WithIndex(indexName),
+		c.es.Indices.GetMapping.WithContext(ctx),
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf("get mapping: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == 404 {
+		return nil, false, nil
+	}
+
+	if res.IsError() {
+		raw, _ := io.ReadAll(res.Body)
+		return nil, false, fmt.Errorf("get mapping error: %s %s", res.Status(), string(raw))
+	}
+
+	// Response shape: { "<index>": { "mappings": { "properties": {...} } } }.
+	var decoded map[string]any
+	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
+		return nil, false, fmt.Errorf("decode mapping response: %w", err)
+	}
+
+	for _, v := range decoded {
+		entry, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		mappings, ok := entry["mappings"].(map[string]any)
+		if !ok {
+			return nil, false, fmt.Errorf("mapping response for %q missing mappings object", indexName)
+		}
+		return mappings, true, nil
+	}
+
+	return nil, false, fmt.Errorf("mapping response for %q was empty", indexName)
+}
+
 // DeleteIndex deletes an Elasticsearch index.
 func (c *Client) DeleteIndex(ctx context.Context, indexName string) error {
 	res, err := c.es.Indices.Delete(
