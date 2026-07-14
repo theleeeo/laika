@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/theleeeo/laika/aggregation"
 	"github.com/theleeeo/laika/model"
@@ -53,6 +54,21 @@ func (s *cancellingStore) NextRebuildCounter(context.Context, model.Resource) (i
 	return 1, nil
 }
 func (s *cancellingStore) UpsertResource(context.Context, model.Resource, int64) error { return nil }
+
+func (s *cancellingStore) MarkStale(context.Context, []model.Resource) error { return nil }
+func (s *cancellingStore) MarkDeleted(context.Context, model.Resource) (int64, error) {
+	return 0, nil
+}
+func (s *cancellingStore) BeginBuild(context.Context, model.Resource) (int64, int64, error) {
+	return 1, 0, nil
+}
+func (s *cancellingStore) ClearStale(context.Context, model.Resource, int64) error { return nil }
+func (s *cancellingStore) DeleteResourceIfSeq(context.Context, model.Resource, int64) error {
+	return nil
+}
+func (s *cancellingStore) ListStale(context.Context, time.Time, int) ([]StaleResource, error) {
+	return nil, nil
+}
 
 // A cancelled ctx must abort the all-of-type rebuild loop with the ctx error
 // instead of warn-and-continuing through every remaining document (and then

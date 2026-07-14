@@ -1,10 +1,16 @@
 CREATE TABLE IF NOT EXISTS resources (
-	type VARCHAR NOT NULL,
-	id VARCHAR NOT NULL,
-	version BIGINT NOT NULL DEFAULT 0,
-	build_idx BIGINT NOT NULL DEFAULT 0,
-	UNIQUE (type, id)
+    type VARCHAR NOT NULL,
+    id VARCHAR NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0,
+    build_idx BIGINT NOT NULL DEFAULT 0,
+    stale_seq BIGINT NOT NULL DEFAULT 0,
+    stale_since TIMESTAMPTZ,                -- NULL = clean
+    deleted BOOLEAN NOT NULL DEFAULT false,
+    UNIQUE (type, id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
+    WHERE stale_since IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS relations (
 	resource VARCHAR NOT NULL,
