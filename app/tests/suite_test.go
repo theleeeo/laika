@@ -36,9 +36,26 @@ type FakeProvider struct {
 	resources  map[string]map[string]any           // "type|id" -> data
 	relations  map[string][]source.RelatedResource // "type|key" -> []RelatedResource
 	fetchGates map[string]*fetchGate
+	errs       map[string]error // "type|id" -> injected FetchResource error
 
 	fetchResourceCount int
 	listResourcesCount int
+}
+
+// SetError makes FetchResource fail for the given resource until cleared.
+// Passing a nil err clears any injected error for that resource.
+func (f *FakeProvider) SetError(resourceType, id string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.errs == nil {
+		f.errs = map[string]error{}
+	}
+	key := resourceType + "|" + id
+	if err == nil {
+		delete(f.errs, key)
+		return
+	}
+	f.errs[key] = err
 }
 
 // CallCounts returns the number of times FetchResource and ListResources have
@@ -108,6 +125,7 @@ func (f *FakeProvider) Clear() {
 	}
 	f.resources = make(map[string]map[string]any)
 	f.relations = make(map[string][]source.RelatedResource)
+	f.errs = nil
 	f.fetchResourceCount = 0
 	f.listResourcesCount = 0
 }
@@ -210,6 +228,9 @@ func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResou
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchResourceCount++
+	if err := f.errs[params.ResourceType+"|"+params.ResourceID]; err != nil {
+		return source.FetchResourceResult{}, err
+	}
 	data, ok := f.resources[params.ResourceType+"|"+params.ResourceID]
 	if !ok {
 		return source.FetchResourceResult{}, nil
