@@ -1,5 +1,7 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> _Amended by [ADR 0008](0008-stale-mark-inline-builds-and-temporal-slow-lane.md): the at-least-once re-enqueue leg is now the stale mark + sweep instead of River retries; Build Sequence OCC and the drift check are unchanged._
+
 Multiple indexer instances run concurrently and there is no per-resource lock. Safety against racing rebuilds of the same Parent comes from three independent mechanisms:
 
 1. **Build Sequence as ES OCC ordering.** Every rebuild bumps a Postgres counter for the Resource and uses that value as Elasticsearch's `external_gte` version. Racing writes are commutative — ES keeps the highest sequence and rejects the rest.

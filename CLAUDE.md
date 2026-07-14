@@ -12,11 +12,12 @@ All Go commands require the `GOEXPERIMENT=jsonv2` flag (Go 1.26.1).
 # Run the application (from repo root)
 GOEXPERIMENT=jsonv2 go run ./app/cmd/indexer
 
-# Run all tests — unit tests only (no Docker needed)
-GOEXPERIMENT=jsonv2 go test ./core/... ./es/... ./app/server/... ./app/dsl/...
+# Run unit tests only (no Docker needed)
+GOEXPERIMENT=jsonv2 go test ./core/... ./app/server/... ./app/dsl/...
 
-# Run integration tests (requires Docker for testcontainers)
-GOEXPERIMENT=jsonv2 go test ./app/tests/...
+# Run integration tests (requires Docker for testcontainers):
+# storage/postgres, backend/elasticsearch, and app/tests all hit real infra
+GOEXPERIMENT=jsonv2 go test ./storage/... ./backend/... ./app/tests/...
 
 # Run all tests
 GOEXPERIMENT=jsonv2 go test ./...
@@ -38,43 +39,49 @@ This is a distributed search indexing engine that keeps Elasticsearch Documents 
 
 ### Module Structure
 
-The repo uses Go workspaces (`go.work`) with four modules:
+The repo uses Go workspaces (`go.work`) with three modules:
 
 | Module | Purpose |
 |--------|---------|
-| `.` (root) | Core library: `Indexer`, `SearchBackend` interface, `projection`, `es`, `model` |
+| `.` (root) | Core library: `Indexer`, worker pool, Temporal workflows, `SearchBackend`/`Store` interfaces, plus the `storage/postgres` and `backend/elasticsearch` implementation packages, `projection`, `model` |
 | `./app` | Standalone app: gRPC wiring (`server/`, `source/`), YAML DSL, entry points, tests |
 | `./aggregation` | Streaming aggregation pipeline execution |
-| `./storage/postgres` | Postgres `Store` implementation |
 
-**Library users** depend only on the root module (and aggregation/storage as needed).
+The Postgres `Store` and Elasticsearch `SearchBackend` implementations are plain
+packages inside the root module (see [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md));
+only `aggregation` and `app` remain separate modules.
+
+**Library users** depend on the root module (and `aggregation` as needed).
 **App users** use the `app` module which wires everything together.
 
 ### Core Data Flow
 
 1. gRPC client → `app/server` translates requests into `core.Notification`
 2. `core.Indexer.RegisterChange` updates Postgres state and finds affected Parent Resources via the Relation graph
-3. `core` enqueues River jobs (`build`, `delete`, `rebuild`)
-4. River workers call `Indexer.Build`
-5. A Build executes a `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend`, updates the Relation graph
+3. For every root (the changed Resource + affected Parents), `core` **marks it stale** in Postgres (`MarkStale`), then submits an **inline build** to a bounded in-process worker pool
+4. A build executes a `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend` with the Build Sequence as `external_gte`, updates the Relation graph, and clears the stale mark (`ClearStale`, guarded by the seq captured at `BeginBuild`)
+5. **Slow lane (Temporal):** the `StaleSweep` workflow (schedule `laika-stale-sweep`) rebuilds anything stale past a threshold; explicit rebuilds run as `RebuildWalk` workflows. Both live in `core` on the `laika-indexer` task queue. Temporal being down degrades recovery latency only — never hot-path throughput or correctness.
 
 Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBackend.Search`
 
 ### Key Interfaces (root module)
 
-- **`core.SearchBackend`** — implemented by `es.Client`; decouples Indexer from ES
-- **`core.Store`** — implemented by `storage/postgres`; Postgres relation graph
+- **`core.SearchBackend`** — implemented by `backend/elasticsearch`; decouples Indexer from ES
+- **`core.Store`** — implemented by `storage/postgres`; the relation graph plus stale-mark state (`MarkStale`, `MarkDeleted`, `BeginBuild`, `ClearStale`, `DeleteResourceIfSeq`, `ListStale`)
 - **`app/source.Provider`** — implemented by `app/source.GRPCProvider`; data fetcher used by DSL plans
+
+Both `Store` and `SearchBackend` have exactly one implementation each; the interfaces survive as test seams (unit tests mock them to avoid Docker), not as swap points.
 
 ### Key Packages
 
 | Package | Role |
 |---------|------|
-| `core/` | Orchestration: `Indexer`, workers, `SearchBackend` interface, `IndexName`/`AliasName` |
+| `core/` | Orchestration: `Indexer`, inline worker pool, Temporal `StaleSweep`/`RebuildWalk` workflows, `SearchBackend`/`Store` interfaces, `IndexName`/`AliasName` |
 | `core/resource/` | Resource/Schema-Version DSL types and validation |
 | `model/` | Primitive types (`Resource`, `VersionedResource`) |
 | `projection/` | `Plan` type and `BuildDoc` — the aggregation result flowing through Plans |
-| `es/` | `SearchBackend` implementation; mapping generation |
+| `storage/postgres/` | `Store` implementation: relation graph + stale-mark state (root-module package) |
+| `backend/elasticsearch/` | `SearchBackend` implementation; mapping generation (root-module package) |
 | `app/source/` | `Provider` interface + gRPC implementation |
 | `app/server/` | Thin gRPC adapters; translates proto ↔ core types |
 | `app/gen/` | Generated protobuf Go bindings — do not edit manually |
@@ -84,6 +91,9 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 
 ### Critical Invariants
 
+- **Mark stale before you build**: every build-triggering path (ingest fanout, drift-check re-build, ADR 0006 parent cascade) calls `MarkStale` in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
+- **Seq-guarded clear**: a build captures `stale_seq` at `BeginBuild` and clears (`ClearStale`) only if it is unchanged; a newer Notification that moved the counter leaves the row stale for its own build or the sweep. Never null `stale_since` unconditionally.
+- **At-least-once via mark + sweep**: durability is the stale mark plus the Temporal `StaleSweep`, not a job-queue retry count. A resource whose Type was removed from config stays stale forever (logged by the sweep) — this is a known limitation.
 - **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).
 - **Build Sequence drives OCC**: every ES write carries the Resource's Build Sequence (stored in `resources.build_idx`) sent as the `external_gte` version, so concurrent Builds and Rebuilds of the same Document land in counter order.
 - **Stale Version rejection**: a Notification with `Version > 0` enables drop-on-stale; `0` means always accept.
@@ -105,7 +115,7 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 
 ### Testing
 
-- Unit tests: `core/`, `es/`, `app/server/`, `app/dsl/` — no Docker needed
-- Integration tests: `app/tests/` — use testcontainers (Docker) for real Postgres + Elasticsearch
+- Unit tests: `core/`, `app/server/`, `app/dsl/` — no Docker needed (Store/SearchBackend mocked)
+- Integration tests: `storage/postgres/`, `backend/elasticsearch/`, `app/tests/` — use testcontainers (Docker) for real Postgres + Elasticsearch
 
 Any feature or behavior change must include tests.

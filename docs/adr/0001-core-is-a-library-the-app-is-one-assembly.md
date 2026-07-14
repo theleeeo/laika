@@ -1,5 +1,7 @@
 # Core is a library; the app is one assembly
 
+> _Amended by [ADR 0008](0008-stale-mark-inline-builds-and-temporal-slow-lane.md): the storage and search-backend implementations were folded into the core module, and Temporal became a core dependency; the core-as-library principle stands._
+
 The root module is a library that knows nothing about gRPC, YAML, or any specific data source. It accepts a set of `projection.Plan` values (which encapsulate data fetching) and an implementation of `core.SearchBackend` and `core.Store`, and runs the build/rebuild/relation-fanout loop on top of them. The `./app` module is one concrete assembly of that library: it parses YAML resource configs, constructs plans via the DSL in `app/dsl`, fetches via a gRPC `source.Provider`, and exposes the result over a gRPC API.
 
 We chose this split because there are two real consumers:

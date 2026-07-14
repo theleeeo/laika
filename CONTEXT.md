@@ -44,7 +44,19 @@ A message from an upstream service that a single Resource changed — carries Ty
 An executable that, given a Resource Type and ID (or no ID, for the listing case), produces the documents the indexer will write. Plans encapsulate all data fetching; the orchestrator only executes them. Each Schema Version of a resource has its own Plan.
 
 **Build**:
-The normal update path: produce and write the document for one or a few specific Resource IDs, respecting the Build Sequence OCC ordering. Triggered by a Notification, by the drift-check re-enqueue, or by another Build's downstream effect.
+The normal update path: produce and write the document for one or a few specific Resource IDs, respecting the Build Sequence OCC ordering. Triggered by a Notification, by the drift-check re-build, or by another Build's downstream effect. Every trigger first records a [[stale mark]] (durable intent), then attempts an [[inline build]] on the in-process pool; the guarantee is the mark, not the run.
+
+**Inline build**:
+A Build executed immediately on `core.Indexer`'s in-process bounded worker pool, right after the triggering change is marked stale. The accelerator, not the guarantee: it is allowed to shed (when the pool is saturated past its submit-wait budget), fail, or die, because the [[stale mark]] survives and the [[sweep]] will rebuild. Replaces the old job-queue hop between a Notification and its Build.
+
+**Stale mark**:
+The durable record of build intent on a resource row: a `stale_seq` counter bumped on every marking and a `stale_since` timestamp set to the oldest unserved change (`COALESCE(stale_since, now())`). Set before any [[inline build]] attempt, so no change is ever lost. Cleared only by a Build that captured the same `stale_seq` it started with — a newer change that moved the counter leaves the row stale for its own build or the [[sweep]]. Carries at-least-once: "a Build runs at least once for this change" is guaranteed by the mark plus the sweep, not by any retry queue.
+
+**Sweep**:
+A Temporal-scheduled recovery pass (`StaleSweep` workflow, schedule `laika-stale-sweep`) that rebuilds every resource whose [[stale mark]] has survived past a staleness threshold — including [[tombstone]]s awaiting cleanup. The safety net behind the [[inline build]]: crashes, shed builds, and failed builds all converge here. Runs on the shared `laika-indexer` task queue and relies on Build Sequence OCC for safety rather than locks.
+
+**Tombstone**:
+A resource row flagged `deleted = true` (with `version` reset to `0`) whose Elasticsearch documents and Relation edges are still being cleaned up. A delete-Notification marks the row rather than removing it, so a failed ES delete has something durable to retry; the hard delete of the row happens only after ES cleanup succeeds, guarded by the captured `stale_seq` so a concurrent re-create wins. The [[sweep]] retries lingering tombstones.
 
 **Rebuild**:
 The reset path: produce and write documents for one, many, or all Resources of a Type without honouring prior state. Used to populate a newly-added Schema Version, to recover from corruption, or to reset documents to a new shape. Always wins over any concurrent Build because it stamps a fresh Build Sequence.
