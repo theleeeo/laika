@@ -428,7 +428,10 @@ func (x *RebuildRequest) GetSelectors() []*ResourceSelector {
 }
 
 type RebuildResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// IDs of the Temporal RebuildWalk workflows started, one per selector.
+	// Operators can inspect/retry/cancel them in the Temporal UI.
+	WorkflowIds   []string `protobuf:"bytes,1,rep,name=workflow_ids,json=workflowIds,proto3" json:"workflow_ids,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -463,6 +466,13 @@ func (*RebuildResponse) Descriptor() ([]byte, []int) {
 	return file_index_v1_index_proto_rawDescGZIP(), []int{7}
 }
 
+func (x *RebuildResponse) GetWorkflowIds() []string {
+	if x != nil {
+		return x.WorkflowIds
+	}
+	return nil
+}
+
 var File_index_v1_index_proto protoreflect.FileDescriptor
 
 const file_index_v1_index_proto_rawDesc = "" +
@@ -489,8 +499,9 @@ const file_index_v1_index_proto_rawDesc = "" +
 	"\bversions\x18\x02 \x03(\x05R\bversions\x12!\n" +
 	"\fresource_ids\x18\x03 \x03(\tR\vresourceIds\"J\n" +
 	"\x0eRebuildRequest\x128\n" +
-	"\tselectors\x18\x01 \x03(\v2\x1a.index.v1.ResourceSelectorR\tselectors\"\x11\n" +
-	"\x0fRebuildResponse*t\n" +
+	"\tselectors\x18\x01 \x03(\v2\x1a.index.v1.ResourceSelectorR\tselectors\"4\n" +
+	"\x0fRebuildResponse\x12!\n" +
+	"\fworkflow_ids\x18\x01 \x03(\tR\vworkflowIds*t\n" +
 	"\n" +
 	"ChangeKind\x12\x1b\n" +
 	"\x17CHANGE_KIND_UNSPECIFIED\x10\x00\x12\x17\n" +

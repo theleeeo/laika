@@ -69,4 +69,8 @@ message ResourceSelector {
 
 message RebuildRequest { repeated ResourceSelector selectors = 1; }
 
-message RebuildResponse {}
+message RebuildResponse {
+  // IDs of the Temporal RebuildWalk workflows started, one per selector.
+  // Operators can inspect/retry/cancel them in the Temporal UI.
+  repeated string workflow_ids = 1;
+}
