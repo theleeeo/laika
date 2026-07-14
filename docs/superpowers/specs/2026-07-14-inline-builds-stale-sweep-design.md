@@ -26,14 +26,23 @@ build attempt. The pool is an accelerator; the sweep is the guarantee.
 
 ## Schema changes (`storage/postgres/pg_schema.sql`)
 
-```sql
-ALTER TABLE resources
-  ADD COLUMN stale_seq   BIGINT NOT NULL DEFAULT 0,
-  ADD COLUMN stale_since TIMESTAMPTZ,                -- NULL = clean
-  ADD COLUMN deleted     BOOLEAN NOT NULL DEFAULT false;
+The schema file is rewritten in place — no ALTER migration. Nothing outside
+testing uses the schema yet, so a breaking schema file is fine.
 
-CREATE INDEX idx_resources_stale ON resources (stale_since)
-  WHERE stale_since IS NOT NULL;
+```sql
+CREATE TABLE IF NOT EXISTS resources (
+    type VARCHAR NOT NULL,
+    id VARCHAR NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0,
+    build_idx BIGINT NOT NULL DEFAULT 0,
+    stale_seq BIGINT NOT NULL DEFAULT 0,
+    stale_since TIMESTAMPTZ,                -- NULL = clean
+    deleted BOOLEAN NOT NULL DEFAULT false,
+    UNIQUE (type, id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
+    WHERE stale_since IS NOT NULL;
 ```
 
 - **Marking stale:** `stale_seq = stale_seq + 1, stale_since =
