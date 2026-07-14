@@ -32,7 +32,11 @@ timeout or shutdown as success (the row stays stale for the sweep). This covers:
   rejection is unchanged), and Parent discovery via the Relation graph, the
   changed Resource and every affected Parent are marked and submitted. Fanout now
   marks Parents stale too, which strictly improves on the old model: a Parent
-  build lost to River retry exhaustion was unrecoverable; now it is swept.
+  build lost to River retry exhaustion was unrecoverable; now it is swept. The
+  version upsert and the stale mark are separate statements, though, not one
+  transaction: a crash between them leaves the version durably bumped but the
+  resource unmarked, so that change is not swept — it recovers only when the
+  next Notification for the same resource arrives and marks it.
 - **The drift-check re-build** — the [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md)
   convergence signal for a concurrent Child update during the edge-less window.
 - **The [ADR 0006](./0006-reverse-relation-discovery-bootstraps-parent-edges.md)
@@ -78,8 +82,10 @@ the `laika-indexer` task queue. There is one implementation of the safety net.
 - **`StaleSweep`** — driven by a Temporal Schedule (id `laika-stale-sweep`,
   default interval 1m, overlap policy *skip*). Its single activity, `SweepStale`,
   calls `ListStale` for resources where `stale_since < now() - threshold`
-  (tombstones included), runs each through the existing build/delete path in
-  batches, and returns the count; the workflow loops until a sweep returns 0.
+  (tombstones included), runs up to `BatchSize` of them through the existing
+  build/delete path per pass, and returns the count; the workflow keeps
+  executing passes until one returns fewer than `BatchSize`, capped at 100
+  passes per run so a pathological backlog can't run the workflow forever.
   Core exposes an idempotent schedule-upsert that the app calls at startup with
   the `sweep.*` values from `indexer.yml`. Multiple instances poll the same task
   queue and Temporal places each activity on one of them; no advisory lock is
@@ -129,7 +135,13 @@ and gets swept. That is the whole of the crash-recovery design.
 - **Known limitation.** A resource whose Type has been removed from the config
   can never be rebuilt, so its stale mark lives forever. The sweep logs each such
   resource it cannot dispatch rather than clearing it; cleanup is an operator
-  action, not something the sweep does silently.
+  action, not something the sweep does silently. Because `ListStale` serves
+  oldest-first with a fixed batch limit, once these permanently-un-buildable
+  rows number at least one full batch they fill every sweep pass and newer
+  stale resources behind them are never reached — removing a Type while its
+  rows are still stale can stall sweep recovery for everything else. The
+  intended follow-up is for the sweep to skip past rows it cannot dispatch
+  instead of re-fetching them at the head of every pass.
 
 **Implication for contributors:** never submit a build without marking the row
 stale first — the mark is the durability, the pool is only the accelerator, and
