@@ -23,6 +23,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.temporal.io/sdk/client"
 )
 
 func main() {
@@ -85,12 +86,37 @@ func main() {
 
 	plans := dsl.BuildPlansFromConfig(sourceProvider, resources)
 
-	idx := core.New(core.Config{
-		Plans:     plans,
-		Resources: resources,
-		ES:        esClientImpl,
-		Store:     st,
+	temporalClient, err := client.Dial(client.Options{
+		HostPort:  cfg.Temporal.HostPort,
+		Namespace: cfg.Temporal.Namespace,
 	})
+	if err != nil {
+		log.Fatalf("temporal dial: %v", err)
+	}
+	defer temporalClient.Close()
+
+	idx := core.New(core.Config{
+		Plans:      plans,
+		Resources:  resources,
+		ES:         esClientImpl,
+		Store:      st,
+		Temporal:   temporalClient,
+		TaskQueue:  cfg.Temporal.TaskQueue,
+		PoolSize:   cfg.Pool.Size,
+		SubmitWait: cfg.Pool.SubmitWait,
+	})
+
+	w := idx.NewWorker()
+	if err := w.Start(); err != nil {
+		log.Fatalf("temporal worker start: %v", err)
+	}
+
+	if err := idx.EnsureSweepSchedule(context.Background(), cfg.Sweep.Interval, core.SweepParams{
+		Threshold: cfg.Sweep.Threshold,
+		BatchSize: cfg.Sweep.BatchSize,
+	}); err != nil {
+		log.Fatalf("ensure sweep schedule: %v", err)
+	}
 
 	idxSrv := server.NewIndexer(idx)
 	searchSrv := server.NewSearcher(idx)
@@ -150,8 +176,8 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Ask River and the HTTP server to stop gracefully; cancelling ctx would
-	// force an immediate stop.
+	// Ask the HTTP servers to stop gracefully; cancelling ctx would force an
+	// immediate stop.
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCancel()
 
@@ -163,10 +189,12 @@ func main() {
 		log.Printf("admin HTTP server shutdown error: %v", err)
 	}
 
-	// Drain the inline build pool; unfinished work stays stale for the sweep.
+	// Drain in-flight inline builds; anything unfinished stays stale and is
+	// recovered by the sweep.
 	if err := idx.Shutdown(stopCtx); err != nil {
-		log.Printf("indexer shutdown error: %v", err)
+		log.Printf("indexer drain: %v", err)
 	}
+	w.Stop()
 
 	wg.Wait()
 }

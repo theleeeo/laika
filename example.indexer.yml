@@ -10,6 +10,14 @@
 #   pg.addr          -> PG_ADDR
 #   provider.addr    -> PROVIDER_ADDR
 #   resource_config_path -> RESOURCE_CONFIG_PATH
+#   temporal.host_port  -> TEMPORAL_HOST_PORT
+#   temporal.namespace  -> TEMPORAL_NAMESPACE
+#   temporal.task_queue -> TEMPORAL_TASK_QUEUE
+#   sweep.interval      -> SWEEP_INTERVAL
+#   sweep.threshold     -> SWEEP_THRESHOLD
+#   sweep.batch_size    -> SWEEP_BATCH_SIZE
+#   pool.size           -> POOL_SIZE
+#   pool.submit_wait    -> POOL_SUBMIT_WAIT
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -39,3 +47,22 @@ resource_config_path: "resources.yml"
 # Set to debug to trace the full search path, including reference resolution.
 log:
   level: info
+
+# Temporal drives the durable slow lane: the StaleSweep schedule and
+# RebuildWalk workflows. The hot path (inline builds) works without it,
+# but recovery and explicit rebuilds require the cluster.
+temporal:
+  host_port: "localhost:7233"
+  namespace: "default"
+  task_queue: "laika-indexer"
+
+# The sweep rebuilds resources whose stale mark is older than threshold.
+sweep:
+  interval: "1m"
+  threshold: "5m"
+  batch_size: 500
+
+# Bounded in-process pool for inline builds.
+pool:
+  size: 10
+  submit_wait: "250ms"

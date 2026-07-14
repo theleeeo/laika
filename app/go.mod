@@ -17,6 +17,7 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.40.0
 	github.com/theleeeo/laika v0.0.0-20260623091421-91ce70bc8f97
 	github.com/theleeeo/laika/aggregation v0.0.0-20260623091421-91ce70bc8f97
+	go.temporal.io/sdk v1.46.0
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 )

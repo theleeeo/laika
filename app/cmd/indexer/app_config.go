@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -23,6 +24,14 @@ import (
 //	provider.addr       → PROVIDER_ADDR
 //	resource_config_path → RESOURCE_CONFIG_PATH
 //	log.level           → LOG_LEVEL
+//	temporal.host_port  → TEMPORAL_HOST_PORT
+//	temporal.namespace  → TEMPORAL_NAMESPACE
+//	temporal.task_queue → TEMPORAL_TASK_QUEUE
+//	sweep.interval      → SWEEP_INTERVAL
+//	sweep.threshold     → SWEEP_THRESHOLD
+//	sweep.batch_size    → SWEEP_BATCH_SIZE
+//	pool.size           → POOL_SIZE
+//	pool.submit_wait    → POOL_SUBMIT_WAIT
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -30,6 +39,9 @@ type appConfig struct {
 	Provider           providerConfig `mapstructure:"provider"`
 	ResourceConfigPath string         `mapstructure:"resource_config_path"`
 	Log                logConfig      `mapstructure:"log"`
+	Temporal           temporalConfig `mapstructure:"temporal"`
+	Sweep              sweepConfig    `mapstructure:"sweep"`
+	Pool               poolConfig     `mapstructure:"pool"`
 }
 
 type logConfig struct {
@@ -60,6 +72,27 @@ type providerConfig struct {
 	Addr string `mapstructure:"addr"`
 }
 
+type temporalConfig struct {
+	HostPort  string `mapstructure:"host_port"`
+	Namespace string `mapstructure:"namespace"`
+	TaskQueue string `mapstructure:"task_queue"`
+}
+
+type sweepConfig struct {
+	// Interval between StaleSweep schedule firings.
+	Interval time.Duration `mapstructure:"interval"`
+	// Threshold: only resources stale longer than this are swept.
+	Threshold time.Duration `mapstructure:"threshold"`
+	BatchSize int           `mapstructure:"batch_size"`
+}
+
+type poolConfig struct {
+	// Size bounds concurrent inline builds.
+	Size int `mapstructure:"size"`
+	// SubmitWait before shedding an inline build to the sweep.
+	SubmitWait time.Duration `mapstructure:"submit_wait"`
+}
+
 // loadAppConfig reads the config file at configFilePath (if present) and
 // overlays any env var overrides. Missing config file is not an error.
 func loadAppConfig(configFilePath string) (appConfig, error) {
@@ -80,6 +113,14 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("provider.addr", "")
 	v.SetDefault("resource_config_path", "resources.yml")
 	v.SetDefault("log.level", "info")
+	v.SetDefault("temporal.host_port", "localhost:7233")
+	v.SetDefault("temporal.namespace", "default")
+	v.SetDefault("temporal.task_queue", "laika-indexer")
+	v.SetDefault("sweep.interval", "1m")
+	v.SetDefault("sweep.threshold", "5m")
+	v.SetDefault("sweep.batch_size", 500)
+	v.SetDefault("pool.size", 10)
+	v.SetDefault("pool.submit_wait", "250ms")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadAppConfigFromFile(t *testing.T) {
@@ -62,6 +63,38 @@ resource_config_path: "resources.from.file.yml"
 	}
 	if cfg.ResourceConfigPath != "resources.from.file.yml" {
 		t.Fatalf("ResourceConfigPath mismatch: got %q", cfg.ResourceConfigPath)
+	}
+}
+
+func TestLoadAppConfig_Defaults(t *testing.T) {
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+
+	if cfg.Temporal.HostPort != "localhost:7233" {
+		t.Errorf("temporal.host_port default: %q", cfg.Temporal.HostPort)
+	}
+	if cfg.Temporal.Namespace != "default" {
+		t.Errorf("temporal.namespace default: %q", cfg.Temporal.Namespace)
+	}
+	if cfg.Temporal.TaskQueue != "laika-indexer" {
+		t.Errorf("temporal.task_queue default: %q", cfg.Temporal.TaskQueue)
+	}
+	if cfg.Sweep.Interval != time.Minute {
+		t.Errorf("sweep.interval default: %v", cfg.Sweep.Interval)
+	}
+	if cfg.Sweep.Threshold != 5*time.Minute {
+		t.Errorf("sweep.threshold default: %v", cfg.Sweep.Threshold)
+	}
+	if cfg.Sweep.BatchSize != 500 {
+		t.Errorf("sweep.batch_size default: %d", cfg.Sweep.BatchSize)
+	}
+	if cfg.Pool.Size != 10 {
+		t.Errorf("pool.size default: %d", cfg.Pool.Size)
+	}
+	if cfg.Pool.SubmitWait != 250*time.Millisecond {
+		t.Errorf("pool.submit_wait default: %v", cfg.Pool.SubmitWait)
 	}
 }
 
