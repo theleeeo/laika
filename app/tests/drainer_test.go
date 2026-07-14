@@ -3,43 +3,18 @@ package tests
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
+	"github.com/theleeeo/laika/core"
 )
 
-// riverDrainer provides a Drain() helper for tests that waits until River
-// has no pending/running/scheduled/retryable jobs.
-type riverDrainer struct {
-	client *river.Client[pgx.Tx]
-	pool   *pgxpool.Pool
+// drainer waits until the indexer's inline build pool has fully settled —
+// including cascaded parent builds and drift re-builds.
+type drainer struct {
+	idx *core.Indexer
 }
 
-// Drain polls the river_job table until no non-terminal jobs remain.
-// It returns when the queue is quiescent or the context is cancelled.
-func (d *riverDrainer) Drain(ctx context.Context) {
-	const q = `SELECT count(*) FROM river_job
-	           WHERE state IN ('available','running','scheduled','retryable','pending')`
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		var n int
-		if err := d.pool.QueryRow(ctx, q).Scan(&n); err != nil {
-			// The schema may not exist yet in some setups; treat as drained.
-			panic(fmt.Errorf("river drain query: %w", err))
-		}
-		if n == 0 {
-			return
-		}
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(25 * time.Millisecond):
-		}
+func (d *drainer) Drain(ctx context.Context) {
+	if err := d.idx.WaitForIdle(ctx); err != nil {
+		panic(fmt.Errorf("wait for idle: %w", err))
 	}
 }

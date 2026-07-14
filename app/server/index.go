@@ -103,7 +103,7 @@ func (s *IndexerServer) Rebuild(ctx context.Context, req *connect.Request[index.
 		}
 	}
 
-	if err := s.idx.Rebuild(ctx, selectors); err != nil {
+	if err := s.idx.RebuildNow(ctx, selectors); err != nil {
 		return nil, mapAppError(err)
 	}
 

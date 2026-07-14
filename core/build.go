@@ -9,6 +9,19 @@ import (
 	"github.com/theleeeo/laika/projection"
 )
 
+type BuildArgs struct {
+	ResourceType string            `json:"resource_type"`
+	ResourceIds  []string          `json:"resource_ids,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
+type RebuildArgs struct {
+	ResourceType string            `json:"resource_type"`
+	Versions     []int             `json:"versions"`
+	ResourceIDs  []string          `json:"resource_ids,omitempty"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
+}
+
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
@@ -28,9 +41,10 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 			return ctx.Err()
 		}
 
-		occVersion, err := idx.st.NextRebuildCounter(ctx, model.Resource{Type: params.ResourceType, Id: id})
+		res := model.Resource{Type: params.ResourceType, Id: id}
+		occVersion, staleSeq, err := idx.st.BeginBuild(ctx, res)
 		if err != nil {
-			logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 			continue
 		}
@@ -39,6 +53,14 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, occVersion); err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
+			continue
+		}
+
+		// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
+		// including buildOne's own drift re-mark, which must survive this clear.
+		if err := idx.st.ClearStale(ctx, res, staleSeq); err != nil {
+			logger.Warn("clear stale failed; sweep may rebuild redundantly",
+				slog.String("id", id), slog.String("error", err.Error()))
 		}
 	}
 
@@ -110,17 +132,9 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return fmt.Errorf("persist relations for %s/%s: %w", resourceType, resourceID, err)
 	}
 
-	// Reverse-relation discovery: bootstrap Parent edges for a brand-new Child.
-	//
-	// The Child just built may not yet appear in a Parent that should include
-	// it, because no Parent→Child edge has ever been persisted — so the
-	// RegisterChange fanout could not reach the Parent. The Plan derived the
-	// affected Parents from the Child's own fetched data onto the BuildDoc;
-	// enqueue their Builds. Each Parent Build re-establishes the edge, so
-	// subsequent Child updates are found via GetParentResources without this
-	// path. See ADR 0006.
-	// TODO: Will there be a double enqueue now for all Parents that already have the edge? Should we check for existing edges first?
-	if err := idx.enqueueParents(ctx, builtDoc.Parents, metadata); err != nil {
+	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
+	// Parents the Plan derived from the Child's own data.
+	if err := idx.scheduleBuild(ctx, builtDoc.Parents, metadata); err != nil {
 		return err
 	}
 
@@ -141,31 +155,9 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType),
 				slog.String("id", resourceID),
 			)
-			if _, err := idx.river.Insert(ctx, BuildArgs{
-				ResourceType: resourceType,
-				ResourceIds:  []string{resourceID},
-				Metadata:     metadata,
-			}, nil); err != nil {
-				return fmt.Errorf("re-enqueue after drift for %s/%s: %w", resourceType, resourceID, err)
+			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
+				return fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
-		}
-	}
-
-	return nil
-}
-
-// enqueueParents enqueues a Build for each Parent the Plan derived from the
-// built Child document. The enqueued Builds run normally — carrying their own
-// Build Sequence for ES OCC and re-running the drift check — and are idempotent
-// under the at-least-once contract, so re-emitting a Parent Build is safe.
-func (idx *Indexer) enqueueParents(ctx context.Context, parents []model.Resource, metadata map[string]string) error {
-	for _, parent := range parents {
-		if _, err := idx.river.Insert(ctx, BuildArgs{
-			ResourceType: parent.Type,
-			ResourceIds:  []string{parent.Id},
-			Metadata:     metadata,
-		}, nil); err != nil {
-			return fmt.Errorf("enqueue parent build %s/%s: %w", parent.Type, parent.Id, err)
 		}
 	}
 
@@ -188,6 +180,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 	}
 
 	resourceRelations := make(map[string][]model.VersionedResource)
+	staleSeqs := make(map[string]int64)
 	var items []BulkItem
 	var failed int
 
@@ -204,12 +197,13 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			continue
 		}
 
-		occVersion, err := idx.st.NextRebuildCounter(ctx, root)
+		occVersion, staleSeq, err := idx.st.BeginBuild(ctx, root)
 		if err != nil {
-			logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 			continue
 		}
+		staleSeqs[id] = staleSeq
 
 		skipRelations := false
 		for _, plan := range plans {
@@ -282,6 +276,10 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		if err := idx.st.AddChildResources(ctx, model.Resource{Type: params.ResourceType, Id: id}, plain); err != nil {
 			logger.Warn("failed to persist relations", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
+			continue
+		}
+		if err := idx.st.ClearStale(ctx, model.Resource{Type: params.ResourceType, Id: id}, staleSeqs[id]); err != nil {
+			logger.Warn("clear stale failed", slog.String("id", id), slog.String("error", err.Error()))
 		}
 	}
 
@@ -300,6 +298,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs) error {
 	resourceRelations := make(map[string][]model.VersionedResource)
 	cleaned := make(map[string]bool)
 	occVersions := make(map[string]int64)
+	staleSeqs := make(map[string]int64)
 
 	var items []BulkItem
 	var failed int
@@ -333,14 +332,15 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs) error {
 						continue
 					}
 
-					occVersion, err := idx.st.NextRebuildCounter(ctx, doc.Root)
+					occVersion, staleSeq, err := idx.st.BeginBuild(ctx, doc.Root)
 					if err != nil {
-						logger.Warn("failed to increment rebuild counter", slog.String("id", id), slog.String("error", err.Error()))
+						logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 						failed++
 						continue
 					}
 
 					occVersions[id] = occVersion
+					staleSeqs[id] = staleSeq
 					cleaned[id] = true
 				}
 
@@ -369,6 +369,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs) error {
 		if err := idx.st.AddChildResources(ctx, model.Resource{Type: params.ResourceType, Id: id}, plain); err != nil {
 			logger.Warn("failed to persist relations", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
+			continue
+		}
+		if err := idx.st.ClearStale(ctx, model.Resource{Type: params.ResourceType, Id: id}, staleSeqs[id]); err != nil {
+			logger.Warn("clear stale failed", slog.String("id", id), slog.String("error", err.Error()))
 		}
 	}
 

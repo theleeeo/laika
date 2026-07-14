@@ -1,11 +1,10 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/riverqueue/river"
+	"time"
 
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/projection"
@@ -40,11 +39,13 @@ type Config struct {
 	// Store is the PostgreSQL relation-graph store.
 	Store Store
 
-	// RiverClient is the River job queue client for enqueuing rebuild/delete
-	// and full-rebuild jobs. It may be left nil at construction and assigned
-	// later via [Indexer.SetRiverClient]; this lets callers wire workers
-	// that reference the Indexer before the client is created.
-	RiverClient *river.Client[pgx.Tx]
+	// PoolSize bounds the number of concurrent inline builds. Default 10.
+	PoolSize int
+
+	// SubmitWait is how long a caller waits for a free build slot before
+	// shedding the inline build and leaving the resource stale for the
+	// sweep. Default 250ms.
+	SubmitWait time.Duration
 
 	// SearchMiddlewares wrap the search path. They run outermost-first in
 	// registration order: []{A, B} executes A → B → the Indexer's own
@@ -72,7 +73,8 @@ type Indexer struct {
 
 	plans map[string][]projection.Plan
 
-	river *river.Client[pgx.Tx]
+	pool       *buildPool
+	submitWait time.Duration
 
 	resources resource.Configs
 
@@ -88,15 +90,31 @@ type Indexer struct {
 
 }
 
+const (
+	defaultPoolSize   = 10
+	defaultSubmitWait = 250 * time.Millisecond
+)
+
 // New creates a new Indexer with the given configuration.
 func New(cfg Config) *Indexer {
 	idx := &Indexer{
 		st:        cfg.Store,
 		es:        cfg.ES,
-		river:     cfg.RiverClient,
 		resources: cfg.Resources,
 		plans:     cfg.Plans,
 	}
+
+	poolSize := cfg.PoolSize
+	if poolSize <= 0 {
+		poolSize = defaultPoolSize
+	}
+	submitWait := cfg.SubmitWait
+	if submitWait <= 0 {
+		submitWait = defaultSubmitWait
+	}
+	idx.pool = newBuildPool(poolSize)
+	idx.submitWait = submitWait
+
 	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+2)
 	mws = append(mws, cfg.SearchMiddlewares...) // user middleware runs first (outermost); nothing precedes it
 	mws = append(mws, idx.deriveNestedPath)     // fill NestedPath for denormalized-many relation fields, before referenceResolve strips reference filters
@@ -107,11 +125,17 @@ func New(cfg Config) *Indexer {
 	return idx
 }
 
-// SetRiverClient assigns the River client used to enqueue jobs. It is
-// intended for the wiring sequence where workers (which reference the
-// Indexer) must be constructed before the River client itself.
-func (idx *Indexer) SetRiverClient(c *river.Client[pgx.Tx]) {
-	idx.river = c
+// Shutdown stops accepting inline work and waits for in-flight builds until
+// ctx ends. Unfinished work stays stale and is recovered by the sweep.
+func (idx *Indexer) Shutdown(ctx context.Context) error {
+	return idx.pool.shutdown(ctx)
+}
+
+// WaitForIdle blocks until the inline pool has fully settled, including
+// cascaded parent builds and drift re-builds. Intended for tests and
+// embedders that need a quiescence point.
+func (idx *Indexer) WaitForIdle(ctx context.Context) error {
+	return idx.pool.waitIdle(ctx)
 }
 
 // SetPlans replaces the aggregation plans and resource configuration.

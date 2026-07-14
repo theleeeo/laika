@@ -23,9 +23,6 @@ import (
 	"connectrpc.com/grpcreflect"
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivermigrate"
 )
 
 func main() {
@@ -80,16 +77,6 @@ func main() {
 
 	st := postgres.NewStore(dbpool)
 
-	// Apply River migrations before starting the client.
-	riverDriver := riverpgxv5.New(dbpool)
-	migrator, err := rivermigrate.New(riverDriver, nil)
-	if err != nil {
-		log.Fatalf("river migrator: %v", err)
-	}
-	if _, err := migrator.Migrate(context.Background(), rivermigrate.DirectionUp, nil); err != nil {
-		log.Fatalf("apply river migrations: %v", err)
-	}
-
 	sourceProvider, err := source.NewGRPCProvider(cfg.Provider.Addr)
 	if err != nil {
 		log.Fatalf("connect to provider plugin: %v", err)
@@ -104,20 +91,6 @@ func main() {
 		ES:        esClientImpl,
 		Store:     st,
 	})
-
-	workers := river.NewWorkers()
-	core.RegisterWorkers(workers, idx)
-
-	riverClient, err := river.NewClient(riverDriver, &river.Config{
-		Queues: map[string]river.QueueConfig{
-			river.QueueDefault: {MaxWorkers: 10},
-		},
-		Workers: workers,
-	})
-	if err != nil {
-		log.Fatalf("river client: %v", err)
-	}
-	idx.SetRiverClient(riverClient)
 
 	idxSrv := server.NewIndexer(idx)
 	searchSrv := server.NewSearcher(idx)
@@ -152,19 +125,6 @@ func main() {
 
 	wg := sync.WaitGroup{}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	wg.Go(func() {
-		log.Printf("starting river client")
-		if err := riverClient.Start(ctx); err != nil {
-			log.Printf("river client start error: %v", err)
-			return
-		}
-		<-riverClient.Stopped()
-		log.Printf("river client stopped")
-	})
-
 	wg.Go(func() {
 		log.Printf("public HTTP server (search) listening on %s", cfg.GRPC.PublicAddr)
 		if err := publicSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -195,7 +155,7 @@ func main() {
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer stopCancel()
 
-	// Stop accepting new requests first, then drain River jobs.
+	// Stop accepting new requests first, then drain in-flight inline builds.
 	if err := publicSrv.Shutdown(stopCtx); err != nil {
 		log.Printf("public HTTP server shutdown error: %v", err)
 	}
@@ -203,11 +163,10 @@ func main() {
 		log.Printf("admin HTTP server shutdown error: %v", err)
 	}
 
-	if err := riverClient.Stop(stopCtx); err != nil {
-		log.Printf("river client stop error: %v", err)
+	// Drain the inline build pool; unfinished work stays stale for the sweep.
+	if err := idx.Shutdown(stopCtx); err != nil {
+		log.Printf("indexer shutdown error: %v", err)
 	}
-
-	cancel()
 
 	wg.Wait()
 }

@@ -43,15 +43,11 @@ func (s *cancellingStore) AddRelations(context.Context, []Relation) error { retu
 func (s *cancellingStore) AnyResourceVersionDrifted(context.Context, []model.VersionedResource) (bool, error) {
 	return false, nil
 }
-func (s *cancellingStore) DeleteResource(context.Context, model.Resource) error { return nil }
 func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }
 func (s *cancellingStore) GetParentResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
-}
-func (s *cancellingStore) NextRebuildCounter(context.Context, model.Resource) (int64, error) {
-	return 1, nil
 }
 func (s *cancellingStore) UpsertResource(context.Context, model.Resource, int64) error { return nil }
 

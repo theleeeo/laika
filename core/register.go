@@ -9,26 +9,30 @@ import (
 )
 
 // RegisterChange handles a single change notification from a source service.
-// It determines which root search documents are affected and enqueues
-// rebuild (or delete) jobs for each.
+// It durably records the change and its affected roots (upsert/tombstone plus
+// stale marks), then opportunistically builds them inline on the pool. Marks
+// always land before the build attempt, so anything shed or lost to a crash is
+// recovered by the stale sweep. See ADR 0008.
 func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 	if err := idx.verifyResourceConfig(n); err != nil {
 		return err
 	}
 
-	// Track the resource itself in the resources table.
 	res := model.Resource{Type: n.ResourceType, Id: n.ResourceID}
+
+	var deleteSeq int64
 	if n.Kind == ChangeDeleted {
-		if err := idx.st.DeleteResource(ctx, res); err != nil {
-			return fmt.Errorf("delete resource %s/%s: %w", n.ResourceType, n.ResourceID, err)
+		seq, err := idx.st.MarkDeleted(ctx, res)
+		if err != nil {
+			return fmt.Errorf("mark deleted %s/%s: %w", n.ResourceType, n.ResourceID, err)
 		}
+		deleteSeq = seq
 	} else {
 		if err := idx.st.UpsertResource(ctx, res, n.Version); err != nil {
 			return fmt.Errorf("upsert resource %s/%s: %w", n.ResourceType, n.ResourceID, err)
 		}
 	}
 
-	// Determine which parents are affected.
 	parents, err := idx.st.GetParentResources(ctx, res)
 	if err != nil {
 		return fmt.Errorf("getting parents: %w", err)
@@ -45,30 +49,17 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 	roots = append(roots, parents...)
 
 	if n.Kind == ChangeDeleted {
-		if _, err := idx.river.Insert(ctx, DeleteArgs{
-			ResourceType: n.ResourceType,
-			ResourceID:   n.ResourceID,
-			Metadata:     n.Metadata,
-		}, nil); err != nil {
-			return fmt.Errorf("enqueueing delete for root %s|%s: %w", n.ResourceType, n.ResourceID, err)
+		if !idx.pool.trySubmit(ctx, idx.submitWait, func(taskCtx context.Context) {
+			idx.deleteOne(taskCtx, res, deleteSeq)
+		}) {
+			slog.Info("pool saturated; tombstone left for sweep",
+				slog.String("type", res.Type), slog.String("id", res.Id))
 		}
 	} else {
 		roots = append(roots, res)
 	}
 
-	idsByType := groupResourceIDsByType(roots)
-
-	for resourceType, resourceIDs := range idsByType {
-		if _, err := idx.river.Insert(ctx, BuildArgs{
-			ResourceType: resourceType,
-			ResourceIds:  resourceIDs,
-			Metadata:     n.Metadata,
-		}, nil); err != nil {
-			return fmt.Errorf("enqueueing rebuild for root type %s with %d ids: %w", resourceType, len(resourceIDs), err)
-		}
-	}
-
-	return nil
+	return idx.scheduleBuild(ctx, roots, n.Metadata)
 }
 
 func groupResourceIDsByType(roots []model.Resource) map[string][]string {

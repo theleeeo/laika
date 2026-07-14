@@ -131,8 +131,11 @@ func (t *TestSuite) Test_Resource_CRUD_OneIndex() {
 			Kind:         core.ChangeDeleted,
 		})
 		t.Require().NoError(err)
-		t.Require().False(t.resourceTracked("a", "1"))
 		t.worker.Drain(t.T().Context())
+		// Delete is mark-first: MarkDeleted tombstones the row (deleted=true) and
+		// the inline deleteOne hard-deletes it only after the build pool runs, so
+		// the row is gone once the pool has drained.
+		t.Require().False(t.resourceTracked("a", "1"))
 
 		resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
 		t.Require().NoError(err)
@@ -412,7 +415,7 @@ func (t *TestSuite) Test_Rebuild_SpecificIDs() {
 
 	// Rebuild only resource "1".
 	t.fakeProvider.ResetCallCounts()
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a", ResourceIDs: []string{"1"}},
 	})
 	t.Require().NoError(err)
@@ -459,7 +462,7 @@ func (t *TestSuite) Test_Rebuild_FewIDs() {
 	}
 
 	t.fakeProvider.ResetCallCounts()
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a", ResourceIDs: []string{"1", "2"}},
 	})
 	t.Require().NoError(err)
@@ -509,7 +512,7 @@ func (t *TestSuite) Test_Rebuild_MixedSelectors() {
 	t.worker.Drain(t.T().Context())
 
 	t.fakeProvider.ResetCallCounts()
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a", ResourceIDs: []string{"1", "2"}},
 		{ResourceType: "b"},
 	})
@@ -559,7 +562,7 @@ func (t *TestSuite) Test_Rebuild_All() {
 	})
 
 	// Rebuild all — empty ResourceIDs triggers the plan's ListResources path.
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a"},
 	})
 	t.Require().NoError(err)
@@ -591,7 +594,7 @@ func (t *TestSuite) Test_Rebuild_All() {
 func (t *TestSuite) Test_Rebuild_UnknownResource() {
 	t.setResourceConfig(DefaultResourceConfig)
 
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "nonexistent"},
 	})
 	t.Require().Error(err)
@@ -611,7 +614,7 @@ func (t *TestSuite) Test_Rebuild_WithRelations() {
 	t.fakeProvider.SetResource("b", "b1", map[string]any{"id": "b1", "field1": "bval"})
 
 	// Rebuild a/1 via the rebuild API (specific ID).
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a", ResourceIDs: []string{"1"}},
 	})
 	t.Require().NoError(err)
@@ -641,7 +644,7 @@ func (t *TestSuite) Test_Rebuild_All_WithRelations() {
 	t.fakeProvider.SetResource("b", "b1", map[string]any{"id": "b1", "field1": "bval"})
 
 	// Rebuild all a resources.
-	err := t.idx.Rebuild(t.T().Context(), []core.ResourceSelector{
+	err := t.idx.RebuildNow(t.T().Context(), []core.ResourceSelector{
 		{ResourceType: "a"},
 	})
 	t.Require().NoError(err)
@@ -661,7 +664,7 @@ func (t *TestSuite) Test_Rebuild_All_WithRelations() {
 func (t *TestSuite) Test_Rebuild_EmptySelectors() {
 	t.setResourceConfig(DefaultResourceConfig)
 
-	err := t.idx.Rebuild(t.T().Context(), nil)
+	err := t.idx.RebuildNow(t.T().Context(), nil)
 	t.Require().Error(err)
 }
 
@@ -800,8 +803,10 @@ func (t *TestSuite) Test_VersionControl() {
 			Version:      1, // stale version, but should not matter for deletes
 		})
 		t.Require().NoError(err)
-		t.Require().False(t.resourceTracked("a", "1"))
 		t.worker.Drain(t.T().Context())
+		// Mark-first delete: the tombstone is hard-deleted by the inline
+		// deleteOne once the pool drains.
+		t.Require().False(t.resourceTracked("a", "1"))
 	})
 }
 
@@ -1080,7 +1085,7 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 // every child.
 //
 // Concurrent Builds of the same parent are ordered only by their Build Sequence,
-// which is assigned at build start (NextRebuildCounter), NOT in Notification
+// which is assigned at build start (BeginBuild), NOT in Notification
 // order. So the Build that wins the ES OCC race is whichever grabs the counter
 // last, independent of which child update was logically latest. Convergence
 // therefore does not rely on the "right" Build winning; it relies on every Build

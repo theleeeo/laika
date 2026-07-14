@@ -35,3 +35,18 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload) error {
 	logger.Info("deleted document")
 	return nil
 }
+
+// deleteOne removes the resource's documents and edges, then hard-deletes the
+// tombstoned row if no newer change arrived. Failures are logged, not
+// returned: the tombstone stays stale and the sweep retries it.
+func (idx *Indexer) deleteOne(ctx context.Context, res model.Resource, staleSeq int64) {
+	if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}); err != nil {
+		slog.Warn("inline delete failed; tombstone remains for sweep",
+			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+		return
+	}
+	if err := idx.st.DeleteResourceIfSeq(ctx, res, staleSeq); err != nil {
+		slog.Warn("tombstone cleanup failed; sweep will retry",
+			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+	}
+}

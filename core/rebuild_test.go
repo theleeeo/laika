@@ -31,7 +31,7 @@ func testResources() resource.Configs {
 func TestRebuild_EmptySelectors(t *testing.T) {
 	idx := New(Config{Resources: testResources()})
 
-	err := idx.Rebuild(context.Background(), nil)
+	err := idx.RebuildNow(context.Background(), nil)
 
 	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
 	if !ok {
@@ -45,7 +45,7 @@ func TestRebuild_EmptySelectors(t *testing.T) {
 func TestRebuild_UnknownResourceType(t *testing.T) {
 	idx := New(Config{Resources: testResources()})
 
-	err := idx.Rebuild(context.Background(), []ResourceSelector{
+	err := idx.RebuildNow(context.Background(), []ResourceSelector{
 		{ResourceType: "nonexistent"},
 	})
 	if !errors.Is(err, ErrUnknownResource) {
@@ -56,7 +56,7 @@ func TestRebuild_UnknownResourceType(t *testing.T) {
 func TestRebuild_InvalidVersion(t *testing.T) {
 	idx := New(Config{Resources: testResources()})
 
-	err := idx.Rebuild(context.Background(), []ResourceSelector{
+	err := idx.RebuildNow(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{99}},
 	})
 	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
@@ -82,7 +82,7 @@ func TestRebuild_MultiVersionValidation(t *testing.T) {
 	idx := New(Config{Resources: cfgs})
 
 	// Version 3 does not exist.
-	err := idx.Rebuild(context.Background(), []ResourceSelector{
+	err := idx.RebuildNow(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{3}},
 	})
 	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
@@ -94,7 +94,7 @@ func TestRebuild_MultiVersionValidation(t *testing.T) {
 	}
 
 	// Mix of valid and invalid versions: should still fail.
-	err = idx.Rebuild(context.Background(), []ResourceSelector{
+	err = idx.RebuildNow(context.Background(), []ResourceSelector{
 		{ResourceType: "product", Versions: []int{1, 99}},
 	})
 	invalidArg, ok = errors.AsType[*InvalidArgumentError](err)
@@ -117,7 +117,7 @@ func TestRebuild_MultipleSelectorsValidation(t *testing.T) {
 	idx := New(Config{Resources: cfgs})
 
 	// First selector valid, second invalid.
-	err := idx.Rebuild(context.Background(), []ResourceSelector{
+	err := idx.RebuildNow(context.Background(), []ResourceSelector{
 		{ResourceType: "product"},
 		{ResourceType: "nonexistent"},
 	})

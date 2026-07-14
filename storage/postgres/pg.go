@@ -107,26 +107,6 @@ func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, ch
 	return s.AddRelations(ctx, relations)
 }
 
-// NextRebuildCounter atomically increments and returns the rebuild counter for
-// a root resource. The returned value is used as the ES external version for
-// OCC so older writes are rejected.
-func (s *Store) NextRebuildCounter(ctx context.Context, resource model.Resource) (int64, error) {
-	var counter int64
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO resources (type, id, build_idx)
-		 VALUES ($1, $2, 1)
-		 ON CONFLICT (type, id) DO UPDATE
-		 SET build_idx = resources.build_idx + 1
-		 RETURNING build_idx`,
-		resource.Type, resource.Id,
-	).Scan(&counter)
-	if err != nil {
-		return 0, err
-	}
-
-	return counter, nil
-}
-
 // UpsertResource inserts or updates the resource in the resources table.
 // When version is 0, the resource is inserted without version control (existing
 // rows are left unchanged). When version > 0, the resource is only inserted or
@@ -195,16 +175,6 @@ func (s *Store) AnyResourceVersionDrifted(ctx context.Context, observed []model.
 		return false, err
 	}
 	return true, nil
-}
-
-// DeleteResource removes a resource from the resources table.
-func (s *Store) DeleteResource(ctx context.Context, resource model.Resource) error {
-	_, err := s.pool.Exec(ctx,
-		`DELETE FROM resources WHERE type=$1 AND id=$2`,
-		resource.Type, resource.Id,
-	)
-
-	return err
 }
 
 // MarkStale durably records build intent for the given resources: bump

@@ -24,9 +24,6 @@ import (
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/riverqueue/river"
-	"github.com/riverqueue/river/riverdriver/riverpgxv5"
-	"github.com/riverqueue/river/rivermigrate"
 	"github.com/stretchr/testify/suite"
 	"github.com/testcontainers/testcontainers-go"
 	esContainer "github.com/testcontainers/testcontainers-go/modules/elasticsearch"
@@ -288,8 +285,7 @@ type TestSuite struct {
 
 	idx *core.Indexer
 
-	cancelWorker context.CancelFunc
-	worker       *riverDrainer
+	worker *drainer
 
 	fakeProvider *FakeProvider
 	st           *postgres.Store
@@ -489,60 +485,24 @@ func (t *TestSuite) SetupSuite() {
 		t.T().Fatalf("failed to apply schema: %v", err)
 	}
 
-	// Apply River migrations.
-	riverDriver := riverpgxv5.New(dbpool)
-	migrator, err := rivermigrate.New(riverDriver, nil)
-	if err != nil {
-		t.T().Fatalf("failed to create river migrator: %v", err)
-	}
-	if _, err := migrator.Migrate(t.T().Context(), rivermigrate.DirectionUp, nil); err != nil {
-		t.T().Fatalf("failed to apply river migrations: %v", err)
-	}
-
 	t.st = postgres.NewStore(dbpool)
 	t.fakeProvider = NewFakeProvider()
 
 	plans := dsl.BuildPlansFromConfig(t.fakeProvider, DefaultResourceConfig)
 
 	t.idx = core.New(core.Config{
-		Plans:     plans,
-		Resources: DefaultResourceConfig,
-		ES:        elasticsearch.New(esClient, true),
-		Store:     t.st,
+		Plans:      plans,
+		Resources:  DefaultResourceConfig,
+		ES:         elasticsearch.New(esClient, true),
+		Store:      t.st,
+		PoolSize:   10,
+		SubmitWait: 30 * time.Second,
 	})
 
-	workers := river.NewWorkers()
-	core.RegisterWorkers(workers, t.idx)
-
-	riverClient, err := river.NewClient(riverDriver, &river.Config{
-		Queues: map[string]river.QueueConfig{
-			river.QueueDefault: {MaxWorkers: 10},
-		},
-		Workers: workers,
-	})
-	if err != nil {
-		t.T().Fatalf("failed to create river client: %v", err)
-	}
-	t.idx.SetRiverClient(riverClient)
-
-	t.worker = &riverDrainer{client: riverClient, pool: dbpool}
-
-	workerCtx, cancelWorker := context.WithCancel(context.Background())
-	t.cancelWorker = cancelWorker
-	if err := riverClient.Start(workerCtx); err != nil {
-		t.T().Fatalf("failed to start river client: %v", err)
-	}
+	t.worker = &drainer{idx: t.idx}
 }
 
 func (t *TestSuite) TearDownSuite() {
-	t.cancelWorker()
-
-	stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	if err := t.worker.client.Stop(stopCtx); err != nil {
-		log.Printf("failed to stop river client: %s", err)
-	}
-
 	if err := testcontainers.TerminateContainer(t.esContainer); err != nil {
 		log.Printf("failed to terminate elasticsearch container: %s", err)
 	}
