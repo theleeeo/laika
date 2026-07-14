@@ -8,6 +8,7 @@ import (
 
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/projection"
+	"go.temporal.io/sdk/client"
 )
 
 var (
@@ -54,6 +55,16 @@ type Config struct {
 	// modify the SearchResponse. The chain is composed once at construction.
 	SearchMiddlewares []SearchMiddleware
 
+	// Temporal is the Temporal client used for the durable slow lane:
+	// RebuildWalk workflows and the StaleSweep schedule. Required for any
+	// deployment; construction does not nil-check so search-only tests can
+	// omit it, but Rebuild/NewWorker/EnsureSweepSchedule will panic without it.
+	Temporal client.Client
+
+	// TaskQueue is the Temporal task queue for the Indexer's workflows.
+	// Default DefaultTaskQueue.
+	TaskQueue string
+
 	// FederatedSearchMiddlewares wrap the federated search path, independently
 	// of SearchMiddlewares — neither chain ever runs on the other path. They
 	// run outermost-first in registration order: []{A, B} executes A → B → the
@@ -75,6 +86,9 @@ type Indexer struct {
 
 	pool       *buildPool
 	submitWait time.Duration
+
+	temporal  client.Client
+	taskQueue string
 
 	resources resource.Configs
 
@@ -114,6 +128,13 @@ func New(cfg Config) *Indexer {
 	}
 	idx.pool = newBuildPool(poolSize)
 	idx.submitWait = submitWait
+
+	taskQueue := cfg.TaskQueue
+	if taskQueue == "" {
+		taskQueue = DefaultTaskQueue
+	}
+	idx.temporal = cfg.Temporal
+	idx.taskQueue = taskQueue
 
 	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+2)
 	mws = append(mws, cfg.SearchMiddlewares...) // user middleware runs first (outermost); nothing precedes it

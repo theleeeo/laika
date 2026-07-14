@@ -3,6 +3,8 @@ package core
 import (
 	"context"
 	"fmt"
+
+	"go.temporal.io/sdk/client"
 )
 
 // ResourceSelector identifies a set of resources and versions to rebuild.
@@ -29,6 +31,26 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 		}
 	}
 	return nil
+}
+
+// Rebuild validates the selectors and starts one durable RebuildWalk workflow
+// per selector, returning the workflow IDs (inspect/retry/cancel in the
+// Temporal UI).
+func (idx *Indexer) Rebuild(ctx context.Context, selectors []ResourceSelector) ([]string, error) {
+	if err := idx.validateSelectors(selectors); err != nil {
+		return nil, err
+	}
+	workflowIDs := make([]string, 0, len(selectors))
+	for _, sel := range selectors {
+		run, err := idx.temporal.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+			TaskQueue: idx.taskQueue,
+		}, rebuildWalkWorkflowName, sel)
+		if err != nil {
+			return workflowIDs, fmt.Errorf("start rebuild workflow for %s: %w", sel.ResourceType, err)
+		}
+		workflowIDs = append(workflowIDs, run.GetID())
+	}
+	return workflowIDs, nil
 }
 
 func (idx *Indexer) validateSelectors(selectors []ResourceSelector) error {

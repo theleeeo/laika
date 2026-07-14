@@ -103,9 +103,10 @@ func (s *IndexerServer) Rebuild(ctx context.Context, req *connect.Request[index.
 		}
 	}
 
-	if err := s.idx.RebuildNow(ctx, selectors); err != nil {
+	workflowIDs, err := s.idx.Rebuild(ctx, selectors)
+	if err != nil {
 		return nil, mapAppError(err)
 	}
 
-	return connect.NewResponse(&index.RebuildResponse{}), nil
+	return connect.NewResponse(&index.RebuildResponse{WorkflowIds: workflowIDs}), nil
 }

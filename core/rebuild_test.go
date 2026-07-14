@@ -5,7 +5,10 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core/resource"
+	"go.temporal.io/sdk/mocks"
 )
 
 func testResources() resource.Configs {
@@ -26,6 +29,32 @@ func testResources() resource.Configs {
 		c.ApplyDefaults()
 	}
 	return cfgs
+}
+
+func TestRebuild_StartsOneWorkflowPerSelector(t *testing.T) {
+	mockRun := &mocks.WorkflowRun{}
+	mockRun.On("GetID").Return("wf-1")
+	mockClient := &mocks.Client{}
+	mockClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RebuildWalk", mock.Anything).
+		Return(mockRun, nil).Once()
+
+	idx := New(Config{Resources: testResources(), Temporal: mockClient})
+
+	ids, err := idx.Rebuild(context.Background(), []ResourceSelector{{ResourceType: "product"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"wf-1"}, ids)
+	mockClient.AssertExpectations(t)
+}
+
+func TestRebuild_ValidationFailure_StartsNoWorkflow(t *testing.T) {
+	mockClient := &mocks.Client{} // no expectations: any ExecuteWorkflow call fails the test
+	idx := New(Config{Resources: testResources(), Temporal: mockClient})
+
+	_, err := idx.Rebuild(context.Background(), nil)
+	invalidArg, ok := errors.AsType[*InvalidArgumentError](err)
+	require.True(t, ok, "expected InvalidArgumentError, got %v", err)
+	require.Equal(t, "at least one selector is required", invalidArg.Msg)
+	mockClient.AssertExpectations(t)
 }
 
 func TestRebuild_EmptySelectors(t *testing.T) {
