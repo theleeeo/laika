@@ -93,6 +93,32 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 	}
 }
 
+func TestMarkStale_BatchWithDuplicates(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	dup := model.Resource{Type: "msd", Id: "dup"}
+	other := model.Resource{Type: "msd", Id: "other"}
+
+	// One batch where dup appears TWICE: must not error (ON CONFLICT DO UPDATE
+	// cannot affect the same row twice in one statement without deduping).
+	if err := st.MarkStale(ctx, []model.Resource{dup, other, dup}); err != nil {
+		t.Fatalf("MarkStale with duplicate resources in one batch: %v", err)
+	}
+
+	_, _, dupSeq, dupSince, _ := row(t, dup)
+	if dupSeq != 1 {
+		t.Fatalf("duplicated resource must count as ONE logical mark: stale_seq=%d", dupSeq)
+	}
+	if dupSince == nil {
+		t.Fatal("duplicated resource must have stale_since set")
+	}
+
+	_, _, otherSeq, otherSince, _ := row(t, other)
+	if otherSeq != 1 || otherSince == nil {
+		t.Fatalf("other resource wrong: seq=%d since=%v", otherSeq, otherSince)
+	}
+}
+
 func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)

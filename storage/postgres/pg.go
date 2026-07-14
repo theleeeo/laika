@@ -222,7 +222,7 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource) error
 	}
 	_, err := s.pool.Exec(ctx,
 		`INSERT INTO resources (type, id, stale_seq, stale_since)
-		 SELECT t, i, 1, now() FROM unnest($1::text[], $2::text[]) AS x(t, i)
+		 SELECT DISTINCT t, i, 1, now() FROM unnest($1::text[], $2::text[]) AS x(t, i)
 		 ON CONFLICT (type, id) DO UPDATE
 		 SET stale_seq = resources.stale_seq + 1,
 		     stale_since = COALESCE(resources.stale_since, now())`,
