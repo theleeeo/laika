@@ -3,6 +3,7 @@ module github.com/theleeeo/laika
 go 1.26.1
 
 require (
+	github.com/elastic/go-elasticsearch/v8 v8.15.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/riverqueue/river v0.35.0
 	github.com/stretchr/testify v1.11.1

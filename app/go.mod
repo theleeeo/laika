@@ -17,8 +17,6 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.40.0
 	github.com/theleeeo/laika v0.0.0-20260623091421-91ce70bc8f97
 	github.com/theleeeo/laika/aggregation v0.0.0-20260623091421-91ce70bc8f97
-	github.com/theleeeo/laika/backend/elasticsearch v0.0.0-00010101000000-000000000000
-	github.com/theleeeo/laika/storage/postgres v0.0.0-20260623091421-91ce70bc8f97
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
 )
@@ -104,5 +102,3 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/theleeeo/laika/backend/elasticsearch => ../backend/elasticsearch
