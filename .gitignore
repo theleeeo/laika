@@ -10,3 +10,5 @@ tmp/
 
 *indexer.yml
 !example.indexer.yml
+
+go.work*
