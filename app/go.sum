@@ -123,16 +123,6 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 h1:Jamvg5psRIccs7FGNTlIRMkT8wgtp5eCXdBlqhYGL6U=
 github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c h1:ncq/mPwQF4JjgDlrVEn3C11VoGHZN7m8qihwgMEtzYw=
 github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c/go.mod h1:OmDBASR4679mdNQnz2pUhc2G8CO2JrUAVFDRBDP/hJE=
-github.com/riverqueue/river v0.35.0 h1:ERjFYsrCTGIQb8zdGZDegXmCNtsZ2f38Mh/1pm8s+7s=
-github.com/riverqueue/river v0.35.0/go.mod h1:BhQ6qtWT5ngvHcZByD86GB6wFbFmWuovkqwp5Ybuw+g=
-github.com/riverqueue/river/riverdriver v0.35.0 h1:g23GXp2ukQBzFAjHoqEqU9/nvDBVNugvFSzDeh9QnDA=
-github.com/riverqueue/river/riverdriver v0.35.0/go.mod h1:cg2DXFxovACcMKMDO7VwvMJt7/FfQD5ZvD19o7q+27g=
-github.com/riverqueue/river/riverdriver/riverpgxv5 v0.35.0 h1:ifGnwXjFujv87RV1P7Q3RQRmMhZPgoyB4Y7Q3cwQAv8=
-github.com/riverqueue/river/riverdriver/riverpgxv5 v0.35.0/go.mod h1:zUy67OVHoXfeOktxmQqlgqL9q/otBaUrwKuRm0PwHl8=
-github.com/riverqueue/river/rivershared v0.35.0 h1:8l0nemUfKvG51GhsjPAyhPVNw/Nej3xIbOZ9np/G0aY=
-github.com/riverqueue/river/rivershared v0.35.0/go.mod h1:m6UB4lGgbwi8ikuKniISDJ/U+BvQYtNAtZwb90G85Wk=
-github.com/riverqueue/river/rivertype v0.35.0 h1:0SvJQB5GvSkGAyLLtUbtd9Fre7yuEpuzOtRNncvtj2Y=
-github.com/riverqueue/river/rivertype v0.35.0/go.mod h1:D1Ad+EaZiaXbQbJcJcfeicXJMBKno0n6UcfKI5Q7DIQ=
 github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=

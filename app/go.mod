@@ -8,8 +8,6 @@ require (
 	github.com/elastic/go-elasticsearch/v8 v8.15.0
 	github.com/goccy/go-yaml v1.19.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/riverqueue/river v0.35.0
-	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.35.0
 	github.com/spf13/viper v1.20.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.40.0
@@ -68,9 +66,6 @@ require (
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
-	github.com/riverqueue/river/riverdriver v0.35.0 // indirect
-	github.com/riverqueue/river/rivershared v0.35.0 // indirect
-	github.com/riverqueue/river/rivertype v0.35.0 // indirect
 	github.com/sagikazarmark/locafero v0.7.0 // indirect
 	github.com/shirou/gopsutil/v4 v4.25.6 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
