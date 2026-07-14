@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -13,7 +12,6 @@ import (
 // loses to a crash is recovered by the stale sweep. See ADR 0008.
 type buildPool struct {
 	sem     chan struct{}
-	wg      sync.WaitGroup
 	pending atomic.Int64
 	closed  atomic.Bool
 
@@ -53,18 +51,26 @@ func (p *buildPool) trySubmit(ctx context.Context, wait time.Duration, task func
 		return false
 	}
 
+	// Register the task BEFORE re-checking closed. shutdown sets closed and
+	// then drains by waiting for pending to reach zero, so this ordering is
+	// what makes the drain cover concurrently-accepted submits: a submit that
+	// incremented pending before shutdown's drain read is awaited (it either
+	// runs its task or undoes itself just below), and a submit that
+	// increments after shutdown set closed must observe closed here and
+	// reject. Incrementing only after this recheck would leave a window where
+	// shutdown sees pending==0 and returns while an accepted task is still
+	// about to start.
+	p.pending.Add(1)
 	if p.closed.Load() {
+		p.pending.Add(-1)
 		<-p.sem
 		return false
 	}
 
-	p.pending.Add(1)
-	p.wg.Add(1)
 	go func() {
 		defer func() {
 			<-p.sem
 			p.pending.Add(-1)
-			p.wg.Done()
 		}()
 		task(p.baseCtx)
 	}()
@@ -89,19 +95,16 @@ func (p *buildPool) waitIdle(ctx context.Context) error {
 
 // shutdown stops accepting work and waits for in-flight tasks until ctx ends,
 // then cancels any stragglers. Unfinished work stays stale and is swept.
+//
+// Draining is pending-based rather than WaitGroup-based on purpose: trySubmit
+// registers in pending before its closed recheck, so once closed is set,
+// pending hitting zero proves every accepted task has finished. A WaitGroup
+// with the same register-before-recheck ordering would instead risk
+// wg.Add(1) racing a blocked wg.Wait at counter zero — the documented
+// "Add called concurrently with Wait" misuse, which panics.
 func (p *buildPool) shutdown(ctx context.Context) error {
 	p.closed.Store(true)
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-		p.cancel()
-		return nil
-	case <-ctx.Done():
-		p.cancel()
-		return ctx.Err()
-	}
+	err := p.waitIdle(ctx)
+	p.cancel()
+	return err
 }

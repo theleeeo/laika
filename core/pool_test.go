@@ -89,3 +89,32 @@ func TestPool_ShutdownDrainsAndRejects(t *testing.T) {
 		t.Fatal("submit after shutdown must be rejected")
 	}
 }
+
+// Regression: a submit racing shutdown must never be accepted without the
+// task completing before shutdown returns. The first task holds the pool's
+// only slot so the racing submit sits in the semaphore handoff — the exact
+// window where an accepted task could previously start after shutdown had
+// already "drained". Every interleaving is legal except accepted-but-not-run.
+func TestPool_ShutdownRace_AcceptedSubmitAlwaysDrained(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		p := newBuildPool(1)
+		release := make(chan struct{})
+		if !p.trySubmit(context.Background(), time.Second, func(context.Context) { <-release }) {
+			t.Fatal("first submit must succeed")
+		}
+		var ran atomic.Bool
+		accepted := make(chan bool, 1)
+		go func() {
+			accepted <- p.trySubmit(context.Background(), 50*time.Millisecond, func(context.Context) {
+				ran.Store(true)
+			})
+		}()
+		close(release)
+		if err := p.shutdown(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if <-accepted && !ran.Load() {
+			t.Fatalf("iteration %d: trySubmit returned true but shutdown returned before the task completed", i)
+		}
+	}
+}
