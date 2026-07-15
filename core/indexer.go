@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/projection"
@@ -43,10 +42,10 @@ type Config struct {
 	// PoolSize bounds the number of concurrent inline builds. Default 10.
 	PoolSize int
 
-	// SubmitWait is how long a caller waits for a free build slot before
-	// shedding the inline build and leaving the resource stale for the
-	// sweep. Default 250ms.
-	SubmitWait time.Duration
+	// QueueSize bounds the number of accepted-but-not-yet-running inline
+	// builds. Submission never blocks: a full queue sheds immediately,
+	// leaving the resource stale for the sweep. Default 10 × PoolSize.
+	QueueSize int
 
 	// SearchMiddlewares wrap the search path. They run outermost-first in
 	// registration order: []{A, B} executes A → B → the Indexer's own
@@ -84,8 +83,7 @@ type Indexer struct {
 
 	plans map[string][]projection.Plan
 
-	pool       *buildPool
-	submitWait time.Duration
+	pool *buildPool
 
 	temporal  client.Client
 	taskQueue string
@@ -104,10 +102,7 @@ type Indexer struct {
 
 }
 
-const (
-	defaultPoolSize   = 10
-	defaultSubmitWait = 250 * time.Millisecond
-)
+const defaultPoolSize = 10
 
 // New creates a new Indexer with the given configuration.
 func New(cfg Config) *Indexer {
@@ -122,12 +117,11 @@ func New(cfg Config) *Indexer {
 	if poolSize <= 0 {
 		poolSize = defaultPoolSize
 	}
-	submitWait := cfg.SubmitWait
-	if submitWait <= 0 {
-		submitWait = defaultSubmitWait
+	queueSize := cfg.QueueSize
+	if queueSize <= 0 {
+		queueSize = poolSize * 10
 	}
-	idx.pool = newBuildPool(poolSize)
-	idx.submitWait = submitWait
+	idx.pool = newBuildPool(poolSize, queueSize)
 
 	taskQueue := cfg.TaskQueue
 	if taskQueue == "" {

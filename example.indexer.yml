@@ -17,7 +17,7 @@
 #   sweep.threshold     -> SWEEP_THRESHOLD
 #   sweep.batch_size    -> SWEEP_BATCH_SIZE
 #   pool.size           -> POOL_SIZE
-#   pool.submit_wait    -> POOL_SUBMIT_WAIT
+#   pool.queue_size     -> POOL_QUEUE_SIZE
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -62,7 +62,9 @@ sweep:
   threshold: "5m"
   batch_size: 500
 
-# Bounded in-process pool for inline builds.
+# Bounded in-process pool for inline builds. size is the number of persistent
+# workers; queue_size bounds accepted-but-not-yet-running builds — a full
+# queue sheds new submissions to the sweep.
 pool:
   size: 10
-  submit_wait: "250ms"
+  queue_size: 100

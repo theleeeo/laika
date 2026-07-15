@@ -86,7 +86,7 @@ func (s *recordingStore) UpsertResource(_ context.Context, r model.Resource, v i
 	return nil
 }
 
-func newHotPathIndexer(st Store, poolSize int, submitWait time.Duration) *Indexer {
+func newHotPathIndexer(st Store, poolSize, queueSize int) *Indexer {
 	doc := projection.BuildDoc{
 		Root: model.Resource{Type: "product", Id: "1"},
 		Doc:  map[string]any{"fields": map[string]any{"title": "t"}},
@@ -97,15 +97,15 @@ func newHotPathIndexer(st Store, poolSize int, submitWait time.Duration) *Indexe
 			"product": {{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{doc}}}},
 		},
 		ES:         &fakeBackend{},
-		Store:      st,
-		PoolSize:   poolSize,
-		SubmitWait: submitWait,
+		Store:     st,
+		PoolSize:  poolSize,
+		QueueSize: queueSize,
 	})
 }
 
 func TestRegisterChange_MarksStaleBeforeBuilding_ThenClears(t *testing.T) {
 	st := &recordingStore{}
-	idx := newHotPathIndexer(st, 2, time.Second)
+	idx := newHotPathIndexer(st, 2, 4)
 
 	err := idx.RegisterChange(context.Background(), Notification{
 		ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated, Version: 1,
@@ -131,12 +131,17 @@ func TestRegisterChange_MarksStaleBeforeBuilding_ThenClears(t *testing.T) {
 
 func TestRegisterChange_PoolSaturated_ShedsButReturnsSuccess(t *testing.T) {
 	st := &recordingStore{}
-	idx := newHotPathIndexer(st, 1, 20*time.Millisecond)
+	idx := newHotPathIndexer(st, 1, 1)
 
-	// Occupy the only slot.
+	// Occupy the only worker, then fill the queue's single slot.
 	block := make(chan struct{})
-	if !idx.pool.trySubmit(context.Background(), time.Second, func(context.Context) { <-block }) {
+	started := make(chan struct{})
+	if !idx.pool.trySubmit(func(context.Context) { close(started); <-block }) {
 		t.Fatal("failed to occupy pool")
+	}
+	<-started
+	if !idx.pool.trySubmit(func(context.Context) {}) {
+		t.Fatal("failed to fill queue")
 	}
 
 	err := idx.RegisterChange(context.Background(), Notification{
@@ -157,7 +162,7 @@ func TestRegisterChange_PoolSaturated_ShedsButReturnsSuccess(t *testing.T) {
 
 func TestRegisterChange_Delete_TombstonesAndRunsInlineDelete(t *testing.T) {
 	st := &recordingStore{}
-	idx := newHotPathIndexer(st, 2, time.Second)
+	idx := newHotPathIndexer(st, 2, 4)
 
 	err := idx.RegisterChange(context.Background(), Notification{
 		ResourceType: "product", ResourceID: "1", Kind: ChangeDeleted,
@@ -180,7 +185,7 @@ func TestRegisterChange_Delete_TombstonesAndRunsInlineDelete(t *testing.T) {
 func TestBuildOne_Drift_RemarksStale_SoGuardedClearIsNoop(t *testing.T) {
 	st := &recordingStore{}
 	st.drift.Store(true) // first drift check reports drift
-	idx := newHotPathIndexer(st, 2, time.Second)
+	idx := newHotPathIndexer(st, 2, 4)
 
 	// Plan must emit relations for the drift check to run.
 	doc := projection.BuildDoc{

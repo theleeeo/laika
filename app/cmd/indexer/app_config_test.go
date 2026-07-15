@@ -93,8 +93,8 @@ func TestLoadAppConfig_Defaults(t *testing.T) {
 	if cfg.Pool.Size != 10 {
 		t.Errorf("pool.size default: %d", cfg.Pool.Size)
 	}
-	if cfg.Pool.SubmitWait != 250*time.Millisecond {
-		t.Errorf("pool.submit_wait default: %v", cfg.Pool.SubmitWait)
+	if cfg.Pool.QueueSize != 100 {
+		t.Errorf("pool.queue_size default: %d", cfg.Pool.QueueSize)
 	}
 }
 

@@ -23,7 +23,7 @@ func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource, m
 
 	for resourceType, ids := range groupResourceIDsByType(roots) {
 		args := BuildArgs{ResourceType: resourceType, ResourceIds: ids, Metadata: metadata}
-		submitted := idx.pool.trySubmit(ctx, idx.submitWait, func(taskCtx context.Context) {
+		submitted := idx.pool.trySubmit(func(taskCtx context.Context) {
 			if err := idx.Build(taskCtx, args); err != nil {
 				slog.Warn("inline build failed; resources remain stale for sweep",
 					slog.String("type", args.ResourceType),

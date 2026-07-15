@@ -49,7 +49,7 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
 	roots = append(roots, parents...)
 
 	if n.Kind == ChangeDeleted {
-		if !idx.pool.trySubmit(ctx, idx.submitWait, func(taskCtx context.Context) {
+		if !idx.pool.trySubmit(func(taskCtx context.Context) {
 			idx.deleteOne(taskCtx, res, deleteSeq)
 		}) {
 			slog.Info("pool saturated; tombstone left for sweep",

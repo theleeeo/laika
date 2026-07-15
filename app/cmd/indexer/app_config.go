@@ -31,7 +31,7 @@ import (
 //	sweep.threshold     → SWEEP_THRESHOLD
 //	sweep.batch_size    → SWEEP_BATCH_SIZE
 //	pool.size           → POOL_SIZE
-//	pool.submit_wait    → POOL_SUBMIT_WAIT
+//	pool.queue_size     → POOL_QUEUE_SIZE
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -89,8 +89,9 @@ type sweepConfig struct {
 type poolConfig struct {
 	// Size bounds concurrent inline builds.
 	Size int `mapstructure:"size"`
-	// SubmitWait before shedding an inline build to the sweep.
-	SubmitWait time.Duration `mapstructure:"submit_wait"`
+	// QueueSize bounds accepted-but-not-yet-running inline builds; a full
+	// queue sheds new submissions to the sweep.
+	QueueSize int `mapstructure:"queue_size"`
 }
 
 // loadAppConfig reads the config file at configFilePath (if present) and
@@ -120,7 +121,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("sweep.threshold", "5m")
 	v.SetDefault("sweep.batch_size", 500)
 	v.SetDefault("pool.size", 10)
-	v.SetDefault("pool.submit_wait", "250ms")
+	v.SetDefault("pool.queue_size", 100)
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {

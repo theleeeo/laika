@@ -516,8 +516,9 @@ func (t *TestSuite) SetupSuite() {
 		Resources:  DefaultResourceConfig,
 		ES:         elasticsearch.New(esClient, true),
 		Store:      t.st,
-		PoolSize:   10,
-		SubmitWait: 30 * time.Second,
+		PoolSize: 10,
+		// Large enough that the suite never sheds a build to the sweep.
+		QueueSize: 1000,
 	})
 
 	t.worker = &drainer{idx: t.idx}

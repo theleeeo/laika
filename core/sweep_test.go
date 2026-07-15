@@ -29,7 +29,7 @@ func TestSweepStale_RebuildsMarksAndFinishesTombstones(t *testing.T) {
 			{Resource: model.Resource{Type: "product", Id: "gone"}, StaleSeq: 9, Deleted: true},
 		},
 	}
-	idx := newHotPathIndexer(st, 2, time.Second)
+	idx := newHotPathIndexer(st, 2, 4)
 
 	n, err := idx.SweepStale(context.Background(), 5*time.Minute, 100)
 	if err != nil {
@@ -48,7 +48,7 @@ func TestSweepStale_RebuildsMarksAndFinishesTombstones(t *testing.T) {
 
 func TestSweepStale_EmptyBacklog(t *testing.T) {
 	st := &staleListingStore{}
-	idx := newHotPathIndexer(st, 2, time.Second)
+	idx := newHotPathIndexer(st, 2, 4)
 	n, err := idx.SweepStale(context.Background(), time.Minute, 100)
 	if err != nil || n != 0 {
 		t.Fatalf("got n=%d err=%v", n, err)

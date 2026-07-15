@@ -103,7 +103,7 @@ func main() {
 		Temporal:   temporalClient,
 		TaskQueue:  cfg.Temporal.TaskQueue,
 		PoolSize:   cfg.Pool.Size,
-		SubmitWait: cfg.Pool.SubmitWait,
+		QueueSize:  cfg.Pool.QueueSize,
 	})
 
 	w := idx.NewWorker()
