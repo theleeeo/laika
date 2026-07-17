@@ -179,8 +179,10 @@ func (s *Store) AnyResourceVersionDrifted(ctx context.Context, observed []model.
 
 // MarkStale durably records build intent for the given resources: bump
 // stale_seq and set stale_since — keeping the OLDEST timestamp, so
-// "stale for too long" measures the oldest unserved change.
-func (s *Store) MarkStale(ctx context.Context, resources []model.Resource) error {
+// "stale for too long" measures the oldest unserved change. The notification
+// metadata is stored alongside the mark (last mark wins) so a sweep-recovered
+// build runs with the same context an inline build would have.
+func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error {
 	if len(resources) == 0 {
 		return nil
 	}
@@ -191,12 +193,13 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource) error
 		ids[i] = r.Id
 	}
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO resources (type, id, stale_seq, stale_since)
-		 SELECT DISTINCT t, i, 1, now() FROM unnest($1::text[], $2::text[]) AS x(t, i)
+		`INSERT INTO resources (type, id, stale_seq, stale_since, metadata)
+		 SELECT DISTINCT t, i, 1, now(), $3::jsonb FROM unnest($1::text[], $2::text[]) AS x(t, i)
 		 ON CONFLICT (type, id) DO UPDATE
 		 SET stale_seq = resources.stale_seq + 1,
-		     stale_since = COALESCE(resources.stale_since, now())`,
-		types, ids,
+		     stale_since = COALESCE(resources.stale_since, now()),
+		     metadata = EXCLUDED.metadata`,
+		types, ids, metadata,
 	)
 	return err
 }
@@ -262,10 +265,11 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 }
 
 // ListStale returns up to limit resources whose stale mark is older than
-// before, oldest first, including delete tombstones.
+// before, oldest first, including delete tombstones. Each entry carries the
+// metadata stored by its most recent MarkStale.
 func (s *Store) ListStale(ctx context.Context, before time.Time, limit int) ([]core.StaleResource, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT type, id, stale_seq, deleted FROM resources
+		`SELECT type, id, stale_seq, deleted, metadata FROM resources
 		 WHERE stale_since IS NOT NULL AND stale_since < $1
 		 ORDER BY stale_since
 		 LIMIT $2`,
@@ -279,7 +283,7 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int) ([]c
 	var out []core.StaleResource
 	for rows.Next() {
 		var e core.StaleResource
-		if err := rows.Scan(&e.Type, &e.Id, &e.StaleSeq, &e.Deleted); err != nil {
+		if err := rows.Scan(&e.Type, &e.Id, &e.StaleSeq, &e.Deleted, &e.Metadata); err != nil {
 			return nil, err
 		}
 		out = append(out, e)

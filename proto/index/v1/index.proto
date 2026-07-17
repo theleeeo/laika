@@ -65,6 +65,11 @@ message ResourceSelector {
   string resource_type = 1;
   repeated int32 versions = 2;
   repeated string resource_ids = 3;
+
+  // Arbitrary caller-provided metadata forwarded to every provider call the
+  // rebuild makes, exactly like ChangeNotification.metadata on the ingest
+  // path (for example tenant or trigger identifiers).
+  map<string, string> metadata = 4;
 }
 
 message RebuildRequest { repeated ResourceSelector selectors = 1; }

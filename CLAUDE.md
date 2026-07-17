@@ -91,7 +91,7 @@ Both `Store` and `SearchBackend` have exactly one implementation each; the inter
 
 ### Critical Invariants
 
-- **Mark stale before you build**: every build-triggering path (ingest fanout, drift-check re-build, ADR 0006 parent cascade) calls `MarkStale` in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
+- **Mark stale before you build**: every build-triggering path (ingest fanout, drift-check re-build, ADR 0006 parent cascade) calls `MarkStale` in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. The mark also stores the notification's metadata (last mark wins), which the sweep replays into the recovering build. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
 - **Seq-guarded clear**: a build captures `stale_seq` at `BeginBuild` and clears (`ClearStale`) only if it is unchanged; a newer Notification that moved the counter leaves the row stale for its own build or the sweep. Never null `stale_since` unconditionally.
 - **At-least-once via mark + sweep**: durability is the stale mark plus the Temporal `StaleSweep`, not a job-queue retry count. A resource whose Type was removed from config stays stale forever (logged by the sweep) — this is a known limitation.
 - **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).

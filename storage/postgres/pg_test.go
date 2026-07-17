@@ -72,7 +72,7 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "ms", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}); err != nil {
+	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, seq1, since1, _ := row(t, res)
@@ -81,7 +81,7 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond)
-	if err := st.MarkStale(ctx, []model.Resource{res}); err != nil {
+	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
 		t.Fatal(err)
 	}
 	_, _, seq2, since2, _ := row(t, res)
@@ -101,7 +101,7 @@ func TestMarkStale_BatchWithDuplicates(t *testing.T) {
 
 	// One batch where dup appears TWICE: must not error (ON CONFLICT DO UPDATE
 	// cannot affect the same row twice in one statement without deduping).
-	if err := st.MarkStale(ctx, []model.Resource{dup, other, dup}); err != nil {
+	if err := st.MarkStale(ctx, []model.Resource{dup, other, dup}, nil); err != nil {
 		t.Fatalf("MarkStale with duplicate resources in one batch: %v", err)
 	}
 
@@ -119,12 +119,39 @@ func TestMarkStale_BatchWithDuplicates(t *testing.T) {
 	}
 }
 
+func TestMarkStale_MetadataLastMarkWins(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := model.Resource{Type: "msm", Id: "1"}
+
+	if err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := st.ListStale(ctx, time.Now().Add(time.Minute), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Type == "msm" && e.Id == "1" {
+			if e.Metadata["fiber_operator_id"] != "op-2" {
+				t.Fatalf("metadata must be the LAST mark's: %v", e.Metadata)
+			}
+			return
+		}
+	}
+	t.Fatal("marked resource missing from stale listing")
+}
+
 func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	res := model.Resource{Type: "bb", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}); err != nil {
+	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
 		t.Fatal(err)
 	}
 	buildIdx, staleSeq, err := st.BeginBuild(ctx, res)
@@ -148,7 +175,7 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "cs", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}); err != nil { // seq=1
+	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil { // seq=1
 		t.Fatal(err)
 	}
 	if err := st.ClearStale(ctx, res, 1); err != nil {
@@ -160,8 +187,8 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	}
 
 	// Re-mark twice: clear with a stale seq must be a no-op.
-	_ = st.MarkStale(ctx, []model.Resource{res}) // seq=2
-	_ = st.MarkStale(ctx, []model.Resource{res}) // seq=3
+	_ = st.MarkStale(ctx, []model.Resource{res}, nil) // seq=2
+	_ = st.MarkStale(ctx, []model.Resource{res}, nil) // seq=3
 	if err := st.ClearStale(ctx, res, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +276,7 @@ func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 
 	// Not-deleted rows are never hard-deleted even with matching seq.
 	res2 := model.Resource{Type: "dr", Id: "2"}
-	_ = st.MarkStale(ctx, []model.Resource{res2}) // seq=1, deleted=false
+	_ = st.MarkStale(ctx, []model.Resource{res2}, nil) // seq=1, deleted=false
 	if err := st.DeleteResourceIfSeq(ctx, res2, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +294,7 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	newRes := model.Resource{Type: "ls", Id: "new"}
 	delRes := model.Resource{Type: "ls", Id: "del"}
 
-	_ = st.MarkStale(ctx, []model.Resource{oldRes})
+	_ = st.MarkStale(ctx, []model.Resource{oldRes}, map[string]string{"fiber_operator_id": "op-1"})
 	if _, err := st.MarkDeleted(ctx, delRes); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +306,7 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_ = st.MarkStale(ctx, []model.Resource{newRes}) // fresh mark, must be excluded by cutoff
+	_ = st.MarkStale(ctx, []model.Resource{newRes}, nil) // fresh mark, must be excluded by cutoff
 
 	entries, err := st.ListStale(ctx, time.Now().Add(-time.Minute), 10)
 	if err != nil {
@@ -295,6 +322,9 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 			gotOld = true
 			if e.Deleted {
 				t.Fatal("old must not be flagged deleted")
+			}
+			if e.Metadata["fiber_operator_id"] != "op-1" {
+				t.Fatalf("old must carry the metadata stored at MarkStale: %v", e.Metadata)
 			}
 		case "del":
 			gotDel = true

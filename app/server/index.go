@@ -100,6 +100,7 @@ func (s *IndexerServer) Rebuild(ctx context.Context, req *connect.Request[index.
 			ResourceType: ps.ResourceType,
 			Versions:     versions,
 			ResourceIDs:  ps.ResourceIds,
+			Metadata:     ps.Metadata,
 		}
 	}
 

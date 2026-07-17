@@ -6,8 +6,12 @@ CREATE TABLE IF NOT EXISTS resources (
     stale_seq BIGINT NOT NULL DEFAULT 0,
     stale_since TIMESTAMPTZ,                -- NULL = clean
     deleted BOOLEAN NOT NULL DEFAULT false,
+    metadata JSONB,                         -- notification metadata of the last stale mark
     UNIQUE (type, id)
 );
+
+-- Upgrade path for databases created before the metadata column existed.
+ALTER TABLE resources ADD COLUMN IF NOT EXISTS metadata JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
     WHERE stale_since IS NOT NULL;

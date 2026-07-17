@@ -12,6 +12,9 @@ type ResourceSelector struct {
 	ResourceType string
 	Versions     []int
 	ResourceIDs  []string
+	// Metadata is forwarded to every provider call the rebuild makes, exactly
+	// like notification metadata on the ingest path (e.g. the acting tenant).
+	Metadata map[string]string
 }
 
 // RebuildNow synchronously rebuilds the selected resources in-process. It is
@@ -26,6 +29,7 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 			ResourceType: sel.ResourceType,
 			Versions:     sel.Versions,
 			ResourceIDs:  sel.ResourceIDs,
+			Metadata:     sel.Metadata,
 		}); err != nil {
 			return fmt.Errorf("rebuild %s: %w", sel.ResourceType, err)
 		}

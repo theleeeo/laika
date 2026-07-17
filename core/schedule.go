@@ -17,7 +17,7 @@ func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource, m
 		return nil
 	}
 
-	if err := idx.st.MarkStale(ctx, roots); err != nil {
+	if err := idx.st.MarkStale(ctx, roots, metadata); err != nil {
 		return fmt.Errorf("marking %d resources stale: %w", len(roots), err)
 	}
 

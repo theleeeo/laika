@@ -21,8 +21,11 @@ type Store interface {
 	RemoveResource(ctx context.Context, resource model.Resource) error
 	UpsertResource(ctx context.Context, resource model.Resource, version int64) error
 
-	// MarkStale durably records build intent for the given resources.
-	MarkStale(ctx context.Context, resources []model.Resource) error
+	// MarkStale durably records build intent for the given resources, along
+	// with the notification metadata the eventual build must run with. The
+	// metadata is stored per resource (last mark wins) so a sweep-recovered
+	// build carries the same context an inline build would have.
+	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error
 	// MarkDeleted tombstones the resource and returns its stale_seq.
 	MarkDeleted(ctx context.Context, resource model.Resource) (staleSeq int64, err error)
 	// BeginBuild bumps the Build Sequence and captures the current stale_seq.
@@ -40,4 +43,7 @@ type StaleResource struct {
 	model.Resource
 	StaleSeq int64
 	Deleted  bool
+	// Metadata is the notification metadata stored by the most recent
+	// MarkStale, replayed into the build that serves the mark.
+	Metadata map[string]string
 }

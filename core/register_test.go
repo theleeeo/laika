@@ -41,7 +41,7 @@ func (s *recordingStore) indexOf(prefix string) int {
 	return -1
 }
 
-func (s *recordingStore) MarkStale(_ context.Context, rs []model.Resource) error {
+func (s *recordingStore) MarkStale(_ context.Context, rs []model.Resource, _ map[string]string) error {
 	s.record("MarkStale:%d", len(rs))
 	return nil
 }

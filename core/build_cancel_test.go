@@ -51,7 +51,9 @@ func (s *cancellingStore) GetParentResources(context.Context, model.Resource) ([
 }
 func (s *cancellingStore) UpsertResource(context.Context, model.Resource, int64) error { return nil }
 
-func (s *cancellingStore) MarkStale(context.Context, []model.Resource) error { return nil }
+func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[string]string) error {
+	return nil
+}
 func (s *cancellingStore) MarkDeleted(context.Context, model.Resource) (int64, error) {
 	return 0, nil
 }
