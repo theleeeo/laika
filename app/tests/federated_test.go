@@ -12,7 +12,7 @@ import (
 
 // indexRaw writes a document directly into a concrete index and refreshes, so a
 // federated query test can control the standardized search fields (search /
-// search_scoped) without driving the full Build pipeline (covered separately).
+// search_secondary) without driving the full Build pipeline (covered separately).
 func (t *TestSuite) indexRaw(index, id string, doc map[string]any) {
 	b, err := json.Marshal(doc)
 	t.Require().NoError(err)
@@ -33,9 +33,9 @@ func (t *TestSuite) indexRaw(index, id string, doc map[string]any) {
 func (t *TestSuite) Test_FederatedSearch_CrossTypeRankedAndCounts() {
 	t.setResourceConfig(DefaultResourceConfig)
 
-	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search": "red widget deluxe"})
-	t.indexRaw(core.IndexName("b", 1), "b1", map[string]any{"search": "widget"})
-	t.indexRaw(core.IndexName("b", 1), "b2", map[string]any{"search": "blue gadget"})
+	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search_primary": "red widget deluxe"})
+	t.indexRaw(core.IndexName("b", 1), "b1", map[string]any{"search_primary": "widget"})
+	t.indexRaw(core.IndexName("b", 1), "b2", map[string]any{"search_primary": "blue gadget"})
 
 	resp, err := t.idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
 		Query:         "widget",
@@ -56,7 +56,7 @@ func (t *TestSuite) Test_FederatedSearch_CrossTypeRankedAndCounts() {
 	t.Require().GreaterOrEqual(resp.Hits[0].Score, resp.Hits[1].Score)
 
 	// include_source populated the source.
-	t.Require().Equal("widget", resp.Hits[0].Source["search"])
+	t.Require().Equal("widget", resp.Hits[0].Source["search_primary"])
 
 	// Per-Type counts, one entry per requested Type in request order.
 	t.Require().Equal([]core.ResourceCount{{Resource: "a", Count: 1}, {Resource: "b", Count: 1}}, resp.Counts)
@@ -123,16 +123,16 @@ func (t *TestSuite) Test_FederatedSearch_ResolvesReferenceRelationFilter() {
 	// Seed the searchable surface + join keys directly (Build pipeline covered
 	// elsewhere). pop-A/ap-1 belong to operator op-A; pop-B/ap-2 to op-B.
 	t.indexRaw(core.IndexName("pop", 1), "pop-A", map[string]any{
-		"search": "fiber", "fields": map[string]any{"name": "alpha", "fiber_operator_id": "op-A"},
+		"search_primary": "fiber", "fields": map[string]any{"name": "alpha", "fiber_operator_id": "op-A"},
 	})
 	t.indexRaw(core.IndexName("pop", 1), "pop-B", map[string]any{
-		"search": "fiber", "fields": map[string]any{"name": "beta", "fiber_operator_id": "op-B"},
+		"search_primary": "fiber", "fields": map[string]any{"name": "beta", "fiber_operator_id": "op-B"},
 	})
 	t.indexRaw(core.IndexName("ap", 1), "ap-1", map[string]any{
-		"search": "fiber", "fields": map[string]any{"population_id": "pop-A"},
+		"search_primary": "fiber", "fields": map[string]any{"population_id": "pop-A"},
 	})
 	t.indexRaw(core.IndexName("ap", 1), "ap-2", map[string]any{
-		"search": "fiber", "fields": map[string]any{"population_id": "pop-B"},
+		"search_primary": "fiber", "fields": map[string]any{"population_id": "pop-B"},
 	})
 
 	// scopeFor builds an indexer whose federated middleware scopes each Type to
@@ -222,7 +222,7 @@ func (t *TestSuite) Test_FederatedSearch_SecondaryScopeCorrelation() {
 	t.setResourceConfig(DefaultResourceConfig)
 
 	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{
-		"search_scoped": []any{
+		"search_secondary": []any{
 			map[string]any{"text": "alpha", "scope": []any{"t1"}},
 			map[string]any{"text": "beta", "scope": []any{"t2"}},
 		},
@@ -271,8 +271,8 @@ func (t *TestSuite) Test_FederatedSearch_SecondaryScopeCorrelation() {
 func (t *TestSuite) Test_FederatedSearch_InfixMatches() {
 	t.setResourceConfig(DefaultResourceConfig)
 
-	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search": "Aichkirchen 2"})
-	t.indexRaw(core.IndexName("a", 1), "a2", map[string]any{"search": "Neustadtl an der Donau"})
+	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search_primary": "Aichkirchen 2"})
+	t.indexRaw(core.IndexName("a", 1), "a2", map[string]any{"search_primary": "Neustadtl an der Donau"})
 
 	search := func(query string) core.FederatedSearchResponse {
 		resp, err := t.idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
@@ -300,7 +300,7 @@ func (t *TestSuite) Test_FederatedSearch_InfixMatches() {
 
 	t.Run("secondary tier matches infix", func() {
 		t.indexRaw(core.IndexName("b", 1), "b1", map[string]any{
-			"search_scoped": []any{
+			"search_secondary": []any{
 				map[string]any{"text": "Grieskirchen depot", "scope": []any{}},
 			},
 		})

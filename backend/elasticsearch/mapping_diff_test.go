@@ -147,8 +147,8 @@ func TestDiffMapping_UnwrapsGeneratedMappingAndIgnoresAnalyzers(t *testing.T) {
 	// search surfaces carry only their type (analyzer/subfield keys omitted).
 	actual := mappingsDoc(map[string]any{
 		"fields": esObject(map[string]any{"name": leaf("keyword")}),
-		"search": leaf("text"),
-		"search_scoped": nested(map[string]any{
+		"search_primary": leaf("text"),
+		"search_secondary": nested(map[string]any{
 			"text":  leaf("text"),
 			"scope": leaf("keyword"),
 		}),

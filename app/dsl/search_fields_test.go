@@ -13,7 +13,7 @@ func primaryField(name string) resource.FieldConfig {
 	return resource.FieldConfig{Name: name, Query: resource.QueryConfig{Search: resource.SearchTierPrimary}}
 }
 
-// secondary builds a FieldConfig fed to the secondary search_scoped tier.
+// secondary builds a FieldConfig fed to the secondary search_secondary tier.
 func secondaryField(name string) resource.FieldConfig {
 	return resource.FieldConfig{Name: name, Query: resource.QueryConfig{Search: resource.SearchTierSecondary}}
 }
@@ -31,12 +31,12 @@ func TestPopulateSearch_PrimaryRootFieldFeedsFlatSearch(t *testing.T) {
 
 	out := populateStandardizedSearchFields(vc, doc)
 
-	require.Equal(t, []string{"Acme Corp"}, out.Doc["search"])
-	require.NotContains(t, out.Doc["search"], "x-999")
-	require.Nil(t, out.Doc["search_scoped"], "no secondary fields → no scoped entries")
+	require.Equal(t, []string{"Acme Corp"}, out.Doc["search_primary"])
+	require.NotContains(t, out.Doc["search_primary"], "x-999")
+	require.Nil(t, out.Doc["search_secondary"], "no secondary fields → no secondary entries")
 }
 
-func TestPopulateSearch_SecondaryChildFieldFeedsScopedEntryPerRow(t *testing.T) {
+func TestPopulateSearch_SecondaryChildFieldFeedsSecondaryEntryPerRow(t *testing.T) {
 	vc := &resource.VersionConfig{
 		Relations: []resource.RelationConfig{{
 			Resource: "tags",
@@ -53,14 +53,14 @@ func TestPopulateSearch_SecondaryChildFieldFeedsScopedEntryPerRow(t *testing.T) 
 
 	out := populateStandardizedSearchFields(vc, doc)
 
-	require.Nil(t, out.Doc["search"], "secondary text must not leak into the flat primary surface")
-	scoped := out.Doc["search_scoped"].([]map[string]any)
-	require.Len(t, scoped, 2, "one scoped entry per child row")
-	require.Equal(t, []string{"red"}, scoped[0]["text"])
-	require.Equal(t, []string{"blue"}, scoped[1]["text"])
+	require.Nil(t, out.Doc["search_primary"], "secondary text must not leak into the flat primary surface")
+	secondary := out.Doc["search_secondary"].([]map[string]any)
+	require.Len(t, secondary, 2, "one secondary entry per child row")
+	require.Equal(t, []string{"red"}, secondary[0]["text"])
+	require.Equal(t, []string{"blue"}, secondary[1]["text"])
 }
 
-// The standalone app never attributes scope: every scoped entry it emits has an
+// The standalone app never attributes scope: every secondary entry it emits has an
 // empty scope array (spec D10).
 func TestPopulateSearch_ScopeEmptyInAppMode(t *testing.T) {
 	vc := &resource.VersionConfig{
@@ -76,9 +76,9 @@ func TestPopulateSearch_ScopeEmptyInAppMode(t *testing.T) {
 
 	out := populateStandardizedSearchFields(vc, doc)
 
-	scoped := out.Doc["search_scoped"].([]map[string]any)
-	require.Len(t, scoped, 1)
-	require.Equal(t, []string{}, scoped[0]["scope"], "app leaves scope empty (unscoped)")
+	secondary := out.Doc["search_secondary"].([]map[string]any)
+	require.Len(t, secondary, 1)
+	require.Equal(t, []string{}, secondary[0]["scope"], "app leaves scope empty (unscoped)")
 }
 
 // A reference relation is never denormalized into the parent Build, so its
@@ -99,8 +99,8 @@ func TestPopulateSearch_ReferenceRelationExcluded(t *testing.T) {
 
 	out := populateStandardizedSearchFields(vc, doc)
 
-	require.Nil(t, out.Doc["search"])
-	require.Nil(t, out.Doc["search_scoped"])
+	require.Nil(t, out.Doc["search_primary"])
+	require.Nil(t, out.Doc["search_secondary"])
 }
 
 func TestPopulateSearch_PrimaryChildAndSecondaryRootMix(t *testing.T) {
@@ -119,11 +119,11 @@ func TestPopulateSearch_PrimaryChildAndSecondaryRootMix(t *testing.T) {
 	out := populateStandardizedSearchFields(vc, doc)
 
 	// Primary child field lands in the flat surface.
-	require.Equal(t, []string{"Alice"}, out.Doc["search"])
-	// Secondary root field lands in a single scoped entry.
-	scoped := out.Doc["search_scoped"].([]map[string]any)
-	require.Len(t, scoped, 1)
-	require.Equal(t, []string{"nickname"}, scoped[0]["text"])
+	require.Equal(t, []string{"Alice"}, out.Doc["search_primary"])
+	// Secondary root field lands in a single secondary entry.
+	secondary := out.Doc["search_secondary"].([]map[string]any)
+	require.Len(t, secondary, 1)
+	require.Equal(t, []string{"nickname"}, secondary[0]["text"])
 }
 
 func TestPopulateSearch_NilDocPassesThrough(t *testing.T) {
@@ -151,9 +151,9 @@ func TestBuildPlan_PopulatesStandardizedSearchFields(t *testing.T) {
 
 	doc := execSinglePlan(t, prov, vc, "order", "1")
 
-	require.Equal(t, []string{"ORD-1"}, doc.Doc["search"])
-	scoped := doc.Doc["search_scoped"].([]map[string]any)
-	require.Len(t, scoped, 1)
-	require.Equal(t, []string{"Alice"}, scoped[0]["text"])
-	require.Equal(t, []string{}, scoped[0]["scope"])
+	require.Equal(t, []string{"ORD-1"}, doc.Doc["search_primary"])
+	secondary := doc.Doc["search_secondary"].([]map[string]any)
+	require.Len(t, secondary, 1)
+	require.Equal(t, []string{"Alice"}, secondary[0]["text"])
+	require.Equal(t, []string{}, secondary[0]["scope"])
 }

@@ -99,7 +99,7 @@ func TestSearch_NoQuery_EmptyMustAndFilter(t *testing.T) {
 // same way Federated Search's primary tier does: a boosted whole-word
 // multi_match paired with an infix clause, combined with minimum_should_match:1.
 // It does not consult the resource's per-field `fields.*` paths or any relation
-// path, and it never touches the secondary `search_scoped` tier.
+// path, and it never touches the secondary `search_secondary` tier.
 func TestSearch_PrimaryTextQueryShape(t *testing.T) {
 	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
@@ -128,13 +128,13 @@ func TestSearch_PrimaryTextQueryShape(t *testing.T) {
 		t.Errorf("expected query=hello, got %v", mm["query"])
 	}
 	fields := mm["fields"].([]any)
-	if len(fields) != 2 || fields[0] != "search.full^9" || fields[1] != "search^3" {
-		t.Errorf("primary fields = %#v, want [search.full^9 search^3]", fields)
+	if len(fields) != 2 || fields[0] != "search_primary.full^9" || fields[1] != "search_primary^3" {
+		t.Errorf("primary fields = %#v, want [search_primary.full^9 search_primary^3]", fields)
 	}
 
 	// No leakage of per-field or secondary paths.
 	for _, f := range fields {
-		if s := f.(string); strings.HasPrefix(s, "fields.") || strings.HasPrefix(s, "search_scoped") {
+		if s := f.(string); strings.HasPrefix(s, "fields.") || strings.HasPrefix(s, "search_secondary") {
 			t.Errorf("single-resource query must target only the primary `search` surface, got %q", s)
 		}
 	}
@@ -153,7 +153,7 @@ func TestSearch_PrimaryInfixSubstringClause(t *testing.T) {
 	}
 
 	should := getPath(body, "query", "bool", "must").([]any)[0].(map[string]any)["bool"].(map[string]any)["should"].([]any)
-	infix := getPath(should[1].(map[string]any), "match", "search").(map[string]any)
+	infix := getPath(should[1].(map[string]any), "match", "search_primary").(map[string]any)
 	if infix["query"] != "7135252" {
 		t.Errorf("infix query = %v, want 7135252", infix["query"])
 	}
@@ -551,8 +551,8 @@ func TestBuildSecondaryClause_CorrelatesScopeWithinEntry(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected nested clause, got %#v", clause)
 	}
-	if nested["path"] != "search_scoped" {
-		t.Errorf("nested path = %v, want search_scoped", nested["path"])
+	if nested["path"] != "search_secondary" {
+		t.Errorf("nested path = %v, want search_secondary", nested["path"])
 	}
 
 	// The text match and the scope term must live in the SAME nested query's
@@ -571,14 +571,14 @@ func TestBuildSecondaryClause_CorrelatesScopeWithinEntry(t *testing.T) {
 		if b, ok := m["bool"].(map[string]any); ok {
 			mm := b["should"].([]any)[0].(map[string]any)["multi_match"].(map[string]any)
 			fields, _ := mm["fields"].([]any)
-			if len(fields) == 0 || fields[0] != "search_scoped.text.full^3" {
-				t.Errorf("text match fields = %#v, want boosted search_scoped.text.full first", fields)
+			if len(fields) == 0 || fields[0] != "search_secondary.text.full^3" {
+				t.Errorf("text match fields = %#v, want boosted search_secondary.text.full first", fields)
 			}
 			sawTextMatch = true
 		}
 		if term, ok := m["term"].(map[string]any); ok {
-			if term["search_scoped.scope"] != "tenant-1" {
-				t.Errorf("scope term = %#v, want search_scoped.scope=tenant-1", term)
+			if term["search_secondary.scope"] != "tenant-1" {
+				t.Errorf("scope term = %#v, want search_secondary.scope=tenant-1", term)
 			}
 			sawScopeTerm = true
 		}
@@ -701,8 +701,8 @@ func TestFederatedSearch_QueryShapeAndSearchType(t *testing.T) {
 		t.Fatalf("expected primary word + primary infix + secondary should clauses, got %#v", shoulds)
 	}
 	primaryFields := shoulds[0].(map[string]any)["multi_match"].(map[string]any)["fields"].([]any)
-	if primaryFields[0] != "search.full^9" || primaryFields[1] != "search^3" {
-		t.Errorf("primary fields = %#v, want [search.full^9 search^3]", primaryFields)
+	if primaryFields[0] != "search_primary.full^9" || primaryFields[1] != "search_primary^3" {
+		t.Errorf("primary fields = %#v, want [search_primary.full^9 search_primary^3]", primaryFields)
 	}
 	if _, ok := shoulds[1].(map[string]any)["match"]; !ok {
 		t.Errorf("expected primary infix clause, got %#v", shoulds[1])
@@ -865,7 +865,7 @@ func TestFederatedSearch_InfixQueryShape(t *testing.T) {
 	}
 
 	// Primary infix: all query grams required on the ngrammed body.
-	infix := shoulds[1].(map[string]any)["match"].(map[string]any)["search"].(map[string]any)
+	infix := shoulds[1].(map[string]any)["match"].(map[string]any)["search_primary"].(map[string]any)
 	if infix["query"] != "chkirch" {
 		t.Errorf("infix query = %v, want chkirch", infix["query"])
 	}
@@ -877,7 +877,7 @@ func TestFederatedSearch_InfixQueryShape(t *testing.T) {
 	}
 
 	// Secondary: the nested bool pairs the word multi_match with the same infix
-	// treatment on search_scoped.text.
+	// treatment on search_secondary.text.
 	nested := shoulds[2].(map[string]any)["nested"].(map[string]any)
 	must := nested["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
 	text := must[0].(map[string]any)["bool"].(map[string]any)
@@ -888,7 +888,7 @@ func TestFederatedSearch_InfixQueryShape(t *testing.T) {
 	if len(textShoulds) != 2 {
 		t.Fatalf("expected secondary [word, infix] clauses, got %#v", textShoulds)
 	}
-	secInfix := textShoulds[1].(map[string]any)["match"].(map[string]any)["search_scoped.text"].(map[string]any)
+	secInfix := textShoulds[1].(map[string]any)["match"].(map[string]any)["search_secondary.text"].(map[string]any)
 	if secInfix["analyzer"] != ngramIndexAnalyzer || secInfix["minimum_should_match"] != "100%" {
 		t.Errorf("secondary infix = %#v, want ngram analyzer with 100%% msm", secInfix)
 	}

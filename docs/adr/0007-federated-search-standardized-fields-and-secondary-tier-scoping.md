@@ -11,6 +11,15 @@
 > [the federated-search-middleware spec](../superpowers/specs/2026-07-06-federated-search-middleware-design.md).
 > Everything else in this ADR stands.
 
+> **Renamed (2026-07-20):** the two standardized surfaces are now named by tier —
+> `search` → `search_primary` and `search_scoped` → `search_secondary` — so the
+> field names carry the primary/secondary distinction (the reason the split
+> exists: a primary match outranks a secondary one) instead of welding
+> "secondary" to "scoped". Scoping is an orthogonal capability the secondary tier
+> still carries — exercised only by a library consumer, never the standalone app,
+> which leaves `scope` empty. Single-resource Search remains primary-only. The
+> field names in this ADR are updated to match; the design is otherwise unchanged.
+
 Single-resource Search names one Resource Type and runs a `multi_match` over that
 Type's own field set. A search bar needs one query matched across *several* Types
 at once, returning a single relevance-ranked cross-type list. Merging raw scores
@@ -22,8 +31,8 @@ heterogeneous query for free.
 We give **every** index the same two searchable surfaces, populated by the indexer
 at **Build time**, and query them with a single multi-index request:
 
-- `search` — flat `text`. The **primary** tier: a Document's own high-signal text.
-- `search_scoped` — a `nested` array of `{ text, scope[] }`. The **secondary**
+- `search_primary` — flat `text`. The **primary** tier: a Document's own high-signal text.
+- `search_secondary` — a `nested` array of `{ text, scope[] }`. The **secondary**
   tier: lower-signal / denormalized-child text, each entry optionally attributed
   to the tenant set that may see it.
 
@@ -59,17 +68,17 @@ only via a related Resource's name.
 The multi-tenant leak is confined to the secondary tier. A Document's own (primary)
 fields are never narrower in visibility than the Document itself, so once a searcher
 may see the Document at all, its primary text is fair game — no attribution needed.
-Only denormalized-child text can be narrower, so only `search_scoped` entries carry
+Only denormalized-child text can be narrower, so only `search_secondary` entries carry
 a `scope[]`.
 
 This lets us keep **all** tenant policy out of the standalone app:
 
-- The **standalone app** fills each `search_scoped` entry's `text` (from
+- The **standalone app** fills each `search_secondary` entry's `text` (from
   `search: secondary` fields) and leaves `scope` **empty** — its secondary matches
   are unscoped, and it stays tenant-agnostic.
 - A **library consumer** fills `scope` (via its own Plan) and, at query time,
   supplies the caller's single tenant value, which the query builder weaves into
-  the nested clause: an entry matches only when `search_scoped.scope` contains the
+  the nested clause: an entry matches only when `search_secondary.scope` contains the
   caller *and* its `text` matches. The mapping and the query are identical in both
   modes — only the presence of scope data and the scope value differ.
 
@@ -99,7 +108,7 @@ channel, and the `dev/harness` consumer changes (scope population + tenant scope
 value) — is tracked as separate follow-up issues. Full design in
 [docs/superpowers/specs/2026-07-04-federated-search.md](../superpowers/specs/2026-07-04-federated-search.md).
 
-**Implication for contributors:** do not populate `search_scoped.scope` or apply a
+**Implication for contributors:** do not populate `search_secondary.scope` or apply a
 tenant filter in `core` or the standalone app — that is library-consumer policy.
 Do not model the secondary scope as an ordinary top-level filter; it must be
 correlated inside the nested clause. Keep primary text unattributed.

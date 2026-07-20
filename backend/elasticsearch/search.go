@@ -259,22 +259,22 @@ func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchPara
 }
 
 // buildFederatedTextQuery is the scoring core of a federated query: a document
-// matches on its own primary text (search) OR on secondary text (search_scoped),
-// with a query-time boost so a primary match outranks a secondary one (spec D13,
-// D15). Each tier pairs a whole-word multi_match — whose .full standard-analyzed
-// subfield is boosted for exact-token precision — with an unboosted infix clause
-// (see infixClause), so any substring of the indexed text matches while
-// whole-word hits stay on top.
+// matches on its own primary text (search_primary) OR on secondary text
+// (search_secondary), with a query-time boost so a primary match outranks a
+// secondary one. Each tier pairs a whole-word multi_match — whose .full
+// standard-analyzed subfield is boosted for exact-token precision — with an
+// unboosted infix clause (see infixClause), so any substring of the indexed text
+// matches while whole-word hits stay on top.
 func buildFederatedTextQuery(query, scope string) any {
 	primary := map[string]any{
 		"multi_match": map[string]any{
 			"query":  query,
-			"fields": []any{"search.full^9", "search^3"},
+			"fields": []any{"search_primary.full^9", "search_primary^3"},
 		},
 	}
 	return map[string]any{
 		"bool": map[string]any{
-			"should":               []any{primary, infixClause("search", query), buildSecondaryClause(query, scope)},
+			"should":               []any{primary, infixClause("search_primary", query), buildSecondaryClause(query, scope)},
 			"minimum_should_match": 1,
 		},
 	}
@@ -303,40 +303,41 @@ func infixClause(field, query string) any {
 // buildFullTextQuery is the scoring core of a single-resource Search. It mirrors
 // the primary tier of Federated Search (see buildFederatedTextQuery) but stops
 // there: a Document matches on its own high-signal text — the standardized
-// primary `search` surface — and nothing else. A whole-word multi_match (with
-// the standard-analyzed .full subfield boosted for exact-token precision) is
-// paired with an unboosted infix clause (see infixClause), so any substring of
+// primary `search_primary` surface — and nothing else. A whole-word multi_match
+// (with the standard-analyzed .full subfield boosted for exact-token precision)
+// is paired with an unboosted infix clause (see infixClause), so any substring of
 // the indexed text matches while whole-word hits stay on top — e.g. "7135252"
-// finds "adrcd-7135252-34". The secondary (search_scoped) tier that Federated
+// finds "adrcd-7135252-34". The secondary (search_secondary) tier that Federated
 // Search also consults is intentionally excluded.
 func buildFullTextQuery(query string) any {
 	primary := map[string]any{
 		"multi_match": map[string]any{
 			"query":  query,
-			"fields": []any{"search.full^9", "search^3"},
+			"fields": []any{"search_primary.full^9", "search_primary^3"},
 		},
 	}
 	return map[string]any{
 		"bool": map[string]any{
-			"should":               []any{primary, infixClause("search", query)},
+			"should":               []any{primary, infixClause("search_primary", query)},
 			"minimum_should_match": 1,
 		},
 	}
 }
 
 // buildSecondaryClause builds the nested query over a Federated Search's
-// secondary tier (the search_scoped nested field). It matches the query text
+// secondary tier (the search_secondary nested field). It matches the query text
 // against each entry's text the same two ways as the primary tier: whole words
 // via the multi_match (with the standard-analyzed .full subfield boosted for
-// whole-token precision) or any substring via infixClause (spec D15).
+// whole-token precision) or any substring via infixClause.
 //
 // When scope is non-empty it weaves a term on the same entry's scope[] keyword
-// array into the same nested bool.must (spec D11.2, D14). Because a nested query
-// is satisfied per entry, placing the text match and the scope term together
-// correlates them: an entry contributes its text only when its own scope
-// contains the caller — a top-level scope filter could not express this. A term
-// on a keyword array matches when the array contains the value. An empty scope
-// yields an unscoped secondary match (standalone-app behaviour).
+// array into the same nested bool.must. Because a nested query is satisfied per
+// entry, placing the text match and the scope term together correlates them: an
+// entry contributes its text only when its own scope contains the caller — a
+// top-level scope filter could not express this. A term on a keyword array
+// matches when the array contains the value. An empty scope yields an unscoped
+// secondary match — the standalone app never populates scope, so this is its
+// behaviour; only a library consumer supplies a scope value.
 func buildSecondaryClause(query, scope string) any {
 	must := []any{
 		map[string]any{
@@ -345,10 +346,10 @@ func buildSecondaryClause(query, scope string) any {
 					map[string]any{
 						"multi_match": map[string]any{
 							"query":  query,
-							"fields": []any{"search_scoped.text.full^3", "search_scoped.text"},
+							"fields": []any{"search_secondary.text.full^3", "search_secondary.text"},
 						},
 					},
-					infixClause("search_scoped.text", query),
+					infixClause("search_secondary.text", query),
 				},
 				"minimum_should_match": 1,
 			},
@@ -356,12 +357,12 @@ func buildSecondaryClause(query, scope string) any {
 	}
 	if scope != "" {
 		must = append(must, map[string]any{
-			"term": map[string]any{"search_scoped.scope": scope},
+			"term": map[string]any{"search_secondary.scope": scope},
 		})
 	}
 	return map[string]any{
 		"nested": map[string]any{
-			"path":  "search_scoped",
+			"path":  "search_secondary",
 			"query": map[string]any{"bool": map[string]any{"must": must}},
 		},
 	}

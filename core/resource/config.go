@@ -124,19 +124,20 @@ func (f FieldConfig) ESType() string {
 	return f.Type
 }
 
-// SearchTier selects which standardized searchable surface a field feeds in
-// Federated Search. Single-resource Search treats primary and secondary
-// identically (both feed its multi_match); none excludes the field.
+// SearchTier selects which standardized searchable surface a field feeds.
+// Single-resource Search matches only the primary surface; Federated Search
+// matches both tiers and ranks a primary hit above a secondary one. `none`
+// excludes the field from full-text search entirely.
 type SearchTier string
 
 const (
 	// SearchTierNone excludes the field from full-text search. It is the value
 	// an omitted selector resolves to.
 	SearchTierNone SearchTier = "none"
-	// SearchTierPrimary routes the field to the primary `search` surface: a
-	// Document's own high-signal text.
+	// SearchTierPrimary routes the field to the primary `search_primary` surface:
+	// a Document's own high-signal text.
 	SearchTierPrimary SearchTier = "primary"
-	// SearchTierSecondary routes the field to the secondary `search_scoped`
+	// SearchTierSecondary routes the field to the secondary `search_secondary`
 	// surface: lower-signal / denormalized-child text.
 	SearchTierSecondary SearchTier = "secondary"
 )
@@ -156,8 +157,8 @@ func (q QueryConfig) Tier() SearchTier {
 	return q.Search
 }
 
-// IsSearchable reports whether the field feeds single-resource full-text
-// search, i.e. its tier is primary or secondary.
+// IsSearchable reports whether the field feeds full-text search at all,
+// i.e. its tier is primary or secondary.
 func (q QueryConfig) IsSearchable() bool {
 	t := q.Tier()
 	return t == SearchTierPrimary || t == SearchTierSecondary

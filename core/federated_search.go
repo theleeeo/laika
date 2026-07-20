@@ -31,7 +31,7 @@ type FederatedSearchRequest struct {
 
 	// SecondaryScope is the caller's single tenant scope value for the
 	// secondary tier (spec D11.2, D14), set by a trusted federated middleware.
-	// The query builder weaves it into the nested search_scoped clause. Empty
+	// The query builder weaves it into the nested search_secondary clause. Empty
 	// means unscoped secondary (standalone-app behaviour).
 	SecondaryScope string
 }

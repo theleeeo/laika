@@ -108,7 +108,7 @@ func TestGenerateMapping_StandardizedSearchSurfaces(t *testing.T) {
 	props := GenerateMapping(&resource.VersionConfig{})["mappings"].(map[string]any)["properties"].(map[string]any)
 
 	// Primary: flat n-grammed text with a standard-analyzed .full subfield.
-	search := props["search"].(map[string]any)
+	search := props["search_primary"].(map[string]any)
 	require.Equal(t, "text", search["type"])
 	require.Equal(t, ngramIndexAnalyzer, search["analyzer"])
 	require.Equal(t, ngramSearchAnalyzer, search["search_analyzer"])
@@ -117,16 +117,16 @@ func TestGenerateMapping_StandardizedSearchSurfaces(t *testing.T) {
 	require.Equal(t, "standard", searchFull["analyzer"])
 
 	// Secondary: nested { text (same analyzer + .full), scope keyword[] }.
-	scoped := props["search_scoped"].(map[string]any)
-	require.Equal(t, "nested", scoped["type"])
-	scopedProps := scoped["properties"].(map[string]any)
-	scopedText := scopedProps["text"].(map[string]any)
-	require.Equal(t, "text", scopedText["type"])
-	require.Equal(t, ngramIndexAnalyzer, scopedText["analyzer"])
-	require.Equal(t, ngramSearchAnalyzer, scopedText["search_analyzer"])
-	require.Equal(t, "standard", scopedText["fields"].(map[string]any)["full"].(map[string]any)["analyzer"])
+	secondary := props["search_secondary"].(map[string]any)
+	require.Equal(t, "nested", secondary["type"])
+	secondaryProps := secondary["properties"].(map[string]any)
+	secondaryText := secondaryProps["text"].(map[string]any)
+	require.Equal(t, "text", secondaryText["type"])
+	require.Equal(t, ngramIndexAnalyzer, secondaryText["analyzer"])
+	require.Equal(t, ngramSearchAnalyzer, secondaryText["search_analyzer"])
+	require.Equal(t, "standard", secondaryText["fields"].(map[string]any)["full"].(map[string]any)["analyzer"])
 	// scope is a keyword field; keyword natively accepts arrays.
-	require.Equal(t, "keyword", scopedProps["scope"].(map[string]any)["type"])
+	require.Equal(t, "keyword", secondaryProps["scope"].(map[string]any)["type"])
 }
 
 func TestGenerateMapping_NgramAnalysisSettings(t *testing.T) {

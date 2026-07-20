@@ -6,18 +6,18 @@ import "github.com/theleeeo/laika/core"
 // against the standardized primary `search` surface the same way Federated
 // Search's primary tier does — including substring (infix) matches such as
 // "7135252" finding "adrcd-7135252-34" — while ignoring the secondary
-// `search_scoped` tier. Documents are seeded directly so the test controls the
+// `search_secondary` tier. Documents are seeded directly so the test controls the
 // standardized surfaces without driving the full Build pipeline (mirrors the
 // federated-search tests).
 func (t *TestSuite) Test_SingleSearch_PrimaryInfix() {
 	t.setResourceConfig(DefaultResourceConfig)
 
 	// a1: the query term lives as an interior substring of the primary surface.
-	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search": "adrcd-7135252-34"})
+	t.indexRaw(core.IndexName("a", 1), "a1", map[string]any{"search_primary": "adrcd-7135252-34"})
 	// a2: its only text lives in the secondary tier — single-resource Search
 	// must never surface it, since it consults the primary surface only.
 	t.indexRaw(core.IndexName("a", 1), "a2", map[string]any{
-		"search_scoped": []map[string]any{{"text": "sekret-999", "scope": []string{}}},
+		"search_secondary": []map[string]any{{"text": "sekret-999", "scope": []string{}}},
 	})
 
 	t.Run("infix substring match on primary surface", func() {

@@ -24,8 +24,8 @@ const (
 )
 
 // searchSettings is the index settings block defining the n-gram analysis chain
-// shared by `search` and `search_scoped.text`. max_ngram_diff must be at least
-// max_gram - min_gram or ES rejects the tokenizer.
+// shared by `search_primary` and `search_secondary.text`. max_ngram_diff must be
+// at least max_gram - min_gram or ES rejects the tokenizer.
 func searchSettings() map[string]any {
 	return map[string]any{
 		"index": map[string]any{
@@ -87,17 +87,19 @@ func GenerateMapping(vc *resource.VersionConfig) map[string]any {
 			"type":       "object",
 			"properties": fieldsProps,
 		},
-		// Standardized searchable surfaces. Every index carries both so a
-		// federated query is a uniform match with comparable scores; the
-		// indexer populates them at Build time (spec D4, populated in #12).
+		// Standardized searchable surfaces, named by tier. Every index carries
+		// both so a federated query is a uniform match with comparable scores;
+		// the indexer populates them at Build time.
 		//
-		// search — flat primary tier: a Document's own high-signal text.
-		"search": searchableTextField(),
-		// search_scoped — nested secondary tier: lower-signal / denormalized
-		// child text, each entry optionally attributed to visibility scopes.
-		// scope is a keyword array (a Child may be visible to several tenants);
-		// a term on it matches when the array contains the caller's value.
-		"search_scoped": map[string]any{
+		// search_primary — flat primary tier: a Document's own high-signal text.
+		"search_primary": searchableTextField(),
+		// search_secondary — nested secondary tier: lower-signal / denormalized
+		// child text, ranked below the primary tier at query time. Each entry can
+		// optionally be attributed to visibility scopes: scope is a keyword array
+		// (a Child may be visible to several tenants) populated only by a library
+		// consumer — the standalone app leaves it empty — and a term on it matches
+		// when the array contains the caller's value.
+		"search_secondary": map[string]any{
 			"type": "nested",
 			"properties": map[string]any{
 				"text":  searchableTextField(),

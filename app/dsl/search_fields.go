@@ -12,9 +12,9 @@ import (
 // tier selectors (spec D4/D9/D10). It runs as a terminal Build stage, after all
 // relations are denormalized into the Doc.
 //
-//   - search: flat array of every `search: primary` field's text (the
+//   - search_primary: flat array of every `search: primary` field's text (the
 //     Document's own high-signal fields).
-//   - search_scoped: nested array, one entry per source of `search: secondary`
+//   - search_secondary: nested array, one entry per source of `search: secondary`
 //     text. Each entry is { text, scope }; the standalone app leaves scope
 //     empty (unscoped, tenant-agnostic). A library consumer fills scope via its
 //     own Plan instead.
@@ -28,10 +28,10 @@ func populateStandardizedSearchFields(vc *resource.VersionConfig, doc projection
 	}
 
 	var primary []string
-	var scoped []map[string]any
+	var secondary []map[string]any
 
 	// Root fields: primary feeds the flat surface; secondary fields collapse
-	// into a single scoped entry (the root's own lower-signal text).
+	// into a single secondary entry (the root's own lower-signal text).
 	rootFields, _ := doc.Doc["fields"].(map[string]any)
 	var rootSecondary []string
 	for _, f := range vc.Fields {
@@ -43,11 +43,11 @@ func populateStandardizedSearchFields(vc *resource.VersionConfig, doc projection
 		}
 	}
 	if len(rootSecondary) > 0 {
-		scoped = append(scoped, scopedEntry(rootSecondary))
+		secondary = append(secondary, secondaryEntry(rootSecondary))
 	}
 
 	// Denormalized relations: primary child fields feed the flat surface;
-	// secondary child fields produce one scoped entry per child row, so a
+	// secondary child fields produce one secondary entry per child row, so a
 	// library consumer can attribute each child's scope independently.
 	for _, rel := range vc.Relations {
 		if rel.IsReference() {
@@ -76,24 +76,24 @@ func populateStandardizedSearchFields(vc *resource.VersionConfig, doc projection
 				entryText = append(entryText, textValues(row[name])...)
 			}
 			if len(entryText) > 0 {
-				scoped = append(scoped, scopedEntry(entryText))
+				secondary = append(secondary, secondaryEntry(entryText))
 			}
 		}
 	}
 
 	if len(primary) > 0 {
-		doc.Doc["search"] = primary
+		doc.Doc["search_primary"] = primary
 	}
-	if len(scoped) > 0 {
-		doc.Doc["search_scoped"] = scoped
+	if len(secondary) > 0 {
+		doc.Doc["search_secondary"] = secondary
 	}
 	return doc
 }
 
-// scopedEntry builds a search_scoped entry with an empty scope. The standalone
-// app never attributes scope (spec D10); the empty array matches the nested
-// keyword mapping and leaves the entry unscoped.
-func scopedEntry(text []string) map[string]any {
+// secondaryEntry builds a search_secondary entry with an empty scope. The
+// standalone app never attributes scope (spec D10); the empty array matches the
+// nested keyword mapping and leaves the entry unscoped.
+func secondaryEntry(text []string) map[string]any {
 	return map[string]any{
 		"text":  text,
 		"scope": []string{},
