@@ -27,8 +27,14 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query))
 	}
 
+	scoped := vc.ScopedNestedBlocks()
+	blockFilters := make(map[string][]core.Filter)
 	for _, f := range req.Filters {
 		if f.Field == "" {
+			continue
+		}
+		if b := scopedBlockFor(scoped, f.Field); b != nil {
+			blockFilters[b.Name] = append(blockFilters[b.Name], f)
 			continue
 		}
 		filterClause, err := buildFilterClause(f)
@@ -36,6 +42,15 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 			return core.SearchResponse{}, err
 		}
 		boolQ["filter"] = append(boolQ["filter"].([]any), filterClause)
+	}
+	// Every scoped block is always enforced (visibility), even with no user
+	// filters on it — this is what makes scoping impossible to forget.
+	for _, b := range scoped {
+		clause, err := buildScopedNestedClause(b, req.Scope, blockFilters[b.Name])
+		if err != nil {
+			return core.SearchResponse{}, err
+		}
+		boolQ["filter"] = append(boolQ["filter"].([]any), clause)
 	}
 
 	body := map[string]any{
@@ -416,6 +431,48 @@ var rangeKeys = map[core.FilterOp]string{
 	core.FilterOpGte: "gte",
 	core.FilterOpLt:  "lt",
 	core.FilterOpLte: "lte",
+}
+
+// scopedBlockFor returns the scoped nested block whose name is the head of the
+// dotted field path (e.g. "operator_data.custom_fields" -> operator_data), or nil.
+func scopedBlockFor(blocks []resource.NestedBlockConfig, field string) *resource.NestedBlockConfig {
+	head, _, found := strings.Cut(field, ".")
+	if !found {
+		return nil
+	}
+	for i := range blocks {
+		if blocks[i].Name == head {
+			return &blocks[i]
+		}
+	}
+	return nil
+}
+
+// buildScopedNestedClause builds the single correlated nested query for one
+// scoped block: the caller's scope term ANDed with every filter targeting the
+// block, so a filter can only ever match the caller's own entry. Empty scope
+// fails closed with match_none.
+func buildScopedNestedClause(b resource.NestedBlockConfig, scope string, filters []core.Filter) (any, error) {
+	if scope == "" {
+		return map[string]any{"match_none": map[string]any{}}, nil
+	}
+	must := []any{
+		map[string]any{"term": map[string]any{b.Name + "." + b.ScopeKey: scope}},
+	}
+	for _, f := range filters {
+		f.NestedPath = "" // the shared nested wrapper is built here, not per-filter
+		clause, err := buildFilterClause(f)
+		if err != nil {
+			return nil, err
+		}
+		must = append(must, clause)
+	}
+	return map[string]any{
+		"nested": map[string]any{
+			"path":  b.Name,
+			"query": map[string]any{"bool": map[string]any{"must": must}},
+		},
+	}, nil
 }
 
 // buildFilterClause translates one filter into an ES bool-filter clause.

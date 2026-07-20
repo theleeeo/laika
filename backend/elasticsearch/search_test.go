@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/core/resource"
 )
@@ -60,6 +61,18 @@ func vcFlatOnly() *resource.VersionConfig {
 			{Name: "name", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 			{Name: "status", Query: resource.QueryConfig{Search: resource.SearchTierPrimary}},
 		},
+	}
+}
+
+// vcScopedBlock returns a VersionConfig with one tenant-scoped nested block.
+func vcScopedBlock() *resource.VersionConfig {
+	return &resource.VersionConfig{
+		Version: 1,
+		Fields:  []resource.FieldConfig{{Name: "name"}},
+		NestedBlocks: []resource.NestedBlockConfig{{
+			Name: "operator_data", ScopeKey: "fiber_operator_id",
+			Fields: []resource.FieldConfig{{Name: "custom_fields"}},
+		}},
 	}
 }
 
@@ -237,6 +250,54 @@ func TestSearch_Filter_Nested(t *testing.T) {
 	if innerTerm != "go" {
 		t.Errorf("expected inner term=go, got %v", innerTerm)
 	}
+}
+
+func TestSearch_ScopedBlock_CorrelatesScopeAndFilter(t *testing.T) {
+	body, _, err := captureSearch(t, core.SearchRequest{
+		PageSize: 10,
+		Scope:    "op-1",
+		Filters:  []core.Filter{{Field: "operator_data.custom_fields", Op: core.FilterOpEq, Value: "priority=gold"}},
+	}, vcScopedBlock())
+	require.NoError(t, err)
+
+	filter := body["query"].(map[string]any)["bool"].(map[string]any)["filter"].([]any)
+	// exactly one nested clause on operator_data
+	var nested map[string]any
+	for _, c := range filter {
+		if n, ok := c.(map[string]any)["nested"].(map[string]any); ok && n["path"] == "operator_data" {
+			nested = n
+		}
+	}
+	require.NotNil(t, nested, "expected a nested operator_data clause")
+	must := nested["query"].(map[string]any)["bool"].(map[string]any)["must"].([]any)
+	// the scope term and the user filter are correlated in the SAME nested must
+	require.Len(t, must, 2)
+	// scope term present
+	foundScope, foundFilter := false, false
+	for _, m := range must {
+		term, _ := m.(map[string]any)["term"].(map[string]any)
+		if v, ok := term["operator_data.fiber_operator_id"]; ok && v == "op-1" {
+			foundScope = true
+		}
+		if v, ok := term["operator_data.custom_fields"]; ok && v == "priority=gold" {
+			foundFilter = true
+		}
+	}
+	require.True(t, foundScope, "scope term missing")
+	require.True(t, foundFilter, "user filter missing from nested must")
+}
+
+func TestSearch_ScopedBlock_EmptyScopeFailsClosed(t *testing.T) {
+	body, _, err := captureSearch(t, core.SearchRequest{PageSize: 10}, vcScopedBlock())
+	require.NoError(t, err)
+	filter := body["query"].(map[string]any)["bool"].(map[string]any)["filter"].([]any)
+	hasMatchNone := false
+	for _, c := range filter {
+		if _, ok := c.(map[string]any)["match_none"]; ok {
+			hasMatchNone = true
+		}
+	}
+	require.True(t, hasMatchNone, "empty Scope on a scoped-block resource must emit match_none")
 }
 
 func TestSearch_Filter_EQ_MissingValue_Error(t *testing.T) {

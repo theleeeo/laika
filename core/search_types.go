@@ -46,6 +46,11 @@ type SearchRequest struct {
 	PageSize int32
 	Filters  []Filter
 	Sort     []SortOption
+
+	// Scope is the caller's tenant value woven into every scoped nested block
+	// of the queried resource. Empty ⇒ a resource that declares a scoped block
+	// matches nothing (fail-closed). Ignored by single-tenant resources.
+	Scope string
 }
 
 // AddFilter appends a filter to the request. It is the explicit way a
