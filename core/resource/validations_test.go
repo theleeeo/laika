@@ -156,3 +156,39 @@ func TestReferenceKeyFromReferenceSibling(t *testing.T) {
 		t.Fatal("expected error: cannot source a reference key from a reference sibling")
 	}
 }
+
+func TestNestedBlockValidation(t *testing.T) {
+	base := Configs{{
+		Resource: "a",
+		Versions: []VersionConfig{{
+			Version: 1,
+			Fields:  []FieldConfig{{Name: "name"}},
+			NestedBlocks: []NestedBlockConfig{{
+				Name:     "operator_data",
+				ScopeKey: "fiber_operator_id",
+				Fields:   []FieldConfig{{Name: "custom_fields"}},
+			}},
+		}},
+	}}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("valid scoped block rejected: %v", err)
+	}
+
+	noScope := Configs{{Resource: "a", Versions: []VersionConfig{{
+		Version: 1, Fields: []FieldConfig{{Name: "name"}},
+		NestedBlocks: []NestedBlockConfig{{Name: "b", Fields: []FieldConfig{{Name: "x"}}}},
+	}}}}
+	if err := noScope.Validate(); err == nil {
+		t.Error("block without scopeKey must be rejected")
+	}
+
+	collide := Configs{{Resource: "a", Versions: []VersionConfig{{
+		Version: 1, Fields: []FieldConfig{{Name: "name"}},
+		NestedBlocks: []NestedBlockConfig{{
+			Name: "name", ScopeKey: "s", Fields: []FieldConfig{{Name: "x"}},
+		}},
+	}}}}
+	if err := collide.Validate(); err == nil {
+		t.Error("block name colliding with a root field key must be rejected")
+	}
+}

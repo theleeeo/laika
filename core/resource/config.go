@@ -18,9 +18,10 @@ func (c Configs) Get(resource string) *Config {
 
 // VersionConfig holds the schema definition for a single version of a resource.
 type VersionConfig struct {
-	Version   int              `yaml:"version"`
-	Fields    []FieldConfig    `yaml:"fields"`
-	Relations []RelationConfig `yaml:"relations"`
+	Version      int                 `yaml:"version"`
+	Fields       []FieldConfig       `yaml:"fields"`
+	Relations    []RelationConfig    `yaml:"relations"`
+	NestedBlocks []NestedBlockConfig `yaml:"nestedBlocks,omitempty"`
 }
 
 // GetSearchableFields returns the list of ES field paths that are included
@@ -52,6 +53,27 @@ func (vc *VersionConfig) GetRelation(resource string) *RelationConfig {
 		}
 	}
 	return nil
+}
+
+// GetNestedBlock returns the nested block config for the given name, or nil.
+func (vc *VersionConfig) GetNestedBlock(name string) *NestedBlockConfig {
+	for i := range vc.NestedBlocks {
+		if vc.NestedBlocks[i].Name == name {
+			return &vc.NestedBlocks[i]
+		}
+	}
+	return nil
+}
+
+// ScopedNestedBlocks returns the tenant-scoped nested blocks of this version.
+func (vc *VersionConfig) ScopedNestedBlocks() []NestedBlockConfig {
+	var out []NestedBlockConfig
+	for _, b := range vc.NestedBlocks {
+		if b.IsScoped() {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 type Config struct {
@@ -219,3 +241,18 @@ func (r RelationConfig) LocalSource(root string) string {
 	}
 	return root
 }
+
+// NestedBlockConfig declares a nested object field on a document that is not a
+// relation to another indexed resource — its entries are assembled by the
+// resource's Plan (e.g. one entry per tenant). When ScopeKey is set the block
+// is tenant-scoped: the search layer always correlates the caller's Scope onto
+// <Name>.<ScopeKey> for any filter or visibility check on the block, so one
+// tenant can never match another's entry (fail-closed on empty Scope).
+type NestedBlockConfig struct {
+	Name     string        `yaml:"name"`
+	ScopeKey string        `yaml:"scopeKey"`
+	Fields   []FieldConfig `yaml:"fields"`
+}
+
+// IsScoped reports whether the block is tenant-scoped.
+func (b NestedBlockConfig) IsScoped() bool { return b.ScopeKey != "" }

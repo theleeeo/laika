@@ -181,6 +181,31 @@ func (vc VersionConfig) Validate(resourceName string, version int) error {
 		}
 	}
 
+	// Nested blocks: valid in isolation, and their names must not collide with
+	// a root field key namespace ("fields") or any relation/other block name —
+	// each is a distinct top-level document key.
+	seen := map[string]bool{"fields": true, "search": true, "search_scoped": true}
+	for _, r := range vc.Relations {
+		seen[r.Resource] = true
+	}
+	// A root field is addressed as fields.<name>; a block name equal to a root
+	// field name still collides at the top level, so guard those too.
+	for _, f := range vc.Fields {
+		seen[f.Name] = true
+	}
+	for i, b := range vc.NestedBlocks {
+		if err := b.Validate(); err != nil {
+			if b.Name != "" {
+				return fmt.Errorf("version %d: nested block %q: %w", version, b.Name, err)
+			}
+			return fmt.Errorf("version %d: nested block %d: %w", version, i, err)
+		}
+		if seen[b.Name] {
+			return fmt.Errorf("version %d: nested block name %q collides with an existing field/relation/block", version, b.Name)
+		}
+		seen[b.Name] = true
+	}
+
 	return nil
 }
 
@@ -240,6 +265,30 @@ func (j JoinConfig) Validate() error {
 	}
 	if j.Foreign == "" {
 		return fmt.Errorf("foreign required")
+	}
+	return nil
+}
+
+func (b NestedBlockConfig) Validate() error {
+	if b.Name == "" {
+		return fmt.Errorf("name required")
+	}
+	if b.ScopeKey == "" {
+		return fmt.Errorf("scopeKey required")
+	}
+	if len(b.Fields) == 0 {
+		return fmt.Errorf("at least one field required")
+	}
+	for i, f := range b.Fields {
+		if f.Name == b.ScopeKey {
+			return fmt.Errorf("field %q collides with scopeKey", f.Name)
+		}
+		if err := f.Validate(); err != nil {
+			if f.Name != "" {
+				return fmt.Errorf("field %q: %w", f.Name, err)
+			}
+			return fmt.Errorf("field %d: %w", i, err)
+		}
 	}
 	return nil
 }
