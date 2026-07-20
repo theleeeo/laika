@@ -184,12 +184,13 @@ func (vc VersionConfig) Validate(resourceName string, version int) error {
 	// Nested blocks: valid in isolation, and their names must not collide with
 	// a root field key namespace ("fields") or any relation/other block name —
 	// each is a distinct top-level document key.
-	seen := map[string]bool{"fields": true, "search": true, "search_scoped": true}
+	seen := map[string]bool{"fields": true, "search_primary": true, "search_secondary": true}
 	for _, r := range vc.Relations {
 		seen[r.Resource] = true
 	}
-	// A root field is addressed as fields.<name>; a block name equal to a root
-	// field name still collides at the top level, so guard those too.
+	// Block names share the top-level document namespace with relations and
+	// the reserved search surfaces. Root field names are guarded as a
+	// deliberately conservative extra check.
 	for _, f := range vc.Fields {
 		seen[f.Name] = true
 	}
