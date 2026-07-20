@@ -177,3 +177,22 @@ func TestGenerateMappings_PerVersionWithCardinality(t *testing.T) {
 	require.Equal(t, "nested", relType(t, all[v1], "c"))
 	require.Equal(t, "object", relType(t, all[v2], "b"))
 }
+
+func TestGenerateMapping_ScopedNestedBlock(t *testing.T) {
+	vc := &resource.VersionConfig{
+		Version: 1,
+		Fields:  []resource.FieldConfig{{Name: "name"}},
+		NestedBlocks: []resource.NestedBlockConfig{{
+			Name:     "operator_data",
+			ScopeKey: "fiber_operator_id",
+			Fields:   []resource.FieldConfig{{Name: "custom_fields"}},
+		}},
+	}
+	props := GenerateMapping(vc)["mappings"].(map[string]any)["properties"].(map[string]any)
+	block, ok := props["operator_data"].(map[string]any)
+	require.True(t, ok, "operator_data block missing")
+	require.Equal(t, "nested", block["type"])
+	bp := block["properties"].(map[string]any)
+	require.Equal(t, "keyword", bp["fiber_operator_id"].(map[string]any)["type"])
+	require.Equal(t, "keyword", bp["custom_fields"].(map[string]any)["type"])
+}

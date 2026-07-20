@@ -134,6 +134,18 @@ func GenerateMapping(vc *resource.VersionConfig) map[string]any {
 		}
 	}
 
+	for _, b := range vc.NestedBlocks {
+		blockProps := make(map[string]any, len(b.Fields)+1)
+		blockProps[b.ScopeKey] = map[string]any{"type": "keyword"}
+		for _, f := range b.Fields {
+			blockProps[f.Name] = map[string]any{"type": f.ESType()}
+		}
+		properties[b.Name] = map[string]any{
+			"type":       "nested",
+			"properties": blockProps,
+		}
+	}
+
 	return map[string]any{
 		"settings": searchSettings(),
 		"mappings": map[string]any{
