@@ -165,3 +165,24 @@ func TestFederatedSearch_InvalidGlobalFilter(t *testing.T) {
 		t.Error("backend must not be called for an invalid federated filter")
 	}
 }
+
+func TestValidateRequestFilters_ScopedNestedBlockField(t *testing.T) {
+	vc := &resource.VersionConfig{
+		Version: 1,
+		Fields:  []resource.FieldConfig{{Name: "name"}},
+		NestedBlocks: []resource.NestedBlockConfig{{
+			Name: "operator_data", ScopeKey: "fiber_operator_id",
+			Fields: []resource.FieldConfig{{Name: "custom_fields"}},
+		}},
+	}
+	if err := validateRequestFilters(vc, []Filter{
+		{Field: "operator_data.custom_fields", Op: FilterOpEq, Value: "x=y"},
+	}); err != nil {
+		t.Fatalf("block sub-field filter rejected: %v", err)
+	}
+	if err := validateRequestFilters(vc, []Filter{
+		{Field: "operator_data.fiber_operator_id", Op: FilterOpEq, Value: "op-1"},
+	}); err == nil {
+		t.Error("filtering the managed scope key must be rejected")
+	}
+}

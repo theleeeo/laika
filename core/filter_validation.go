@@ -62,6 +62,14 @@ func resolveFilterField(vc *resource.VersionConfig, path string) (*resource.Fiel
 				}
 			}
 		}
+		if b := vc.GetNestedBlock(relName); b != nil {
+			for i := range b.Fields {
+				if b.Fields[i].Name == fieldName {
+					return &b.Fields[i], false, nil
+				}
+			}
+			// scope key and unknown sub-fields fall through to the error below.
+		}
 	}
 	return nil, false, &InvalidArgumentError{Msg: fmt.Sprintf("unknown filter field %q", path)}
 }
