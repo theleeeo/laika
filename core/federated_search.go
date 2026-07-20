@@ -34,6 +34,11 @@ type FederatedSearchRequest struct {
 	// The query builder weaves it into the nested search_secondary clause. Empty
 	// means unscoped secondary (standalone-app behaviour).
 	SecondaryScope string
+
+	// Scope is the caller's tenant value applied to every requested Type that
+	// declares a scoped nested block (visibility on the federated path). Empty
+	// ⇒ such a Type contributes no hits (its group is MatchNothing).
+	Scope string
 }
 
 // FederatedHit is a single cross-type hit, tagged with the Resource Type it
@@ -153,7 +158,7 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 
 	// Build each Type's visibility group from the per-Type filters a federated
 	// middleware supplied on the request (ResourceFilters).
-	groups, err := idx.buildIndexFilterGroups(ctx, req.Resources, req.ResourceFilters)
+	groups, err := idx.buildIndexFilterGroups(ctx, req.Resources, req.ResourceFilters, req.Scope)
 	if err != nil {
 		return FederatedSearchResponse{}, err
 	}
@@ -225,10 +230,17 @@ type IndexFilterGroup struct {
 // the federation still return. A Type with no perType entry gets an unfiltered
 // group (Type membership only).
 //
+// After reference resolution, each requested Type's scoped nested block(s)
+// (VersionConfig.ScopedNestedBlocks) get an additional correlated filter on
+// <block>.<ScopeKey> against scope, mirroring the single-resource path's
+// nested visibility check. An empty scope marks the group MatchNothing
+// (fail-closed) rather than silently searching unscoped, since a reference
+// matchedNothing already short-circuited before this point.
+//
 // Nested-path derivation (deriveNestedPath) is deliberately not applied here,
 // matching the former collect mode: per-Type filters targeting
 // denormalized-many nested fields are unsupported on the federated path.
-func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []string, perType map[string][]Filter) ([]IndexFilterGroup, error) {
+func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []string, perType map[string][]Filter, scope string) ([]IndexFilterGroup, error) {
 	groups := make([]IndexFilterGroup, 0, len(resources))
 	for _, name := range resources {
 		r := idx.resources.Get(name)
@@ -244,8 +256,26 @@ func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []stri
 		group := IndexFilterGroup{Resource: name, Alias: AliasName(r.Resource)}
 		if matchedNothing {
 			group.MatchNothing = true
-		} else {
-			group.Filters = resolved
+			groups = append(groups, group)
+			continue
+		}
+		group.Filters = resolved
+
+		// Multi-tenant Types enforce the caller scope on their nested block(s).
+		if vc := r.ReadVersionConfig(); vc != nil {
+			for _, b := range vc.ScopedNestedBlocks() {
+				if scope == "" {
+					group.MatchNothing = true
+					group.Filters = nil
+					break
+				}
+				group.Filters = append(group.Filters, Filter{
+					Field:      b.Name + "." + b.ScopeKey,
+					Op:         FilterOpEq,
+					Value:      scope,
+					NestedPath: b.Name,
+				})
+			}
 		}
 		groups = append(groups, group)
 	}

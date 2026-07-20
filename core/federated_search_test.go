@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core/resource"
 )
 
@@ -308,7 +309,7 @@ func TestBuildIndexFilterGroups_TagsFiltersWithAlias(t *testing.T) {
 	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"product", "order"}, map[string][]Filter{
 		"product": {{Field: "fields.tenant_id", Op: FilterOpEq, Value: "t1"}},
 		// "order" has no entry: it must get an unfiltered group.
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("buildIndexFilterGroups: %v", err)
 	}
@@ -333,7 +334,7 @@ func TestBuildIndexFilterGroups_UnknownResource(t *testing.T) {
 	backend := &recordingBackend{}
 	idx := newFederatedIndexerMW(backend, []string{"product"})
 
-	_, err := idx.buildIndexFilterGroups(context.Background(), []string{"nope"}, nil)
+	_, err := idx.buildIndexFilterGroups(context.Background(), []string{"nope"}, nil, "")
 	if !errors.Is(err, ErrUnknownResource) {
 		t.Fatalf("expected ErrUnknownResource, got %v", err)
 	}
@@ -382,7 +383,7 @@ func TestBuildIndexFilterGroups_ResolvesReferenceFilter(t *testing.T) {
 
 	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"ap"}, map[string][]Filter{
 		"ap": {{Field: "pop.fiber_operator_id", Op: FilterOpEq, Value: "op-A"}},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("buildIndexFilterGroups: %v", err)
 	}
@@ -401,13 +402,39 @@ func TestBuildIndexFilterGroups_ResolvesReferenceFilter(t *testing.T) {
 	}
 }
 
+func TestFederatedSearch_ScopedBlock_InjectsScopeOrMatchNothing(t *testing.T) {
+	idx := &Indexer{resources: resource.Configs{{
+		Resource: "population", ReadVersion: 1,
+		Versions: []resource.VersionConfig{{
+			Version: 1, Fields: []resource.FieldConfig{{Name: "name"}},
+			NestedBlocks: []resource.NestedBlockConfig{{
+				Name: "operator_data", ScopeKey: "fiber_operator_id",
+				Fields: []resource.FieldConfig{{Name: "available_products"}},
+			}},
+		}},
+	}}}
+
+	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"population"}, nil, "op-1")
+	require.NoError(t, err)
+	require.Len(t, groups, 1)
+	require.False(t, groups[0].MatchNothing)
+	require.Len(t, groups[0].Filters, 1)
+	require.Equal(t, "operator_data.fiber_operator_id", groups[0].Filters[0].Field)
+	require.Equal(t, "operator_data", groups[0].Filters[0].NestedPath)
+	require.Equal(t, "op-1", groups[0].Filters[0].Value)
+
+	empty, err := idx.buildIndexFilterGroups(context.Background(), []string{"population"}, nil, "")
+	require.NoError(t, err)
+	require.True(t, empty[0].MatchNothing, "empty scope must fail closed on the federated path")
+}
+
 func TestBuildIndexFilterGroups_ReferenceZeroChildrenMatchNothing(t *testing.T) {
 	backend := &recordingBackend{} // child search returns no hits
 	idx := newReferenceIndexerMW(backend)
 
 	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"ap", "pop"}, map[string][]Filter{
 		"ap": {{Field: "pop.fiber_operator_id", Op: FilterOpEq, Value: "op-none"}},
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("buildIndexFilterGroups: %v", err)
 	}
