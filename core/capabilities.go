@@ -35,6 +35,12 @@ func (idx *Indexer) GetCapabilities() CapabilitiesResponse {
 			}
 		}
 
+		for _, b := range vc.NestedBlocks {
+			for _, f := range b.Fields {
+				cap.Fields = append(cap.Fields, fieldCapability(fmt.Sprintf("%s.%s", b.Name, f.Name), f))
+			}
+		}
+
 		resp.Resources = append(resp.Resources, cap)
 	}
 

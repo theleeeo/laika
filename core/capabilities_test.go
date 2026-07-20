@@ -3,6 +3,7 @@ package core
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core/resource"
 )
 
@@ -215,4 +216,26 @@ func assertField(t *testing.T, f FieldCapability, wantField, wantType string, wa
 			t.Errorf("filter_ops[%d] for %q: got %v, want %v", i, wantField, f.FilterOps[i], op)
 		}
 	}
+}
+
+func TestGetCapabilities_ScopedNestedBlockFields(t *testing.T) {
+	idx := &Indexer{resources: resource.Configs{{
+		Resource:    "a",
+		ReadVersion: 1,
+		Versions: []resource.VersionConfig{{
+			Version: 1,
+			Fields:  []resource.FieldConfig{{Name: "name"}},
+			NestedBlocks: []resource.NestedBlockConfig{{
+				Name: "operator_data", ScopeKey: "fiber_operator_id",
+				Fields: []resource.FieldConfig{{Name: "custom_fields"}},
+			}},
+		}},
+	}}}
+	caps := idx.GetCapabilities()
+	var paths []string
+	for _, f := range caps.Resources[0].Fields {
+		paths = append(paths, f.Field)
+	}
+	require.Contains(t, paths, "operator_data.custom_fields")
+	require.NotContains(t, paths, "operator_data.fiber_operator_id")
 }
