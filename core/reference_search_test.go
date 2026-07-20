@@ -174,6 +174,33 @@ func TestReferenceFieldFilterScopesChildOnly(t *testing.T) {
 	}
 }
 
+// TestReferenceFieldFilterThreadsScopeIntoChild is a regression test for a
+// fail-closed bug: the child reference search must carry the same Scope as
+// the parent request. Without this, a multi-tenant referenced resource (one
+// declaring a scoped nested block) would see an empty Scope on its child
+// search, match_none in the ES backend (see buildScopedNestedClause in
+// backend/elasticsearch/search.go), and silently empty out every parent
+// search that filters by a reference field on it — for every caller,
+// regardless of their actual scope.
+func TestReferenceFieldFilterThreadsScopeIntoChild(t *testing.T) {
+	be := &fakeBackend{childHits: map[string][]SearchHit{AliasName("b"): {{ID: "b1"}}}}
+	var childReq SearchRequest
+	be2 := &captureChild{fakeBackend: be, onChild: func(r SearchRequest) { childReq = r }}
+	idx := New(Config{Resources: scopedRefResources(), ES: be2})
+
+	_, err := idx.Search(context.Background(), SearchRequest{
+		Resource: "c",
+		Scope:    "tenant-7",
+		Filters:  []Filter{{Field: "b.name", Op: FilterOpEq, Value: "acme"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childReq.Scope != "tenant-7" {
+		t.Fatalf("expected child search to carry parent's Scope %q, got %q", "tenant-7", childReq.Scope)
+	}
+}
+
 func hasFilter(fs []Filter, field string) bool {
 	for _, f := range fs {
 		if f.Field == field {
@@ -206,6 +233,29 @@ func refResources() resource.Configs {
 			}}}},
 		{Resource: "a", ReadVersion: 1, Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "b_id"}}}}},
 		{Resource: "b", ReadVersion: 1, Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "name"}}}}},
+	}
+}
+
+// scopedRefResources mirrors refResources() but its referenced child "b"
+// declares a scoped nested block, making "b" a multi-tenant resource. Kept as
+// a separate fixture (rather than extending refResources()) so the existing
+// reference tests — whose requests and child configs carry no Scope — stay
+// green and unaffected by this addition.
+func scopedRefResources() resource.Configs {
+	return resource.Configs{
+		{Resource: "c", ReadVersion: 1, Versions: []resource.VersionConfig{{Version: 1,
+			Fields: []resource.FieldConfig{{Name: "b_id"}},
+			Relations: []resource.RelationConfig{
+				{Resource: "a", Join: resource.JoinConfig{Local: "id", Foreign: "c_id"}, Fields: []resource.FieldConfig{{Name: "b_id"}}},
+				{Resource: "b", Strategy: resource.StrategyReference, Join: resource.JoinConfig{Local: "b_id", From: "a", Foreign: "id"}, Fields: []resource.FieldConfig{{Name: "name"}}},
+			}}}},
+		{Resource: "a", ReadVersion: 1, Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "b_id"}}}}},
+		{Resource: "b", ReadVersion: 1, Versions: []resource.VersionConfig{{Version: 1,
+			Fields: []resource.FieldConfig{{Name: "name"}},
+			NestedBlocks: []resource.NestedBlockConfig{
+				{Name: "tenants", ScopeKey: "tenant_id", Fields: []resource.FieldConfig{{Name: "role"}}},
+			},
+		}}},
 	}
 }
 

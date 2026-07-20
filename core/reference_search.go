@@ -41,7 +41,7 @@ type referenceTarget struct {
 // without recomposing the search chain.
 func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 	return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, req.Resource, req.Filters)
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, req.Resource, req.Filters, req.Scope)
 		if err != nil {
 			return SearchResponse{}, err
 		}
@@ -68,9 +68,17 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 // excludes just that Type (its group matches nothing) so other Types still
 // return. In that case the returned filter slice is unspecified.
 //
+// scope is the caller's tenant value, threaded onto each child SearchRequest
+// unchanged from the parent's request Scope: the child search is answering
+// the same caller, so a multi-tenant referenced resource (one declaring a
+// scoped nested block) must be scoped identically to the primary search,
+// rather than defaulting to empty and fail-closing to zero hits (see
+// buildScopedNestedClause in backend/elasticsearch/search.go). A single-tenant
+// child ignores Scope, so passing it through is inert there.
+//
 // A resource with no read version config resolves to its filters unchanged.
 // idx.resources is read at call time so SetPlans updates need no chain rebuild.
-func (idx *Indexer) resolveReferenceFilters(ctx context.Context, resourceName string, filters []Filter) (resolved []Filter, matchedNothing bool, err error) {
+func (idx *Indexer) resolveReferenceFilters(ctx context.Context, resourceName string, filters []Filter, scope string) (resolved []Filter, matchedNothing bool, err error) {
 	logger := LoggerFromContext(ctx)
 	cfg := idx.resources.Get(resourceName)
 	if cfg == nil {
@@ -155,6 +163,7 @@ func (idx *Indexer) resolveReferenceFilters(ctx context.Context, resourceName st
 			Resource: tgt.Resource,
 			Filters:  tgt.Filters,
 			PageSize: maxReferenceTerms,
+			Scope:    scope,
 		}, AliasName(tgt.Resource), childCfg.ReadVersionConfig())
 		if err != nil {
 			return nil, false, err

@@ -248,7 +248,7 @@ func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []stri
 			return nil, fmt.Errorf("%q: %w", name, ErrUnknownResource)
 		}
 
-		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, perType[name])
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, perType[name], scope)
 		if err != nil {
 			return nil, fmt.Errorf("resolve reference filters for %q: %w", name, err)
 		}
