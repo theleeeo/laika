@@ -10,9 +10,6 @@ CREATE TABLE IF NOT EXISTS resources (
     UNIQUE (type, id)
 );
 
--- Upgrade path for databases created before the metadata column existed.
-ALTER TABLE resources ADD COLUMN IF NOT EXISTS metadata JSONB;
-
 CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
     WHERE stale_since IS NOT NULL;
 
