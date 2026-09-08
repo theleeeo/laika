@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"slices"
-	"time"
 
 	"github.com/theleeeo/laika/core"
 )
@@ -41,7 +40,9 @@ const fanoutMaxWindow = 10000
 // index empties its own leg only, where the single query's 404 empties the
 // whole response.
 func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
-	window := int(p.Page+1) * int(p.PageSize)
+	// int64: core's normalizePaging does not cap Page, and (Page+1)*PageSize
+	// wraps in int32, sneaking a huge window past this guard.
+	window := (int64(p.Page) + 1) * int64(p.PageSize)
 	if window > fanoutMaxWindow {
 		return core.FederatedSearchResult{}, fmt.Errorf(
 			"federated fan-out paging window %d exceeds %d: page %d x page_size %d over-fetches past index.max_result_window",
@@ -72,7 +73,7 @@ func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchPara
 			result.IndexCounts[g.Alias] = 0
 			continue
 		}
-		body, err := buildFanoutLegBody(p, g, globalFilters, window)
+		body, err := buildFanoutLegBody(p, g, globalFilters, int(window))
 		if err != nil {
 			return core.FederatedSearchResult{}, err
 		}
@@ -91,7 +92,7 @@ func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchPara
 
 	core.LoggerFromContext(ctx).Debug("federated es fanout query", slog.String("body", buf.String()))
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, federatedSearchTimeout)
 	defer cancel()
 
 	res, err := c.es.Msearch(bytes.NewReader(buf.Bytes()), c.es.Msearch.WithContext(ctx))

@@ -25,8 +25,11 @@ type Client struct {
 
 // FederatedExecution selects how FederatedSearch executes against the cluster.
 // It is an experiment toggle (ADR 0007 kept per-Type fan-out as a documented
-// future execution swap): all modes return the same hit membership and counts,
-// but they differ in scoring statistics and pagination cost.
+// future execution swap): all modes return the same hit membership, but they
+// differ in scoring statistics and pagination cost, and totals match only
+// below ES's track_total_hits cap (default 10k) — the single query caps Total
+// once across all indices where the fan-out sums per-leg capped totals, so
+// the modes' totals diverge above the cap.
 type FederatedExecution string
 
 const (

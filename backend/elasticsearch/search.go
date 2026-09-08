@@ -157,19 +157,29 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 // other FederatedExecution modes.
 const federatedSearchType = "dfs_query_then_fetch"
 
+// federatedSearchTimeout bounds one federated ES round trip; shared by the
+// single-query and fan-out executions.
+const federatedSearchTimeout = 10 * time.Second
+
 // FederatedSearch dispatches on the Client's FederatedExecution mode: a single
 // multi-index query with global (DFS) or index-local term statistics, or a
-// per-Type fan-out merged client-side. All modes return the same hit membership
-// and counts; scoring statistics and pagination cost differ (see
-// FederatedExecution).
+// per-Type fan-out merged client-side. All modes return the same hit
+// membership; totals agree only below ES's track_total_hits cap (see
+// FederatedExecution) and scoring statistics and pagination cost differ.
+// A mode outside the declared constants is refused: New cannot error, so an
+// unvalidated WithFederatedExecution value must fail here, not silently
+// search in a mode the caller never picked.
 func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
 	switch c.federatedExecution {
 	case FederatedFanout:
 		return c.federatedFanout(ctx, p)
 	case FederatedSingle:
 		return c.federatedSingle(ctx, p, "")
-	default:
+	case FederatedSingleDFS:
 		return c.federatedSingle(ctx, p, federatedSearchType)
+	default:
+		return core.FederatedSearchResult{}, fmt.Errorf("unknown federated execution mode %q (want %q, %q or %q)",
+			c.federatedExecution, FederatedSingleDFS, FederatedSingle, FederatedFanout)
 	}
 }
 
@@ -227,7 +237,7 @@ func (c *Client) federatedSingle(ctx context.Context, p core.FederatedSearchPara
 
 	core.LoggerFromContext(ctx).Debug("federated es query", slog.String("body", string(b)))
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, federatedSearchTimeout)
 	defer cancel()
 
 	searchOpts := []func(*esapi.SearchRequest){

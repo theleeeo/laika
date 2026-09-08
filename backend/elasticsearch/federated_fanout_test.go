@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -321,6 +322,32 @@ func TestFederatedFanout_PagingWindowCap(t *testing.T) {
 	}, "") // transport must not be reached
 	if err == nil || !strings.Contains(err.Error(), "max_result_window") {
 		t.Fatalf("expected paging window cap error, got %v", err)
+	}
+}
+
+func TestFederatedFanout_PagingWindowCapSurvivesInt32Overflow(t *testing.T) {
+	// (Page+1)*PageSize wraps in int32; the guard must still refuse the window.
+	_, _, _, err := captureFanout(t, core.FederatedSearchParams{
+		Query: "q", FilterGroups: fedGroups(), Page: math.MaxInt32, PageSize: 100,
+	}, "") // transport must not be reached
+	if err == nil || !strings.Contains(err.Error(), "max_result_window") {
+		t.Fatalf("expected paging window cap error, got %v", err)
+	}
+}
+
+func TestFederatedSearch_UnknownModeIsRefused(t *testing.T) {
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		t.Error("unexpected HTTP call")
+		return nil, fmt.Errorf("unexpected HTTP call")
+	})
+	esClient, err := esv8.NewClient(esv8.Config{Addresses: []string{"http://example.invalid"}, Transport: rt})
+	if err != nil {
+		t.Fatalf("new es client: %v", err)
+	}
+	_, err = New(esClient, false, WithFederatedExecution("bogus")).
+		FederatedSearch(context.Background(), core.FederatedSearchParams{Query: "q", FilterGroups: fedGroups(), PageSize: 25})
+	if err == nil || !strings.Contains(err.Error(), "unknown federated execution mode") {
+		t.Fatalf("expected an unknown-mode error, got %v", err)
 	}
 }
 
