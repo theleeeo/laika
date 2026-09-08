@@ -10,12 +10,13 @@ Canonical vocabulary lives in [CONTEXT.md](CONTEXT.md); architectural decisions 
 # Run the application (from repo root)
 go run ./app/cmd/indexer
 
-# Run unit tests only (no Docker needed)
-go test ./core/... ./app/server/... ./app/dsl/...
+# Run unit tests only (no Docker needed; backend/elasticsearch tests run
+# against a mock HTTP transport, not a real cluster)
+go test ./core/... ./backend/... ./app/server/... ./app/dsl/...
 
 # Run integration tests (requires Docker for testcontainers):
-# storage/postgres, backend/elasticsearch, and app/tests all hit real infra
-go test ./storage/... ./backend/... ./app/tests/...
+# storage/postgres and app/tests hit real infra
+go test ./storage/... ./app/tests/...
 
 # Run all tests
 go test ./...
@@ -120,7 +121,7 @@ Both `Store` and `SearchBackend` have exactly one implementation each; the inter
 
 ### Testing
 
-- Unit tests: `core/`, `app/server/`, `app/dsl/` — no Docker needed (Store/SearchBackend mocked)
-- Integration tests: `storage/postgres/`, `backend/elasticsearch/`, `app/tests/` — use testcontainers (Docker) for real Postgres + Elasticsearch
+- Unit tests: `core/`, `backend/elasticsearch/`, `app/server/`, `app/dsl/` — no Docker needed (Store/SearchBackend mocked in `core`; the ES client tested against a mock HTTP transport)
+- Integration tests: `storage/postgres/`, `app/tests/` — use testcontainers (Docker) for real Postgres + Elasticsearch
 
 Any feature or behavior change must include tests.

@@ -15,24 +15,24 @@ import (
 // Config file keys use dot-notation (e.g. es.addrs). Each key maps to an
 // upper-snake-case env var by replacing '.' with '_':
 //
-//	grpc.public_addr    → GRPC_PUBLIC_ADDR
-//	grpc.admin_addr     → GRPC_ADMIN_ADDR
-//	es.addrs            → ES_ADDRS  (comma-separated when set via env)
-//	es.username         → ES_USERNAME
-//	es.password         → ES_PASSWORD
+//	grpc.public_addr       → GRPC_PUBLIC_ADDR
+//	grpc.admin_addr        → GRPC_ADMIN_ADDR
+//	es.addrs               → ES_ADDRS  (comma-separated when set via env)
+//	es.username            → ES_USERNAME
+//	es.password            → ES_PASSWORD
 //	es.federated_execution → ES_FEDERATED_EXECUTION
-//	pg.addr             → PG_ADDR
-//	provider.addr       → PROVIDER_ADDR
-//	resource_config_path → RESOURCE_CONFIG_PATH
-//	log.level           → LOG_LEVEL
-//	temporal.host_port  → TEMPORAL_HOST_PORT
-//	temporal.namespace  → TEMPORAL_NAMESPACE
-//	temporal.task_queue → TEMPORAL_TASK_QUEUE
-//	sweep.interval      → SWEEP_INTERVAL
-//	sweep.threshold     → SWEEP_THRESHOLD
-//	sweep.batch_size    → SWEEP_BATCH_SIZE
-//	pool.size           → POOL_SIZE
-//	pool.queue_size     → POOL_QUEUE_SIZE
+//	pg.addr                → PG_ADDR
+//	provider.addr          → PROVIDER_ADDR
+//	resource_config_path   → RESOURCE_CONFIG_PATH
+//	log.level              → LOG_LEVEL
+//	temporal.host_port     → TEMPORAL_HOST_PORT
+//	temporal.namespace     → TEMPORAL_NAMESPACE
+//	temporal.task_queue    → TEMPORAL_TASK_QUEUE
+//	sweep.interval         → SWEEP_INTERVAL
+//	sweep.threshold        → SWEEP_THRESHOLD
+//	sweep.batch_size       → SWEEP_BATCH_SIZE
+//	pool.size              → POOL_SIZE
+//	pool.queue_size        → POOL_QUEUE_SIZE
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`

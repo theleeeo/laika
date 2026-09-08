@@ -11,6 +11,15 @@
 > [the federated-search-middleware spec](../superpowers/specs/2026-07-06-federated-search-middleware-design.md).
 > Everything else in this ADR stands.
 
+> **Update (2026-09-08):** the per-Type fan-out kept below as a documented
+> *future* execution swap now exists, as an experiment toggle rather than a
+> decision change: `elasticsearch.FederatedExecution` selects the single
+> DFS query (still the default), a plain `query_then_fetch` single query, or
+> a per-Type `_msearch` fan-out merged client-side. The standalone app
+> exposes it as `es.federated_execution`. The trade-offs called out below
+> (approximate score comparability, N× over-fetch at pagination depth) are
+> unchanged and are documented on the toggle and `federatedFanout`.
+
 > **Renamed (2026-07-20):** the two standardized surfaces are now named by tier —
 > `search` → `search_primary` and `search_scoped` → `search_secondary` — so the
 > field names carry the primary/secondary distinction (the reason the split
