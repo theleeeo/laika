@@ -255,3 +255,7 @@ func TestBuildOne_Drift_RemarksStale_SoGuardedClearIsNoop(t *testing.T) {
 		t.Fatalf("drift must re-mark and re-build (marks=%d begins=%d): %v", marks, begins, calls)
 	}
 }
+
+func (s *recordingStore) RegisterChanges(context.Context, []Registration) (Registered, error) {
+	panic("RegisterChanges: not implemented")
+}

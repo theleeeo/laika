@@ -110,3 +110,7 @@ func TestRebuildAll_CancelledContext_AbortsDocLoop(t *testing.T) {
 		t.Fatalf("expected rebuild to stop after the cancelling call, RemoveResource was called %d times", store.removeCalls)
 	}
 }
+
+func (s *cancellingStore) RegisterChanges(context.Context, []Registration) (Registered, error) {
+	panic("RegisterChanges: not implemented")
+}

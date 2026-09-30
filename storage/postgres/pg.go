@@ -138,6 +138,11 @@ func (s *Store) UpsertResource(ctx context.Context, resource model.Resource, ver
 	return nil
 }
 
+// RegisterChanges records a batch of changes in one statement. L1.2 lane A.
+func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) (core.Registered, error) {
+	return core.Registered{}, errors.New("RegisterChanges: not implemented")
+}
+
 // AnyResourceVersionDrifted reports whether any of the given versioned
 // resources now has a version in the resources table that is strictly greater
 // than the observed version. Resources with ObservedVersion == 0 are skipped

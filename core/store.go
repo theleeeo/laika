@@ -21,6 +21,13 @@ type Store interface {
 	RemoveResource(ctx context.Context, resource model.Resource) error
 	UpsertResource(ctx context.Context, resource model.Resource, version int64) error
 
+	// RegisterChanges records a batch of changes in one atomic statement:
+	// each accepted item's version (or tombstone), stale mark and metadata,
+	// and the stale marks of the accepted items' Parents, commit together or
+	// not at all. See Registration for what is accepted. The items must name
+	// distinct resources; the caller validates that.
+	RegisterChanges(ctx context.Context, items []Registration) (Registered, error)
+
 	// MarkStale durably records build intent for the given resources, along
 	// with the notification metadata the eventual build must run with. The
 	// metadata is stored per resource (last mark wins) so a sweep-recovered
@@ -45,5 +52,45 @@ type StaleResource struct {
 	Deleted  bool
 	// Metadata is the notification metadata stored by the most recent
 	// MarkStale, replayed into the build that serves the mark.
+	Metadata map[string]string
+}
+
+// Registration is one item of a RegisterChanges batch.
+type Registration struct {
+	Resource model.Resource
+	// Deleted tombstones the row instead of upserting it. A delete is always
+	// accepted; Version is ignored and the stored version resets to 0.
+	Deleted bool
+	// Version 0 means the upstream does not track versions: the item is
+	// always accepted. A non-zero Version is accepted only when strictly
+	// greater than the stored one; otherwise the item is stale and nothing
+	// is written for it — neither its row nor its Parents' marks.
+	Version int64
+	// Metadata is stored on the item's own row with its mark.
+	Metadata map[string]string
+}
+
+// Registered is the committed outcome of RegisterChanges.
+type Registered struct {
+	// Items is index-aligned with the input.
+	Items []RegisteredItem
+	// Parents are the rows the statement marked stale as Parents of accepted
+	// items, excluding resources that are themselves accepted items of the
+	// batch (their own row already carries the mark). Each appears once.
+	Parents []MarkedParent
+}
+
+// RegisteredItem is one item's outcome.
+type RegisteredItem struct {
+	Accepted bool
+	// StaleSeq is the row's stale_seq after the mark, for accepted items; a
+	// delete is submitted with it (DeleteResourceIfSeq).
+	StaleSeq int64
+}
+
+// MarkedParent is a Parent RegisterChanges marked stale, with the metadata
+// it stored on the row: that of the last accepted child in batch order.
+type MarkedParent struct {
+	model.Resource
 	Metadata map[string]string
 }

@@ -876,3 +876,7 @@ func TestRebuildAll_CancelledWalkNeverReportsSuccess(t *testing.T) {
 		t.Fatal("the walk stopped before page 3; product 5 must never have been begun")
 	}
 }
+
+func (s *rebuildRecordingStore) RegisterChanges(context.Context, []Registration) (Registered, error) {
+	panic("RegisterChanges: not implemented")
+}

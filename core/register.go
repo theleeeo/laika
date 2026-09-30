@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -73,6 +74,31 @@ func (idx *Indexer) RegisterChange(ctx context.Context, n Notification, opts ...
 
 	idx.submitBuilds(ctx, roots, n.Metadata, o.waitForSlot)
 	return nil
+}
+
+// RegisterStatus is one notification's outcome in RegisterChanges.
+type RegisterStatus int
+
+const (
+	// RegisterAccepted: the change is durably recorded and its builds are
+	// scheduled.
+	RegisterAccepted RegisterStatus = iota
+	// RegisterStale: a non-zero version not greater than the stored one;
+	// nothing was written for it.
+	RegisterStale
+)
+
+// RegisterChanges registers a batch of notifications atomically: every
+// accepted item's version or tombstone, stale mark and metadata, and the
+// marks of their Parents, commit in one statement or not at all. A non-nil
+// error means nothing was committed and the whole batch may be retried.
+// After the commit, deletes and builds are submitted per id (WaitForSlot
+// applies to them). The statuses are index-aligned with ns.
+//
+// The batch is validated before any statement: an unknown resource or two
+// notifications naming the same resource fail the call.
+func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts ...RegisterOption) ([]RegisterStatus, error) {
+	return nil, errors.New("RegisterChanges: not implemented")
 }
 
 func groupResourceIDsByType(roots []model.Resource) map[string][]string {
