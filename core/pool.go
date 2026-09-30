@@ -12,9 +12,12 @@ import (
 // loses to a crash is recovered by the stale sweep. See ADR 0008.
 //
 // A fixed set of worker goroutines, started at construction, consume tasks
-// from a bounded queue. Submission never blocks: the queue's buffer is the
+// from a bounded queue. trySubmit never blocks: the queue's buffer is the
 // burst absorber, and a full queue sheds immediately, so producers
-// (RegisterChange RPCs) never feel backpressure from a saturated pool.
+// (RegisterChange RPCs) feel no backpressure from a saturated pool by
+// default. submitWait is the opt-in exception for callers outside the pool
+// (RegisterChange with WaitForSlot): it waits while the queue is at or above
+// the high-water mark, until ctx ends or the pool shuts down.
 type buildPool struct {
 	// queue carries accepted tasks to the workers. It is never close()d — a
 	// submitter racing shutdown could panic on send. Rejection is the closed
@@ -33,6 +36,21 @@ type buildPool struct {
 	pending atomic.Int64
 	closed  atomic.Bool
 
+	// highWater is the queued-task count at or above which the pool is
+	// pressured. New guarantees 1 <= highWater <= cap(queue).
+	highWater int
+
+	// slotFreed carries one wakeup token for submitWait. Workers drop a token
+	// (non-blocking) each time they dequeue, the only event that lowers
+	// len(queue). The buffer of one coalesces bursts of dequeues into a
+	// single token, so a waiter that consumes a token and leaves the queue
+	// below the mark passes a token on: otherwise a second waiter could sleep
+	// through a free slot.
+	slotFreed chan struct{}
+
+	// done is closed by shutdown so waiters return without polling.
+	done chan struct{}
+
 	// baseCtx is the context tasks run under. It is independent of any
 	// caller's context — inline work must outlive the RPC that triggered it —
 	// and is cancelled only when shutdown stops waiting.
@@ -43,9 +61,12 @@ type buildPool struct {
 func newBuildPool(workers, queueSize, highWater int) *buildPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &buildPool{
-		queue:   make(chan func(context.Context), queueSize),
-		baseCtx: ctx,
-		cancel:  cancel,
+		queue:     make(chan func(context.Context), queueSize),
+		highWater: highWater,
+		slotFreed: make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		baseCtx:   ctx,
+		cancel:    cancel,
 	}
 	for range workers {
 		go p.worker()
@@ -60,6 +81,7 @@ func (p *buildPool) worker() {
 	for {
 		select {
 		case task := <-p.queue:
+			p.signalSlotFreed()
 			task(p.baseCtx)
 			p.pending.Add(-1)
 		case <-p.baseCtx.Done():
@@ -108,14 +130,46 @@ func (p *buildPool) trySubmit(task func(context.Context)) bool {
 // task when ctx ends or the pool shuts down before a slot frees; both return
 // promptly. Only callers outside the pool may use it: a task that waited on
 // its own pool could deadlock it.
+//
+// Acceptance goes through trySubmit, so a task submitWait accepts is covered
+// by shutdown's drain exactly like one trySubmit accepts. A trySubmit that
+// fails while the pool is not pressured lost a race for the last slot; the
+// wait continues rather than shedding.
 func (p *buildPool) submitWait(ctx context.Context, task func(context.Context)) bool {
-	panic("L1.1: not implemented")
+	for {
+		if p.closed.Load() {
+			return false
+		}
+		if !p.pressured() && p.trySubmit(task) {
+			if !p.pressured() {
+				p.signalSlotFreed() // pass the wakeup on; see slotFreed
+			}
+			return true
+		}
+		select {
+		case <-p.slotFreed:
+		case <-ctx.Done():
+			return false
+		case <-p.done:
+			return false
+		}
+	}
+}
+
+// signalSlotFreed wakes one submitWait waiter, if any; it never blocks.
+func (p *buildPool) signalSlotFreed() {
+	select {
+	case p.slotFreed <- struct{}{}:
+	default:
+	}
 }
 
 // pressured reports whether the queue is at or above the high-water mark.
-// WaitForSlot registrations and the reverse sweep pace on it.
+// WaitForSlot registrations and the reverse sweep pace on it. It takes no
+// lock: len of a channel is a single read, and a stale answer only shifts a
+// wait by one dequeue.
 func (p *buildPool) pressured() bool {
-	panic("L1.1: not implemented")
+	return len(p.queue) >= p.highWater
 }
 
 // waitIdle blocks until no tasks are queued or running. Tasks submit their
@@ -144,7 +198,9 @@ func (p *buildPool) waitIdle(ctx context.Context) error {
 // finished. See the pending field comment for why a WaitGroup cannot do this
 // job.
 func (p *buildPool) shutdown(ctx context.Context) error {
-	p.closed.Store(true)
+	if p.closed.CompareAndSwap(false, true) {
+		close(p.done)
+	}
 	err := p.waitIdle(ctx)
 	p.cancel()
 	return err

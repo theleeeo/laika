@@ -297,7 +297,7 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		// On a drift-check error, re-mark rather than risk a silent
 		// convergence gap: a redundant rebuild is safe, a missed one is not.
 		if perErr != nil || perResource {
-			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, f.metadata); err != nil {
+			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, f.metadata, false); err != nil {
 				slog.Warn("drift re-schedule failed", slog.String("id", id), slog.String("error", err.Error()))
 			}
 		}

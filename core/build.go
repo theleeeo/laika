@@ -176,7 +176,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
 	// Parents the Plans derived from the Child's own data, unioned across
 	// every Schema Version's plan.
-	if err := idx.scheduleBuild(ctx, parents, metadata); err != nil {
+	if err := idx.scheduleBuild(ctx, parents, metadata, false); err != nil {
 		return err
 	}
 
@@ -197,7 +197,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType),
 				slog.String("id", resourceID),
 			)
-			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
+			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata, false); err != nil {
 				return fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
 		}

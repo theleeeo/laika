@@ -43,7 +43,7 @@ type Config struct {
 	PoolSize int
 
 	// QueueSize bounds the number of accepted-but-not-yet-running inline
-	// builds. Submission never blocks: a full queue sheds immediately,
+	// builds. By default submission never blocks: a full queue sheds at once,
 	// leaving the resource stale for the sweep — except a RegisterChange
 	// called with WaitForSlot, which waits for the queue to drop below
 	// QueueHighWater. Default 10 × PoolSize.
@@ -51,8 +51,8 @@ type Config struct {
 
 	// QueueHighWater is the queued-task count at or above which the pool is
 	// under pressure: WaitForSlot registrations wait until the queue drops
-	// below it. Must be in [1, QueueSize]. Default 80% of QueueSize, at
-	// least 1.
+	// below it. 0 means the default, 80% of QueueSize and at least 1; any
+	// other value outside [1, QueueSize] makes New fail.
 	QueueHighWater int
 
 	// RebuildChunkSize bounds the number of documents per bulk write during
@@ -149,7 +149,14 @@ func New(cfg Config) (*Indexer, error) {
 	if queueSize <= 0 {
 		queueSize = poolSize * 10
 	}
-	idx.pool = newBuildPool(poolSize, queueSize, 0) // L1.1: high-water default and validation pending
+	highWater := cfg.QueueHighWater
+	if highWater == 0 {
+		highWater = max(1, queueSize*8/10)
+	}
+	if highWater < 1 || highWater > queueSize {
+		return nil, fmt.Errorf("queue high water %d outside [1, %d] (the queue size)", highWater, queueSize)
+	}
+	idx.pool = newBuildPool(poolSize, queueSize, highWater)
 
 	idx.rebuildChunkSize = cfg.RebuildChunkSize
 	if idx.rebuildChunkSize <= 0 {

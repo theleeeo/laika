@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,29 @@ type recordingStore struct {
 	calls   []string
 	parents []model.Resource
 	drift   atomic.Bool // one-shot: report drift on the first AnyResourceVersionDrifted
+	// marked, when set, receives (non-blocking) after every MarkStale and
+	// MarkDeleted: the point past which a WaitForSlot registration may wait.
+	marked chan struct{}
+}
+
+func (s *recordingStore) signalMarked() {
+	if s.marked == nil {
+		return
+	}
+	select {
+	case s.marked <- struct{}{}:
+	default:
+	}
+}
+
+func (s *recordingStore) count(prefix string) int {
+	n := 0
+	for _, c := range s.callsSnapshot() {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *recordingStore) record(format string, args ...any) {
@@ -41,12 +65,18 @@ func (s *recordingStore) indexOf(prefix string) int {
 	return -1
 }
 
-func (s *recordingStore) MarkStale(_ context.Context, rs []model.Resource, _ map[string]string) error {
+// MarkStale fails on a done ctx, as a real store's query would.
+func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	s.record("MarkStale:%d", len(rs))
+	s.signalMarked()
 	return nil
 }
 func (s *recordingStore) MarkDeleted(_ context.Context, r model.Resource) (int64, error) {
 	s.record("MarkDeleted:%s/%s", r.Type, r.Id)
+	s.signalMarked()
 	return 7, nil
 }
 func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource) (int64, int64, error) {

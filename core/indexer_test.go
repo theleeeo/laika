@@ -71,3 +71,39 @@ func mustNew(cfg Config) *Indexer {
 	}
 	return idx
 }
+
+// New defaults the pool's high-water mark to 80% of the queue (at least 1)
+// and refuses a mark outside [1, QueueSize]; 0 asks for the default.
+func TestNew_QueueHighWater(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		queueSize, highWater int
+		want                 int
+	}{
+		{"default is 80% of the queue", 10, 0, 8},
+		{"default rounds down", 7, 0, 5},
+		{"default is at least 1", 1, 0, 1},
+		{"default follows the defaulted queue size", 0, 0, 80}, // 10 × default PoolSize 10
+		{"explicit value kept", 10, 3, 3},
+		{"the queue size itself is allowed", 10, 10, 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx, err := New(Config{QueueSize: tc.queueSize, QueueHighWater: tc.highWater})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, idx.pool.highWater)
+		})
+	}
+
+	for _, tc := range []struct {
+		name                 string
+		queueSize, highWater int
+	}{
+		{"above the queue size", 10, 11},
+		{"negative", 10, -1},
+	} {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			_, err := New(Config{QueueSize: tc.queueSize, QueueHighWater: tc.highWater})
+			require.ErrorContains(t, err, "queue high water")
+		})
+	}
+}

@@ -14,11 +14,19 @@ import (
 // staticExecuter emits a single fixed page of BuildDocs.
 type staticExecuter struct {
 	docs []projection.BuildDoc
+	// byID, when it has an entry for the requested resource, serves that
+	// instead of docs — e.g. to give one resource Parents without making
+	// every cascaded build cascade again.
+	byID map[string][]projection.BuildDoc
 }
 
-func (e *staticExecuter) Execute(ctx context.Context, _ projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+func (e *staticExecuter) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+	docs := e.docs
+	if d, ok := e.byID[req.ResourceID]; ok {
+		docs = d
+	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: e.docs}
+	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 	close(ch)
 	return ch
 }
