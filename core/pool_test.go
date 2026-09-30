@@ -27,7 +27,7 @@ func saturate(t *testing.T, p *buildPool, workers int) chan struct{} {
 }
 
 func TestPool_RunsSubmittedTask(t *testing.T) {
-	p := newBuildPool(2, 4)
+	p := newBuildPool(2, 4, 4)
 	var ran atomic.Bool
 	if !p.trySubmit(func(context.Context) { ran.Store(true) }) {
 		t.Fatal("submit must succeed on an empty pool")
@@ -41,7 +41,7 @@ func TestPool_RunsSubmittedTask(t *testing.T) {
 }
 
 func TestPool_ShedsImmediatelyWhenQueueFull(t *testing.T) {
-	p := newBuildPool(1, 1)
+	p := newBuildPool(1, 1, 1)
 	release := saturate(t, p, 1)
 	if !p.trySubmit(func(context.Context) {}) {
 		t.Fatal("queue slot must absorb a submit while the worker is busy")
@@ -64,7 +64,7 @@ func TestPool_ShedsImmediatelyWhenQueueFull(t *testing.T) {
 }
 
 func TestPool_QueueAbsorbsBurstBeyondWorkerCount(t *testing.T) {
-	p := newBuildPool(2, 8)
+	p := newBuildPool(2, 8, 8)
 	release := saturate(t, p, 2)
 
 	var ran atomic.Int64
@@ -83,7 +83,7 @@ func TestPool_QueueAbsorbsBurstBeyondWorkerCount(t *testing.T) {
 }
 
 func TestPool_WaitIdle_CoversCascadedSubmits(t *testing.T) {
-	p := newBuildPool(2, 4)
+	p := newBuildPool(2, 4, 4)
 	var childRan atomic.Bool
 	p.trySubmit(func(context.Context) {
 		// A task submits follow-up work (parent cascade) before finishing.
@@ -101,7 +101,7 @@ func TestPool_WaitIdle_CoversCascadedSubmits(t *testing.T) {
 }
 
 func TestPool_TaskRunsUnderLivePoolContext(t *testing.T) {
-	p := newBuildPool(1, 1)
+	p := newBuildPool(1, 1, 1)
 	got := make(chan error, 1)
 	p.trySubmit(func(taskCtx context.Context) {
 		got <- taskCtx.Err()
@@ -113,7 +113,7 @@ func TestPool_TaskRunsUnderLivePoolContext(t *testing.T) {
 }
 
 func TestPool_ShutdownDrainsQueuedAndRejects(t *testing.T) {
-	p := newBuildPool(1, 2)
+	p := newBuildPool(1, 2, 2)
 	release := saturate(t, p, 1)
 
 	var queuedRan atomic.Bool
@@ -140,7 +140,7 @@ func TestPool_ShutdownDrainsQueuedAndRejects(t *testing.T) {
 // Every interleaving is legal except accepted-but-not-run.
 func TestPool_ShutdownRace_AcceptedSubmitAlwaysDrained(t *testing.T) {
 	for i := range 50 {
-		p := newBuildPool(1, 1)
+		p := newBuildPool(1, 1, 1)
 		release := saturate(t, p, 1)
 
 		var ran atomic.Bool

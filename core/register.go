@@ -13,7 +13,7 @@ import (
 // stale marks), then opportunistically builds them inline on the pool. Marks
 // always land before the build attempt, so anything shed or lost to a crash is
 // recovered by the stale sweep. See ADR 0008.
-func (idx *Indexer) RegisterChange(ctx context.Context, n Notification) error {
+func (idx *Indexer) RegisterChange(ctx context.Context, n Notification, opts ...RegisterOption) error {
 	if err := idx.verifyResourceConfig(n); err != nil {
 		return err
 	}

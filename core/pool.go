@@ -40,7 +40,7 @@ type buildPool struct {
 	cancel  context.CancelFunc
 }
 
-func newBuildPool(workers, queueSize int) *buildPool {
+func newBuildPool(workers, queueSize, highWater int) *buildPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &buildPool{
 		queue:   make(chan func(context.Context), queueSize),
@@ -101,6 +101,21 @@ func (p *buildPool) trySubmit(task func(context.Context)) bool {
 		p.pending.Add(-1)
 		return false
 	}
+}
+
+// submitWait enqueues task like trySubmit, but first waits while the pool
+// is under pressure (see pressured). It returns false without running the
+// task when ctx ends or the pool shuts down before a slot frees; both return
+// promptly. Only callers outside the pool may use it: a task that waited on
+// its own pool could deadlock it.
+func (p *buildPool) submitWait(ctx context.Context, task func(context.Context)) bool {
+	panic("L1.1: not implemented")
+}
+
+// pressured reports whether the queue is at or above the high-water mark.
+// WaitForSlot registrations and the reverse sweep pace on it.
+func (p *buildPool) pressured() bool {
+	panic("L1.1: not implemented")
 }
 
 // waitIdle blocks until no tasks are queued or running. Tasks submit their

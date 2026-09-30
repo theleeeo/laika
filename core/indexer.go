@@ -44,8 +44,16 @@ type Config struct {
 
 	// QueueSize bounds the number of accepted-but-not-yet-running inline
 	// builds. Submission never blocks: a full queue sheds immediately,
-	// leaving the resource stale for the sweep. Default 10 × PoolSize.
+	// leaving the resource stale for the sweep — except a RegisterChange
+	// called with WaitForSlot, which waits for the queue to drop below
+	// QueueHighWater. Default 10 × PoolSize.
 	QueueSize int
+
+	// QueueHighWater is the queued-task count at or above which the pool is
+	// under pressure: WaitForSlot registrations wait until the queue drops
+	// below it. Must be in [1, QueueSize]. Default 80% of QueueSize, at
+	// least 1.
+	QueueHighWater int
 
 	// RebuildChunkSize bounds the number of documents per bulk write during
 	// rebuilds, so an all-of-type walk streams to Elasticsearch in bounded
@@ -141,7 +149,7 @@ func New(cfg Config) (*Indexer, error) {
 	if queueSize <= 0 {
 		queueSize = poolSize * 10
 	}
-	idx.pool = newBuildPool(poolSize, queueSize)
+	idx.pool = newBuildPool(poolSize, queueSize, 0) // L1.1: high-water default and validation pending
 
 	idx.rebuildChunkSize = cfg.RebuildChunkSize
 	if idx.rebuildChunkSize <= 0 {
