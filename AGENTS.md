@@ -14,9 +14,9 @@ Canonical vocabulary lives in [CONTEXT.md](CONTEXT.md); architectural decisions 
 ## Core Flow
 
 1. `app/server` translates gRPC requests into `core.Notification`.
-2. `core.Indexer.RegisterChange` updates `store` and finds affected Parent Resources.
-3. `core` enqueues River jobs.
-4. Workers call `Indexer.Build`.
+2. `core.Indexer.RegisterChanges` records a batch in one atomic `Store.RegisterChanges` statement: versions or tombstones, stale marks, and the marks of affected Parent Resources.
+3. After the commit, `core` submits an inline build per marked root (and an inline delete per tombstone) to the worker pool.
+4. Pool workers call `Indexer.Build`.
 5. A Build executes a `projection.Plan` (which calls `source.Provider`), writes ES via `SearchBackend`, updates Relations.
 
 Search path: `app/server/SearcherServer` -> `core.Indexer.Search` -> `SearchBackend.Search`.

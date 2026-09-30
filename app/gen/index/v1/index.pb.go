@@ -21,6 +21,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// ChangeStatus is one notification's outcome in NotifyChangeBatch.
+type ChangeStatus int32
+
+const (
+	ChangeStatus_CHANGE_STATUS_UNSPECIFIED ChangeStatus = 0
+	// Recorded; its builds are scheduled.
+	ChangeStatus_CHANGE_STATUS_ACCEPTED ChangeStatus = 1
+	// A non-zero version not greater than the stored one; nothing was recorded.
+	ChangeStatus_CHANGE_STATUS_STALE ChangeStatus = 2
+)
+
+// Enum value maps for ChangeStatus.
+var (
+	ChangeStatus_name = map[int32]string{
+		0: "CHANGE_STATUS_UNSPECIFIED",
+		1: "CHANGE_STATUS_ACCEPTED",
+		2: "CHANGE_STATUS_STALE",
+	}
+	ChangeStatus_value = map[string]int32{
+		"CHANGE_STATUS_UNSPECIFIED": 0,
+		"CHANGE_STATUS_ACCEPTED":    1,
+		"CHANGE_STATUS_STALE":       2,
+	}
+)
+
+func (x ChangeStatus) Enum() *ChangeStatus {
+	p := new(ChangeStatus)
+	*p = x
+	return p
+}
+
+func (x ChangeStatus) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ChangeStatus) Descriptor() protoreflect.EnumDescriptor {
+	return file_index_v1_index_proto_enumTypes[0].Descriptor()
+}
+
+func (ChangeStatus) Type() protoreflect.EnumType {
+	return &file_index_v1_index_proto_enumTypes[0]
+}
+
+func (x ChangeStatus) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ChangeStatus.Descriptor instead.
+func (ChangeStatus) EnumDescriptor() ([]byte, []int) {
+	return file_index_v1_index_proto_rawDescGZIP(), []int{0}
+}
+
 type ChangeKind int32
 
 const (
@@ -57,11 +109,11 @@ func (x ChangeKind) String() string {
 }
 
 func (ChangeKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_index_v1_index_proto_enumTypes[0].Descriptor()
+	return file_index_v1_index_proto_enumTypes[1].Descriptor()
 }
 
 func (ChangeKind) Type() protoreflect.EnumType {
-	return &file_index_v1_index_proto_enumTypes[0]
+	return &file_index_v1_index_proto_enumTypes[1]
 }
 
 func (x ChangeKind) Number() protoreflect.EnumNumber {
@@ -70,7 +122,7 @@ func (x ChangeKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use ChangeKind.Descriptor instead.
 func (ChangeKind) EnumDescriptor() ([]byte, []int) {
-	return file_index_v1_index_proto_rawDescGZIP(), []int{0}
+	return file_index_v1_index_proto_rawDescGZIP(), []int{1}
 }
 
 type NotifyChangeRequest struct {
@@ -198,7 +250,9 @@ func (x *NotifyChangeBatchRequest) GetNotifications() []*ChangeNotification {
 }
 
 type NotifyChangeBatchResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One per request notification, in request order.
+	Statuses      []ChangeStatus `protobuf:"varint,1,rep,packed,name=statuses,proto3,enum=index.v1.ChangeStatus" json:"statuses,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -233,6 +287,13 @@ func (*NotifyChangeBatchResponse) Descriptor() ([]byte, []int) {
 	return file_index_v1_index_proto_rawDescGZIP(), []int{3}
 }
 
+func (x *NotifyChangeBatchResponse) GetStatuses() []ChangeStatus {
+	if x != nil {
+		return x.Statuses
+	}
+	return nil
+}
+
 // ChangeNotification describes a single resource change event from a source
 // service.
 type ChangeNotification struct {
@@ -247,9 +308,10 @@ type ChangeNotification struct {
 	Metadata map[string]string `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Monotonically increasing version of the resource at the source.
 	// When non-zero, the indexer rejects notifications whose version is not
-	// strictly greater than the currently stored version (returns
-	// FAILED_PRECONDITION). Zero means "no version control" — the notification
-	// is always accepted. Ignored for delete notifications.
+	// strictly greater than the currently stored version (NotifyChange returns
+	// FAILED_PRECONDITION, NotifyChangeBatch reports CHANGE_STATUS_STALE). Zero
+	// means "no version control" — the notification is always accepted.
+	// Ignored for delete notifications.
 	Version       int64 `protobuf:"varint,5,opt,name=version,proto3" json:"version,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -493,8 +555,9 @@ const file_index_v1_index_proto_rawDesc = "" +
 	"\fnotification\x18\x01 \x01(\v2\x1c.index.v1.ChangeNotificationR\fnotification\"\x16\n" +
 	"\x14NotifyChangeResponse\"^\n" +
 	"\x18NotifyChangeBatchRequest\x12B\n" +
-	"\rnotifications\x18\x01 \x03(\v2\x1c.index.v1.ChangeNotificationR\rnotifications\"\x1b\n" +
-	"\x19NotifyChangeBatchResponse\"\xa3\x02\n" +
+	"\rnotifications\x18\x01 \x03(\v2\x1c.index.v1.ChangeNotificationR\rnotifications\"O\n" +
+	"\x19NotifyChangeBatchResponse\x122\n" +
+	"\bstatuses\x18\x01 \x03(\x0e2\x16.index.v1.ChangeStatusR\bstatuses\"\xa3\x02\n" +
 	"\x12ChangeNotification\x12(\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x14.index.v1.ChangeKindR\x04kind\x12#\n" +
 	"\rresource_type\x18\x02 \x01(\tR\fresourceType\x12\x1f\n" +
@@ -516,7 +579,11 @@ const file_index_v1_index_proto_rawDesc = "" +
 	"\x0eRebuildRequest\x128\n" +
 	"\tselectors\x18\x01 \x03(\v2\x1a.index.v1.ResourceSelectorR\tselectors\"4\n" +
 	"\x0fRebuildResponse\x12!\n" +
-	"\fworkflow_ids\x18\x01 \x03(\tR\vworkflowIds*t\n" +
+	"\fworkflow_ids\x18\x01 \x03(\tR\vworkflowIds*b\n" +
+	"\fChangeStatus\x12\x1d\n" +
+	"\x19CHANGE_STATUS_UNSPECIFIED\x10\x00\x12\x1a\n" +
+	"\x16CHANGE_STATUS_ACCEPTED\x10\x01\x12\x17\n" +
+	"\x13CHANGE_STATUS_STALE\x10\x02*t\n" +
 	"\n" +
 	"ChangeKind\x12\x1b\n" +
 	"\x17CHANGE_KIND_UNSPECIFIED\x10\x00\x12\x17\n" +
@@ -542,39 +609,41 @@ func file_index_v1_index_proto_rawDescGZIP() []byte {
 	return file_index_v1_index_proto_rawDescData
 }
 
-var file_index_v1_index_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_index_v1_index_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_index_v1_index_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_index_v1_index_proto_goTypes = []any{
-	(ChangeKind)(0),                   // 0: index.v1.ChangeKind
-	(*NotifyChangeRequest)(nil),       // 1: index.v1.NotifyChangeRequest
-	(*NotifyChangeResponse)(nil),      // 2: index.v1.NotifyChangeResponse
-	(*NotifyChangeBatchRequest)(nil),  // 3: index.v1.NotifyChangeBatchRequest
-	(*NotifyChangeBatchResponse)(nil), // 4: index.v1.NotifyChangeBatchResponse
-	(*ChangeNotification)(nil),        // 5: index.v1.ChangeNotification
-	(*ResourceSelector)(nil),          // 6: index.v1.ResourceSelector
-	(*RebuildRequest)(nil),            // 7: index.v1.RebuildRequest
-	(*RebuildResponse)(nil),           // 8: index.v1.RebuildResponse
-	nil,                               // 9: index.v1.ChangeNotification.MetadataEntry
-	nil,                               // 10: index.v1.ResourceSelector.MetadataEntry
+	(ChangeStatus)(0),                 // 0: index.v1.ChangeStatus
+	(ChangeKind)(0),                   // 1: index.v1.ChangeKind
+	(*NotifyChangeRequest)(nil),       // 2: index.v1.NotifyChangeRequest
+	(*NotifyChangeResponse)(nil),      // 3: index.v1.NotifyChangeResponse
+	(*NotifyChangeBatchRequest)(nil),  // 4: index.v1.NotifyChangeBatchRequest
+	(*NotifyChangeBatchResponse)(nil), // 5: index.v1.NotifyChangeBatchResponse
+	(*ChangeNotification)(nil),        // 6: index.v1.ChangeNotification
+	(*ResourceSelector)(nil),          // 7: index.v1.ResourceSelector
+	(*RebuildRequest)(nil),            // 8: index.v1.RebuildRequest
+	(*RebuildResponse)(nil),           // 9: index.v1.RebuildResponse
+	nil,                               // 10: index.v1.ChangeNotification.MetadataEntry
+	nil,                               // 11: index.v1.ResourceSelector.MetadataEntry
 }
 var file_index_v1_index_proto_depIdxs = []int32{
-	5,  // 0: index.v1.NotifyChangeRequest.notification:type_name -> index.v1.ChangeNotification
-	5,  // 1: index.v1.NotifyChangeBatchRequest.notifications:type_name -> index.v1.ChangeNotification
-	0,  // 2: index.v1.ChangeNotification.kind:type_name -> index.v1.ChangeKind
-	9,  // 3: index.v1.ChangeNotification.metadata:type_name -> index.v1.ChangeNotification.MetadataEntry
-	10, // 4: index.v1.ResourceSelector.metadata:type_name -> index.v1.ResourceSelector.MetadataEntry
-	6,  // 5: index.v1.RebuildRequest.selectors:type_name -> index.v1.ResourceSelector
-	1,  // 6: index.v1.IndexService.NotifyChange:input_type -> index.v1.NotifyChangeRequest
-	3,  // 7: index.v1.IndexService.NotifyChangeBatch:input_type -> index.v1.NotifyChangeBatchRequest
-	7,  // 8: index.v1.IndexService.Rebuild:input_type -> index.v1.RebuildRequest
-	2,  // 9: index.v1.IndexService.NotifyChange:output_type -> index.v1.NotifyChangeResponse
-	4,  // 10: index.v1.IndexService.NotifyChangeBatch:output_type -> index.v1.NotifyChangeBatchResponse
-	8,  // 11: index.v1.IndexService.Rebuild:output_type -> index.v1.RebuildResponse
-	9,  // [9:12] is the sub-list for method output_type
-	6,  // [6:9] is the sub-list for method input_type
-	6,  // [6:6] is the sub-list for extension type_name
-	6,  // [6:6] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	6,  // 0: index.v1.NotifyChangeRequest.notification:type_name -> index.v1.ChangeNotification
+	6,  // 1: index.v1.NotifyChangeBatchRequest.notifications:type_name -> index.v1.ChangeNotification
+	0,  // 2: index.v1.NotifyChangeBatchResponse.statuses:type_name -> index.v1.ChangeStatus
+	1,  // 3: index.v1.ChangeNotification.kind:type_name -> index.v1.ChangeKind
+	10, // 4: index.v1.ChangeNotification.metadata:type_name -> index.v1.ChangeNotification.MetadataEntry
+	11, // 5: index.v1.ResourceSelector.metadata:type_name -> index.v1.ResourceSelector.MetadataEntry
+	7,  // 6: index.v1.RebuildRequest.selectors:type_name -> index.v1.ResourceSelector
+	2,  // 7: index.v1.IndexService.NotifyChange:input_type -> index.v1.NotifyChangeRequest
+	4,  // 8: index.v1.IndexService.NotifyChangeBatch:input_type -> index.v1.NotifyChangeBatchRequest
+	8,  // 9: index.v1.IndexService.Rebuild:input_type -> index.v1.RebuildRequest
+	3,  // 10: index.v1.IndexService.NotifyChange:output_type -> index.v1.NotifyChangeResponse
+	5,  // 11: index.v1.IndexService.NotifyChangeBatch:output_type -> index.v1.NotifyChangeBatchResponse
+	9,  // 12: index.v1.IndexService.Rebuild:output_type -> index.v1.RebuildResponse
+	10, // [10:13] is the sub-list for method output_type
+	7,  // [7:10] is the sub-list for method input_type
+	7,  // [7:7] is the sub-list for extension type_name
+	7,  // [7:7] is the sub-list for extension extendee
+	0,  // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_index_v1_index_proto_init() }
@@ -587,7 +656,7 @@ func file_index_v1_index_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_index_v1_index_proto_rawDesc), len(file_index_v1_index_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      2,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,

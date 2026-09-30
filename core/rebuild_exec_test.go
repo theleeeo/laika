@@ -168,11 +168,6 @@ func (s *rebuildRecordingStore) MarkStale(_ context.Context, rs []model.Resource
 	return nil
 }
 
-func (s *rebuildRecordingStore) MarkDeleted(_ context.Context, r model.Resource) (int64, error) {
-	s.record("MarkDeleted:%s/%s", r.Type, r.Id)
-	return 7, nil
-}
-
 func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) (int64, int64, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
 	s.mu.Lock()
@@ -221,11 +216,6 @@ func (s *rebuildRecordingStore) GetParentResources(context.Context, model.Resour
 
 func (s *rebuildRecordingStore) RemoveResource(_ context.Context, r model.Resource) error {
 	s.record("RemoveResource:%s/%s", r.Type, r.Id)
-	return nil
-}
-
-func (s *rebuildRecordingStore) UpsertResource(_ context.Context, r model.Resource, v int64) error {
-	s.record("UpsertResource:%s/%s:%d", r.Type, r.Id, v)
 	return nil
 }
 

@@ -60,8 +60,8 @@ only `aggregation` and `app` remain separate modules.
 ### Core Data Flow
 
 1. gRPC client → `app/server` translates requests into `core.Notification`
-2. `core.Indexer.RegisterChange` updates Postgres state and finds affected Parent Resources via the Relation graph
-3. For every root (the changed Resource + affected Parents), `core` **marks it stale** in Postgres (`MarkStale`), then submits an **inline build** to a bounded in-process worker pool
+2. `core.Indexer.RegisterChanges` (`RegisterChange` is a batch of one) records a batch in one atomic statement (`Store.RegisterChanges`): each accepted Resource's version or tombstone, its **stale mark** and metadata, and the marks of its affected Parent Resources, found via the Relation graph. A stale version writes nothing
+3. After the commit, `core` submits an **inline build** per marked root (the accepted Resources + affected Parents), and an inline delete per tombstone, to a bounded in-process worker pool
 4. A build executes a `projection.Plan` (which calls the `source.Provider`), writes to ES via `SearchBackend` with the Build Sequence as `external_gte`, updates the Relation graph, and clears the stale mark (`ClearStale`, guarded by the seq captured at `BeginBuild`)
 5. **Slow lane (Temporal):** the `StaleSweep` workflow (schedule `laika-stale-sweep`) rebuilds anything stale past a threshold; explicit rebuilds run as `RebuildWalk` workflows. Both live in `core` on the `laika-indexer` task queue. A single-active-plan walk (single-version type, or a version-targeted backfill) checkpoints a `RebuildCursor` into its activity's heartbeat details, so a retried attempt resumes instead of restarting; multi-plan walks restart from scratch ([ADR 0011](docs/adr/0011-resumable-rebuild-walks-via-heartbeat-cursors.md)). Temporal being down degrades recovery latency only — never hot-path throughput or correctness.
 
@@ -70,7 +70,7 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 ### Key Interfaces (root module)
 
 - **`core.SearchBackend`** — implemented by `backend/elasticsearch`; decouples Indexer from ES
-- **`core.Store`** — implemented by `storage/postgres`; the relation graph plus stale-mark state (`MarkStale`, `MarkDeleted`, `BeginBuild`, `ClearStale`, `DeleteResourceIfSeq`, `ListStale`)
+- **`core.Store`** — implemented by `storage/postgres`; the relation graph plus stale-mark state (`RegisterChanges`, `MarkStale`, `BeginBuild`, `ClearStale`, `DeleteResourceIfSeq`, `ListStale`)
 - **`app/source.Provider`** — implemented by `app/source.GRPCProvider`; data fetcher used by DSL plans
 
 Both `Store` and `SearchBackend` have exactly one implementation each; the interfaces survive as test seams (unit tests mock them to avoid Docker), not as swap points.
@@ -94,7 +94,7 @@ Both `Store` and `SearchBackend` have exactly one implementation each; the inter
 
 ### Critical Invariants
 
-- **Mark stale before you build**: every build-triggering path (ingest fanout, drift-check re-build, ADR 0006 parent cascade) calls `MarkStale` in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. The mark also stores the notification's metadata (last mark wins), which the sweep replays into the recovering build. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
+- **Mark stale before you build**: every build-triggering path (ingest fanout via `RegisterChanges`, drift-check re-build, ADR 0006 parent cascade via `MarkStale`) marks in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. The mark also stores the notification's metadata (last mark wins), which the sweep replays into the recovering build. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
 - **Seq-guarded clear**: a build captures `stale_seq` at `BeginBuild` and clears (`ClearStale`) only if it is unchanged; a newer Notification that moved the counter leaves the row stale for its own build or the sweep. Never null `stale_since` unconditionally.
 - **At-least-once via mark + sweep**: durability is the stale mark plus the Temporal `StaleSweep`, not a job-queue retry count. A resource whose Type was removed from config stays stale forever (logged by the sweep) — this is a known limitation.
 - **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).

@@ -19,7 +19,6 @@ type Store interface {
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
 	GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error)
 	RemoveResource(ctx context.Context, resource model.Resource) error
-	UpsertResource(ctx context.Context, resource model.Resource, version int64) error
 
 	// RegisterChanges records a batch of changes in one atomic statement:
 	// each accepted item's version (or tombstone), stale mark and metadata,
@@ -33,8 +32,6 @@ type Store interface {
 	// metadata is stored per resource (last mark wins) so a sweep-recovered
 	// build carries the same context an inline build would have.
 	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error
-	// MarkDeleted tombstones the resource and returns its stale_seq.
-	MarkDeleted(ctx context.Context, resource model.Resource) (staleSeq int64, err error)
 	// BeginBuild bumps the Build Sequence and captures the current stale_seq.
 	BeginBuild(ctx context.Context, resource model.Resource) (buildIdx, staleSeq int64, err error)
 	// ClearStale clears the stale mark only if staleSeq still matches.

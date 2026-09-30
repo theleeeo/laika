@@ -28,9 +28,8 @@ func holdPoolFull(t *testing.T, idx *Indexer, hold func(context.Context)) {
 }
 
 // registerAsync runs RegisterChange in a goroutine and returns its result
-// channel once the call's first mark has landed (its stale mark, or for a
-// delete its tombstone; RegisterChange lands its remaining marks before any
-// submission, so a WaitForSlot call parks only after all of them).
+// channel once its RegisterChanges statement — every mark and tombstone of
+// the registration — has landed; a WaitForSlot call parks only after it.
 func registerAsync(t *testing.T, ctx context.Context, idx *Indexer, st *recordingStore, n Notification, opts ...RegisterOption) <-chan error {
 	t.Helper()
 	errc := make(chan error, 1)
@@ -112,7 +111,7 @@ func TestRegisterChange_WaitForSlot_Delete_WaitsThenDeletes(t *testing.T) {
 func TestRegisterChange_WaitForSlot_DeleteWithParents_MarksParentsBeforeWaiting(t *testing.T) {
 	st := &recordingStore{
 		marked:  make(chan struct{}, 8),
-		parents: []model.Resource{{Type: "product", Id: "parent"}},
+		parents: []MarkedParent{{Resource: model.Resource{Type: "product", Id: "parent"}}},
 	}
 	idx := newHotPathIndexer(st, 1, 1)
 	release := make(chan struct{})
@@ -121,17 +120,17 @@ func TestRegisterChange_WaitForSlot_DeleteWithParents_MarksParentsBeforeWaiting(
 	ctx, cancel := context.WithCancel(t.Context())
 	errc := registerAsync(t, ctx, idx, st,
 		Notification{ResourceType: "product", ResourceID: "1", Kind: ChangeDeleted}, WaitForSlot())
-	// registerAsync returned on the tombstone; wait for the Parents' mark too,
-	// so the assertion below doesn't race the goroutine.
-	within(t, st.marked, "the Parents' mark")
 	stillBlocked(t, errc, "a WaitForSlot delete on a pressured pool")
-	if st.indexOf("MarkStale:1") == -1 {
+	if st.indexOf("RegisterChanges") == -1 {
 		t.Fatalf("the Parents must be marked before the wait: %v", st.callsSnapshot())
 	}
 
 	cancel()
 	if err := within(t, errc, "the delete after cancel"); err != nil {
 		t.Fatalf("a wait ended by ctx must return nil — every mark already landed: %v", err)
+	}
+	if n := st.count("MarkStale"); n != 0 {
+		t.Fatalf("the Parents' marks belong to the statement, not a later MarkStale: %v", st.callsSnapshot())
 	}
 	close(release)
 	if err := idx.WaitForIdle(t.Context()); err != nil {
@@ -153,7 +152,7 @@ func TestRegisterChange_WaitForSlot_CtxCancel_ReturnsNilWithMarkInPlace(t *testi
 	if err := within(t, errc, "RegisterChange after cancel"); err != nil {
 		t.Fatalf("a wait ended by ctx must return nil — the mark already landed: %v", err)
 	}
-	if st.indexOf("MarkStale") == -1 {
+	if st.indexOf("RegisterChanges") == -1 {
 		t.Fatal("the stale mark must be in place")
 	}
 	close(release)
@@ -180,7 +179,7 @@ func TestRegisterChange_WaitForSlot_Shutdown_ReturnsNilWithMarkInPlace(t *testin
 	if err := within(t, errc, "RegisterChange after Shutdown"); err != nil {
 		t.Fatalf("a wait ended by shutdown must return nil — the mark already landed: %v", err)
 	}
-	if st.indexOf("MarkStale") == -1 {
+	if st.indexOf("RegisterChanges") == -1 {
 		t.Fatal("the stale mark must be in place")
 	}
 
@@ -272,5 +271,46 @@ func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// WaitForSlot applies to every submit of a batch: the items' builds, the
+// delete and the Parents' builds all wait for pressure to clear, then run.
+func TestRegisterChanges_WaitForSlot_EverySubmitWaitsThenRuns(t *testing.T) {
+	st := &recordingStore{
+		marked:  make(chan struct{}, 8),
+		parents: []MarkedParent{{Resource: model.Resource{Type: "product", Id: "p"}}},
+	}
+	idx, ex := newRecordingIndexer(st, 1, 1)
+	release := make(chan struct{})
+	holdPoolFull(t, idx, func(context.Context) { <-release })
+
+	errc := make(chan error, 1)
+	go func() {
+		_, err := idx.RegisterChanges(t.Context(), []Notification{
+			{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
+			{ResourceType: "product", ResourceID: "2", Kind: ChangeDeleted},
+		}, WaitForSlot())
+		errc <- err
+	}()
+	within(t, st.marked, "the batch's statement")
+	stillBlocked(t, errc, "a WaitForSlot batch on a pressured pool")
+
+	close(release)
+	if err := within(t, errc, "the batch after pressure cleared"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	built := ex.metadataByID()
+	if _, ok := built["1"]; !ok {
+		t.Fatalf("the item's waited-for build must run: %v", built)
+	}
+	if _, ok := built["p"]; !ok {
+		t.Fatalf("the Parent's waited-for build must run: %v", built)
+	}
+	if st.indexOf("DeleteResourceIfSeq:product/2:8") == -1 {
+		t.Fatalf("the waited-for delete must run: %v", st.callsSnapshot())
 	}
 }

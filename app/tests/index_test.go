@@ -132,7 +132,7 @@ func (t *TestSuite) Test_Resource_CRUD_OneIndex() {
 		})
 		t.Require().NoError(err)
 		t.worker.Drain(t.T().Context())
-		// Delete is mark-first: MarkDeleted tombstones the row (deleted=true) and
+		// Delete is mark-first: RegisterChanges tombstones the row (deleted=true) and
 		// the inline deleteOne hard-deletes it only after the build pool runs, so
 		// the row is gone once the pool has drained.
 		t.Require().False(t.resourceTracked("a", "1"))

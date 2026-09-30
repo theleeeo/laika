@@ -14,9 +14,9 @@ import (
 // A fixed set of worker goroutines, started at construction, consume tasks
 // from a bounded queue. trySubmit never blocks: the queue's buffer is the
 // burst absorber, and a full queue sheds immediately, so producers
-// (RegisterChange RPCs) feel no backpressure from a saturated pool by
+// (RegisterChanges RPCs) feel no backpressure from a saturated pool by
 // default. submitWait is the opt-in exception for callers outside the pool
-// (RegisterChange with WaitForSlot): it waits while the queue is at or above
+// (RegisterChanges with WaitForSlot): it waits while the queue is at or above
 // the high-water mark, until ctx ends or the pool shuts down.
 type buildPool struct {
 	// queue carries accepted tasks to the workers. It is never close()d — a

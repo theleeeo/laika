@@ -44,7 +44,7 @@ type Config struct {
 
 	// QueueSize bounds the number of accepted-but-not-yet-running inline
 	// builds. By default submission never blocks: a full queue sheds at once,
-	// leaving the resource stale for the sweep — except a RegisterChange
+	// leaving the resource stale for the sweep — except a RegisterChanges
 	// called with WaitForSlot, which waits for the queue to drop below
 	// QueueHighWater. Default 10 × PoolSize.
 	QueueSize int
@@ -224,11 +224,11 @@ func (idx *Indexer) SetPlans(plans map[string][]projection.Plan, resources resou
 
 func (idx *Indexer) verifyResourceConfig(n Notification) error {
 	if n.ResourceType == "" {
-		return fmt.Errorf("resource_type required")
+		return &InvalidArgumentError{Msg: "resource_type required"}
 	}
 
 	if n.ResourceID == "" {
-		return fmt.Errorf("resource_id required")
+		return &InvalidArgumentError{Msg: "resource_id required"}
 	}
 
 	r := idx.resources.Get(n.ResourceType)

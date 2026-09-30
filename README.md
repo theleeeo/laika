@@ -187,7 +187,7 @@ Laika exposes three gRPC services. Proto definitions live in `proto/`.
 | RPC                 | Description                                           |
 | ------------------- | ----------------------------------------------------- |
 | `NotifyChange`      | Single resource change notification                   |
-| `NotifyChangeBatch` | Batch of change notifications                         |
+| `NotifyChangeBatch` | Atomic batch of notifications; a status per entry     |
 | `Rebuild`           | Trigger a rebuild (paginated) of a resource type      |
 
 A notification carries the resource type, ID, change kind, and an optional monotonic version for stale-rejection.

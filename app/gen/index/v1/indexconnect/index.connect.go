@@ -49,7 +49,11 @@ type IndexServiceClient interface {
 	// The indexer determines which search documents are affected and rebuilds
 	// them from authoritative source data.
 	NotifyChange(context.Context, *connect.Request[v1.NotifyChangeRequest]) (*connect.Response[v1.NotifyChangeResponse], error)
-	// NotifyChangeBatch is the batched version of NotifyChange.
+	// NotifyChangeBatch is the batched version of NotifyChange. The batch
+	// commits atomically: an error means nothing was recorded and the whole
+	// batch may be retried; otherwise every notification has a status. An
+	// unknown resource, or two notifications naming the same resource, fail
+	// the whole batch with INVALID_ARGUMENT.
 	NotifyChangeBatch(context.Context, *connect.Request[v1.NotifyChangeBatchRequest]) (*connect.Response[v1.NotifyChangeBatchResponse], error)
 	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.
@@ -116,7 +120,11 @@ type IndexServiceHandler interface {
 	// The indexer determines which search documents are affected and rebuilds
 	// them from authoritative source data.
 	NotifyChange(context.Context, *connect.Request[v1.NotifyChangeRequest]) (*connect.Response[v1.NotifyChangeResponse], error)
-	// NotifyChangeBatch is the batched version of NotifyChange.
+	// NotifyChangeBatch is the batched version of NotifyChange. The batch
+	// commits atomically: an error means nothing was recorded and the whole
+	// batch may be retried; otherwise every notification has a status. An
+	// unknown resource, or two notifications naming the same resource, fail
+	// the whole batch with INVALID_ARGUMENT.
 	NotifyChangeBatch(context.Context, *connect.Request[v1.NotifyChangeBatchRequest]) (*connect.Response[v1.NotifyChangeBatchResponse], error)
 	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.

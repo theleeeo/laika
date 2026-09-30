@@ -32,7 +32,11 @@ type IndexServiceClient interface {
 	// The indexer determines which search documents are affected and rebuilds
 	// them from authoritative source data.
 	NotifyChange(ctx context.Context, in *NotifyChangeRequest, opts ...grpc.CallOption) (*NotifyChangeResponse, error)
-	// NotifyChangeBatch is the batched version of NotifyChange.
+	// NotifyChangeBatch is the batched version of NotifyChange. The batch
+	// commits atomically: an error means nothing was recorded and the whole
+	// batch may be retried; otherwise every notification has a status. An
+	// unknown resource, or two notifications naming the same resource, fail
+	// the whole batch with INVALID_ARGUMENT.
 	NotifyChangeBatch(ctx context.Context, in *NotifyChangeBatchRequest, opts ...grpc.CallOption) (*NotifyChangeBatchResponse, error)
 	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.
@@ -85,7 +89,11 @@ type IndexServiceServer interface {
 	// The indexer determines which search documents are affected and rebuilds
 	// them from authoritative source data.
 	NotifyChange(context.Context, *NotifyChangeRequest) (*NotifyChangeResponse, error)
-	// NotifyChangeBatch is the batched version of NotifyChange.
+	// NotifyChangeBatch is the batched version of NotifyChange. The batch
+	// commits atomically: an error means nothing was recorded and the whole
+	// batch may be retried; otherwise every notification has a status. An
+	// unknown resource, or two notifications naming the same resource, fail
+	// the whole batch with INVALID_ARGUMENT.
 	NotifyChangeBatch(context.Context, *NotifyChangeBatchRequest) (*NotifyChangeBatchResponse, error)
 	// Rebuild triggers a rebuild of one or more resource indices.
 	// Jobs are enqueued and processed asynchronously by the job queue.

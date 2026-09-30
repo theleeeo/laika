@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/theleeeo/laika/app/gen/index/v1"
 	"github.com/theleeeo/laika/core"
@@ -35,21 +36,35 @@ func (s *IndexerServer) NotifyChange(ctx context.Context, req *connect.Request[i
 }
 
 func (s *IndexerServer) NotifyChangeBatch(ctx context.Context, req *connect.Request[index.NotifyChangeBatchRequest]) (*connect.Response[index.NotifyChangeBatchResponse], error) {
-	if len(req.Msg.Notifications) == 0 {
-		return connect.NewResponse(&index.NotifyChangeBatchResponse{}), nil
-	}
-
-	for _, pn := range req.Msg.Notifications {
+	ns := make([]core.Notification, len(req.Msg.Notifications))
+	for i, pn := range req.Msg.Notifications {
 		if pn == nil {
-			continue
+			return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("notification %d is required", i))
 		}
-		n := protoToNotification(pn)
-		if err := s.idx.RegisterChange(ctx, n); err != nil {
-			return nil, mapAppError(err)
-		}
+		ns[i] = protoToNotification(pn)
 	}
 
-	return connect.NewResponse(&index.NotifyChangeBatchResponse{}), nil
+	statuses, err := s.idx.RegisterChanges(ctx, ns)
+	if err != nil {
+		return nil, mapAppError(err)
+	}
+
+	return connect.NewResponse(&index.NotifyChangeBatchResponse{Statuses: statusesToProto(statuses)}), nil
+}
+
+func statusesToProto(statuses []core.RegisterStatus) []index.ChangeStatus {
+	out := make([]index.ChangeStatus, len(statuses))
+	for i, st := range statuses {
+		switch st {
+		case core.RegisterAccepted:
+			out[i] = index.ChangeStatus_CHANGE_STATUS_ACCEPTED
+		case core.RegisterStale:
+			out[i] = index.ChangeStatus_CHANGE_STATUS_STALE
+		default:
+			panic(fmt.Sprintf("unmapped core.RegisterStatus %d", st))
+		}
+	}
+	return out
 }
 
 func protoToNotification(pn *index.ChangeNotification) core.Notification {

@@ -2,77 +2,22 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/theleeeo/laika/model"
 )
 
-// RegisterChange handles a single change notification from a source service.
-// It durably records the change and its affected roots (upsert/tombstone plus
-// stale marks), then opportunistically builds them inline on the pool. Marks
-// always land before the build attempt, so anything shed or lost to a crash is
-// recovered by the stale sweep. See ADR 0008.
-//
-// With WaitForSlot, its own submissions wait while the pool is pressured,
-// always after the marks landed; a wait ended by ctx or shutdown still
-// returns nil, leaving the work to the sweep.
+// RegisterChange registers a single change notification: a batch of one
+// (see RegisterChanges). A stale version returns ErrStaleVersion.
 func (idx *Indexer) RegisterChange(ctx context.Context, n Notification, opts ...RegisterOption) error {
-	if err := idx.verifyResourceConfig(n); err != nil {
-		return err
-	}
-
-	o := newRegisterOptions(opts)
-	res := model.Resource{Type: n.ResourceType, Id: n.ResourceID}
-
-	var deleteSeq int64
-	if n.Kind == ChangeDeleted {
-		seq, err := idx.st.MarkDeleted(ctx, res)
-		if err != nil {
-			return fmt.Errorf("mark deleted %s/%s: %w", n.ResourceType, n.ResourceID, err)
-		}
-		deleteSeq = seq
-	} else {
-		if err := idx.st.UpsertResource(ctx, res, n.Version); err != nil {
-			return fmt.Errorf("upsert resource %s/%s: %w", n.ResourceType, n.ResourceID, err)
-		}
-	}
-
-	parents, err := idx.st.GetParentResources(ctx, res)
+	statuses, err := idx.RegisterChanges(ctx, []Notification{n}, opts...)
 	if err != nil {
-		return fmt.Errorf("getting parents: %w", err)
-	}
-
-	slog.Info("registering change",
-		"resource_type", n.ResourceType,
-		"resource_id", n.ResourceID,
-		"kind", n.Kind.String(),
-		"affected_parents", len(parents),
-	)
-
-	roots := make([]model.Resource, 0, len(parents)+1)
-	roots = append(roots, parents...)
-	if n.Kind != ChangeDeleted {
-		roots = append(roots, res)
-	}
-
-	// Every mark lands before any submission: with WaitForSlot the delete's
-	// submit may wait, and the Parents must not sit unmarked behind it.
-	if err := idx.markStale(ctx, roots, n.Metadata); err != nil {
 		return err
 	}
-
-	if n.Kind == ChangeDeleted {
-		if !idx.submit(ctx, o.waitForSlot, func(taskCtx context.Context) {
-			idx.deleteOne(taskCtx, res, deleteSeq)
-		}) {
-			slog.Info(notSubmittedMsg(o.waitForSlot, "tombstone left for sweep"),
-				slog.String("type", res.Type), slog.String("id", res.Id))
-		}
+	if statuses[0] == RegisterStale {
+		return fmt.Errorf("%s/%s version %d: %w", n.ResourceType, n.ResourceID, n.Version, ErrStaleVersion)
 	}
-
-	idx.submitBuilds(ctx, roots, n.Metadata, o.waitForSlot)
 	return nil
 }
 
@@ -97,16 +42,84 @@ const (
 //
 // The batch is validated before any statement: an unknown resource or two
 // notifications naming the same resource fail the call.
+//
+// Every mark lands in the statement, before any submission, so a
+// WaitForSlot wait or a shed leaves nothing unmarked (ADR 0008); a wait
+// ended by ctx or shutdown still returns the statuses and a nil error.
 func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts ...RegisterOption) ([]RegisterStatus, error) {
-	return nil, errors.New("RegisterChanges: not implemented")
-}
-
-func groupResourceIDsByType(roots []model.Resource) map[string][]string {
-	idsByType := make(map[string][]string, len(roots))
-
-	for _, root := range roots {
-		idsByType[root.Type] = append(idsByType[root.Type], root.Id)
+	items, err := idx.registrations(ns)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return []RegisterStatus{}, nil
 	}
 
-	return idsByType
+	reg, err := idx.st.RegisterChanges(ctx, items)
+	if err != nil {
+		return nil, fmt.Errorf("registering %d changes: %w", len(items), err)
+	}
+	if len(reg.Items) != len(items) {
+		return nil, fmt.Errorf("registering %d changes: store returned %d results", len(items), len(reg.Items))
+	}
+
+	statuses := make([]RegisterStatus, len(items))
+	var stale int
+	for i, it := range reg.Items {
+		if !it.Accepted {
+			statuses[i] = RegisterStale
+			stale++
+		}
+	}
+	slog.Info("registered changes",
+		"count", len(items),
+		"stale", stale,
+		"affected_parents", len(reg.Parents),
+	)
+
+	wait := newRegisterOptions(opts).waitForSlot
+	for i, it := range reg.Items {
+		if !it.Accepted {
+			continue
+		}
+		res, seq := items[i].Resource, it.StaleSeq
+		if !items[i].Deleted {
+			idx.submitBuild(ctx, res, items[i].Metadata, wait)
+			continue
+		}
+		if !idx.submit(ctx, wait, func(taskCtx context.Context) {
+			idx.deleteOne(taskCtx, res, seq)
+		}) {
+			slog.Info(notSubmittedMsg(wait, "tombstone left for sweep"),
+				slog.String("type", res.Type), slog.String("id", res.Id))
+		}
+	}
+	for _, p := range reg.Parents {
+		idx.submitBuild(ctx, p.Resource, p.Metadata, wait)
+	}
+	return statuses, nil
+}
+
+// registrations validates a batch and translates it for the store: every
+// resource known, none named twice.
+func (idx *Indexer) registrations(ns []Notification) ([]Registration, error) {
+	items := make([]Registration, len(ns))
+	seen := make(map[model.Resource]struct{}, len(ns))
+	for i, n := range ns {
+		if err := idx.verifyResourceConfig(n); err != nil {
+			return nil, err
+		}
+		res := model.Resource{Type: n.ResourceType, Id: n.ResourceID}
+		if _, dup := seen[res]; dup {
+			return nil, &InvalidArgumentError{Msg: fmt.Sprintf("resource %s/%s appears more than once in the batch", res.Type, res.Id)}
+		}
+		seen[res] = struct{}{}
+		items[i] = Registration{
+			Resource: res,
+			Deleted:  n.Kind == ChangeDeleted,
+			Version:  n.Version,
+			Metadata: n.Metadata,
+		}
+	}
+	return items, nil
 }

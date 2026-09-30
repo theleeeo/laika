@@ -1,5 +1,16 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Correction (2026-09-30, runbook step L1.2):** registration is now one
+> atomic statement. `Indexer.RegisterChanges` (`RegisterChange` is a batch of
+> one) calls `Store.RegisterChanges`, which writes each accepted item's version
+> or tombstone, its stale mark and metadata, and the marks of its Parents in
+> one statement, or nothing. The crash gap between the version upsert and the
+> mark described under *Mark-first is the one primitive* is closed, and
+> `MarkDeleted` below is gone: the tombstone is set in the same statement.
+> After the commit, each accepted item and each marked Parent is submitted as
+> its own build with its own metadata, and each delete with the `stale_seq`
+> the statement returned. `WaitForSlot` applies to all of these submits.
+
 > **Correction (2026-09-30, runbook step L1.1):** *Mark-first is the one
 > primitive* below says a submit waits "up to a bounded budget for a slot".
 > The pool never did that: `trySubmit` sheds as soon as the queue is full. There

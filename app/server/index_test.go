@@ -61,3 +61,27 @@ func TestMapAppError_StaleVersion(t *testing.T) {
 	require.Equal(t, connect.CodeFailedPrecondition, connectErr.Code())
 	require.Equal(t, "stale version", connectErr.Message())
 }
+
+func TestStatusesToProto_IndexAligned(t *testing.T) {
+	got := statusesToProto([]core.RegisterStatus{core.RegisterStale, core.RegisterAccepted, core.RegisterStale})
+	require.Equal(t, []index.ChangeStatus{
+		index.ChangeStatus_CHANGE_STATUS_STALE,
+		index.ChangeStatus_CHANGE_STATUS_ACCEPTED,
+		index.ChangeStatus_CHANGE_STATUS_STALE,
+	}, got)
+}
+
+// A nil entry has no status to report: the batch is rejected rather than
+// silently misaligning the statuses.
+func TestNotifyChangeBatch_NilNotification_InvalidArgument(t *testing.T) {
+	s := NewIndexer(nil)
+	_, err := s.NotifyChangeBatch(t.Context(), connect.NewRequest(&index.NotifyChangeBatchRequest{
+		Notifications: []*index.ChangeNotification{{ResourceType: "a", ResourceId: "1"}, nil},
+	}))
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestMapAppError_InvalidArgument(t *testing.T) {
+	err := mapAppError(&core.InvalidArgumentError{Msg: "resource a/1 appears more than once in the batch"})
+	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
