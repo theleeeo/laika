@@ -610,3 +610,28 @@ func TestRegisterChanges_StatementFailureCommitsNothing(t *testing.T) {
 		t.Errorf("Parent seq changed: %d", seq)
 	}
 }
+
+func TestRegisterChanges_DeleteMarksItsParents(t *testing.T) {
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "rc4", Id: id} }
+	parent, child := r("parent"), r("child")
+	seed(t, parent, 0, 0, false)
+	relate(t, [2]model.Resource{parent, child})
+	register(t, st, core.Registration{Resource: child, Version: 1, Metadata: meta("create")})
+	_, _, parentSeq, _, _ := row(t, parent)
+
+	got := register(t, st, core.Registration{Resource: child, Deleted: true, Metadata: meta("M")})
+
+	if _, _, childSeq, _, deleted := row(t, child); !deleted || got.Items[0] != (core.RegisteredItem{Accepted: true, StaleSeq: childSeq}) {
+		t.Errorf("delete item: got %+v, want accepted with its row's seq %d (deleted=%v)", got.Items[0], childSeq, deleted)
+	}
+	if _, _, seq, since, _ := row(t, parent); seq != parentSeq+1 || since == nil {
+		t.Errorf("Parent of the deleted item must be marked once: seq=%d (want %d) since=%v", seq, parentSeq+1, since)
+	}
+	if m := metadataOf(t, parent); m["k"] != "M" {
+		t.Errorf("Parent metadata %v, want the delete's (M)", m)
+	}
+	if len(got.Parents) != 1 || got.Parents[0].Resource != parent || got.Parents[0].Metadata["k"] != "M" {
+		t.Errorf("Parents: got %+v, want the Parent once with the delete's metadata", got.Parents)
+	}
+}
