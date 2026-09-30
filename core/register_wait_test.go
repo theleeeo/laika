@@ -121,6 +121,9 @@ func TestRegisterChange_WaitForSlot_DeleteWithParents_MarksParentsBeforeWaiting(
 	ctx, cancel := context.WithCancel(t.Context())
 	errc := registerAsync(t, ctx, idx, st,
 		Notification{ResourceType: "product", ResourceID: "1", Kind: ChangeDeleted}, WaitForSlot())
+	// registerAsync returned on the tombstone; wait for the Parents' mark too,
+	// so the assertion below doesn't race the goroutine.
+	within(t, st.marked, "the Parents' mark")
 	stillBlocked(t, errc, "a WaitForSlot delete on a pressured pool")
 	if st.indexOf("MarkStale:1") == -1 {
 		t.Fatalf("the Parents must be marked before the wait: %v", st.callsSnapshot())
@@ -216,7 +219,9 @@ func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 				Relations: []model.VersionedResource{{Resource: model.Resource{Type: "product", Id: "child"}, Version: 1}},
 			}}}
 		},
-		// The rebuild flusher's drift re-schedule.
+		// The rebuild flusher's drift re-schedule. In production the flusher
+		// runs in a rebuild walk, not on the pool; running it on the only
+		// worker here just proves it sheds rather than waits.
 		"rebuild flusher drift": func(t *testing.T, idx *Indexer, st *recordingStore) {
 			st.drift.Store(true)
 		},
