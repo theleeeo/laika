@@ -1,5 +1,23 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Correction (2026-09-30, runbook step L1.1):** *Mark-first is the one
+> primitive* below says a submit waits "up to a bounded budget for a slot".
+> The pool never did that: `trySubmit` sheds as soon as the queue is full. There
+> are now two submit paths, both after the mark. **`trySubmit`** never blocks,
+> and every cascade uses it. ADR 0006 parents and drift re-builds can run
+> inside pool tasks, where a blocking submit could deadlock the pool. The
+> rebuild flusher runs in a rebuild walk, which must not stall behind producer
+> backpressure. **`submitWait`** is used only for a `RegisterChange` called with
+> `WaitForSlot()`. It covers that call's own builds and delete, and waits while
+> the queue is at or above `Config.QueueHighWater` (default 80% of
+> `QueueSize`). A wait ended by the caller's context or by shutdown counts as
+> success, because the row stays stale for the sweep. `RegisterChange` lands
+> all its marks, a delete's Parents included, before its first submit, so no
+> mark waits behind a submit. This gives pull-based
+> producers backpressure without shedding. The mark is still what makes the
+> write durable. `buildPool.pressured()` reports whether the queue is at or
+> above the high-water mark.
+
 A Notification used to result in a River job that a worker later picked up and
 turned into a Build. The job queue was the durability boundary: the RPC returned
 once the job was enqueued, and River's retries were the only guarantee the Build
