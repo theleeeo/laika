@@ -1,5 +1,10 @@
 # Reverse-relation discovery bootstraps Parent edges for brand-new Children
 
+> **Note (2026-09-30, runbook step L1.2):** registration no longer calls
+> `GetParentResources`. The Parents of a change are read from the same persisted
+> edges by a join on `relations` inside the `Store.RegisterChanges` statement,
+> so the gap and its remedy below are unchanged.
+
 The Relation graph in the Store is populated only by past Builds: a Parent's outgoing edges are written when that Parent is built and its Plan discovers its Children. `RegisterChange` finds the Parents affected by a change exclusively through `GetParentResources`, which reads those persisted edges. This leaves a gap for a brand-new Child: when a Child is created upstream, no edge to its Parent has ever been written, so the Parent that should now include the Child never gets rebuilt. The system previously relied on the upstream sending a second Notification for the Parent as well — an implicit, undocumented, unenforced contract.
 
 We close the gap inside the indexer rather than in the upstream contract. On every Build of a Child, the indexer derives the affected Parents from a Relation key declared in the YAML and enqueues their Builds. The indexer becomes self-sufficient from the resource config alone; no upstream needs to know about relation endpoints it did not change.
