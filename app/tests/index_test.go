@@ -810,6 +810,33 @@ func (t *TestSuite) Test_VersionControl() {
 	})
 }
 
+// Test_ConcurrentRequests_SameResource_LatestVersionWins races the
+// registrations of v2 and v3 of one resource and checks that the resource ends
+// at version 3 with the v3 content indexed and no v2 content left.
+//
+// The source only moves forward, as a real one does: it holds v2 before either
+// Notification is sent, and it moves to v3 just before v3 is registered. So
+// every build of v3's change fetches v3, and the only content older than v3 a
+// build can see is v2. The registrations race freely, and each ordering must
+// converge:
+//
+//   - v3 registers first: v2 is rejected as stale and v3's build writes v3.
+//   - v2 registers first: both builds run, and the one with the higher Build
+//     Sequence starts, and so fetches, after the source moved to v3. If v2's
+//     build fetched v2 before that, its write carries the lower sequence, so
+//     Elasticsearch keeps v3 whichever write lands last.
+//
+// The no-v2-hit assertion only has something to catch when v2's build fetches
+// before the source moves to v3, which rarely if ever happens here: the move
+// is an in-memory write, the fetch follows a registration and a pool hand-off.
+// That older-build interleaving is forced through the fetch gate in
+// Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverwriteNewer.
+//
+// The source must never go back from v3 to v2. RegisterChange submits the
+// inline build, which can take its sequence and fetch before RegisterChange
+// returns, so a build that fetched rolled-back content would hold the highest
+// sequence and write v2. Nothing guards a resource's own fetch: the drift check
+// covers only its related resources, so it would not catch the rollback.
 func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 	t.setResourceConfig(DefaultResourceConfig)
 
@@ -827,6 +854,12 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 	t.Require().NoError(err)
 	t.worker.Drain(t.T().Context())
 
+	// The source commits v2 before its Notification is sent.
+	t.fakeProvider.SetResource("a", "1", map[string]any{
+		"id":     "1",
+		"field1": "v2_stale",
+	})
+
 	start := make(chan struct{})
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
@@ -835,11 +868,6 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 	go func() {
 		defer wg.Done()
 		<-start
-
-		t.fakeProvider.SetResource("a", "1", map[string]any{
-			"id":     "1",
-			"field1": "v2_stale",
-		})
 
 		errs <- t.idx.RegisterChange(t.T().Context(), core.Notification{
 			ResourceType: "a",
@@ -854,6 +882,7 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 		defer wg.Done()
 		<-start
 
+		// The source commits v3 before its Notification is sent.
 		t.fakeProvider.SetResource("a", "1", map[string]any{
 			"id":     "1",
 			"field1": "v3_latest",
@@ -877,12 +906,6 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_LatestVersionWins() {
 		}
 		t.Require().True(errors.Is(registerErr, core.ErrStaleVersion), "unexpected register error: %v", registerErr)
 	}
-
-	// Keep source at latest value before workers fetch the document.
-	t.fakeProvider.SetResource("a", "1", map[string]any{
-		"id":     "1",
-		"field1": "v3_latest",
-	})
 
 	t.worker.Drain(t.T().Context())
 
