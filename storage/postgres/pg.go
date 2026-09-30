@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -107,40 +108,108 @@ func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, ch
 	return s.AddRelations(ctx, relations)
 }
 
-// UpsertResource inserts or updates the resource in the resources table.
-// When version is 0, the resource is inserted without version control (existing
-// rows are left unchanged). When version > 0, the resource is only inserted or
-// updated if the new version is strictly greater than the stored one; otherwise
-// ErrStaleVersion is returned.
-func (s *Store) UpsertResource(ctx context.Context, resource model.Resource, version int64) error {
-	// TODO: Always require version, set it at a higher level if omitted in the api.
-	if version == 0 {
-		_, err := s.pool.Exec(ctx,
-			`INSERT INTO resources (type, id) VALUES ($1, $2)
-			 ON CONFLICT (type, id) DO UPDATE SET deleted = false`,
-			resource.Type, resource.Id,
-		)
-		return err
+// RegisterChanges records a batch of changes in one statement, so each
+// accepted item's version, its stale mark and its Parents' marks commit
+// together or not at all. The item upsert's WHERE is the stale-version check:
+// a delete or a version-0 item is always accepted, a versioned one only when
+// strictly newer. Parents are found from the accepted items only, so a stale
+// item marks nothing; accepted in-batch items are excluded from the Parent
+// mark because one statement may modify a row only once, and their own row
+// already carries the mark. A Parent shared by several accepted children
+// stores the metadata of the last one in batch order.
+func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) (core.Registered, error) {
+	if len(items) == 0 {
+		return core.Registered{}, nil
+	}
+	types := make([]string, len(items))
+	ids := make([]string, len(items))
+	deleted := make([]bool, len(items))
+	versions := make([]int64, len(items))
+	metadata := make([]map[string]string, len(items))
+	for i, it := range items {
+		types[i], ids[i] = it.Resource.Type, it.Resource.Id
+		deleted[i] = it.Deleted
+		if !it.Deleted {
+			versions[i] = it.Version
+		}
+		metadata[i] = it.Metadata
+	}
+	// One JSON array index-aligned with the items; a nil map marshals to
+	// JSON null, stored as SQL NULL like MarkStale stores nil metadata.
+	metaJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return core.Registered{}, err
 	}
 
-	tag, err := s.pool.Exec(ctx,
-		`INSERT INTO resources (type, id, version) VALUES ($1, $2, $3)
-		 ON CONFLICT (type, id) DO UPDATE SET version = EXCLUDED.version, deleted = false
-		 WHERE resources.version < EXCLUDED.version`,
-		resource.Type, resource.Id, version,
+	rows, err := s.pool.Query(ctx,
+		`WITH input AS (
+		     SELECT x.ord, x.t, x.i, x.del, x.v, NULLIF(m.meta, 'null'::jsonb) AS meta
+		     FROM unnest($1::text[], $2::text[], $3::bool[], $4::bigint[]) WITH ORDINALITY AS x(t, i, del, v, ord)
+		     JOIN jsonb_array_elements($5::jsonb) WITH ORDINALITY AS m(meta, ord) USING (ord)
+		 ),
+		 accepted AS (
+		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata)
+		     SELECT t, i, v, del, 1, now(), meta FROM input
+		     ON CONFLICT (type, id) DO UPDATE
+		     SET version = CASE WHEN EXCLUDED.deleted THEN 0
+		                        WHEN EXCLUDED.version = 0 THEN r.version
+		                        ELSE EXCLUDED.version END,
+		         deleted = EXCLUDED.deleted,
+		         stale_seq = r.stale_seq + 1,
+		         stale_since = COALESCE(r.stale_since, now()),
+		         metadata = EXCLUDED.metadata
+		     WHERE EXCLUDED.deleted OR EXCLUDED.version = 0 OR r.version < EXCLUDED.version
+		     RETURNING r.type, r.id, r.stale_seq
+		 ),
+		 parents AS (
+		     SELECT DISTINCT ON (rel.resource, rel.resource_id)
+		            rel.resource AS t, rel.resource_id AS i, input.meta
+		     FROM accepted a
+		     JOIN input ON input.t = a.type AND input.i = a.id
+		     JOIN relations rel ON rel.related_resource = a.type AND rel.related_resource_id = a.id
+		     WHERE NOT EXISTS (SELECT 1 FROM accepted a2 WHERE a2.type = rel.resource AND a2.id = rel.resource_id)
+		     ORDER BY rel.resource, rel.resource_id, input.ord DESC
+		 ),
+		 marked AS (
+		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
+		     SELECT t, i, 1, now(), meta FROM parents
+		     ON CONFLICT (type, id) DO UPDATE
+		     SET stale_seq = r.stale_seq + 1,
+		         stale_since = COALESCE(r.stale_since, now()),
+		         metadata = EXCLUDED.metadata
+		     RETURNING r.type, r.id, r.metadata
+		 )
+		 SELECT input.ord, a.stale_seq, NULL::text, NULL::text, NULL::jsonb
+		 FROM input LEFT JOIN accepted a ON a.type = input.t AND a.id = input.i
+		 UNION ALL
+		 SELECT NULL, NULL, type, id, metadata FROM marked`,
+		types, ids, deleted, versions, metaJSON,
 	)
 	if err != nil {
-		return err
+		return core.Registered{}, err
 	}
-	if tag.RowsAffected() == 0 {
-		return core.ErrStaleVersion
-	}
-	return nil
-}
+	defer rows.Close()
 
-// RegisterChanges records a batch of changes in one statement. L1.2 lane A.
-func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) (core.Registered, error) {
-	return core.Registered{}, errors.New("RegisterChanges: not implemented")
+	out := core.Registered{Items: make([]core.RegisteredItem, len(items))}
+	for rows.Next() {
+		var ord, staleSeq *int64
+		var typ, id *string
+		var meta map[string]string
+		if err := rows.Scan(&ord, &staleSeq, &typ, &id, &meta); err != nil {
+			return core.Registered{}, err
+		}
+		if ord == nil {
+			out.Parents = append(out.Parents, core.MarkedParent{Resource: model.Resource{Type: *typ, Id: *id}, Metadata: meta})
+			continue
+		}
+		if staleSeq != nil {
+			out.Items[*ord-1] = core.RegisteredItem{Accepted: true, StaleSeq: *staleSeq}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return core.Registered{}, err
+	}
+	return out, nil
 }
 
 // AnyResourceVersionDrifted reports whether any of the given versioned
@@ -207,25 +276,6 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 		types, ids, metadata,
 	)
 	return err
-}
-
-// MarkDeleted tombstones the resource: deleted=true plus a stale mark, so the
-// sweep retries an inline delete that failed or was shed. version resets to 0
-// so a later re-create is never rejected as stale against the old lifecycle.
-func (s *Store) MarkDeleted(ctx context.Context, resource model.Resource) (int64, error) {
-	var seq int64
-	err := s.pool.QueryRow(ctx,
-		`INSERT INTO resources (type, id, deleted, stale_seq, stale_since)
-		 VALUES ($1, $2, true, 1, now())
-		 ON CONFLICT (type, id) DO UPDATE
-		 SET deleted = true,
-		     version = 0,
-		     stale_seq = resources.stale_seq + 1,
-		     stale_since = COALESCE(resources.stale_since, now())
-		 RETURNING stale_seq`,
-		resource.Type, resource.Id,
-	).Scan(&seq)
-	return seq, err
 }
 
 // BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version)
