@@ -1,5 +1,17 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Decision (2026-09-30, after runbook step L1.2):** push producers are never
+> throttled. The RPCs (`NotifyChange`, `NotifyChangeBatch`, in the app and the
+> harness) register without `WaitForSlot`, so a load spike sheds to the sweep
+> rather than slowing the producer. A shed coalesces: several changes to one
+> resource bump one row's `stale_seq`, and the sweep's single build of it
+> settles them all, whereas throttling would run a build per change. The cost
+> is latency: shed work shows up in search after the stale threshold and the
+> sweep interval. The heavy lifting is the builds, not ingestion, so it is the
+> indexer that absorbs the spike. `WaitForSlot` remains for in-process pull
+> producers, like the harness poller (SB1.3), which read current state and
+> advance a checkpoint only after their registrations return.
+
 > **Correction (2026-09-30, runbook step L1.2):** registration is now one
 > atomic statement. `Indexer.RegisterChanges` (`RegisterChange` is a batch of
 > one) calls `Store.RegisterChanges`, which writes each accepted item's version
