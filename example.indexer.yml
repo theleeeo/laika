@@ -18,6 +18,7 @@
 #   sweep.batch_size    -> SWEEP_BATCH_SIZE
 #   pool.size           -> POOL_SIZE
 #   pool.queue_size     -> POOL_QUEUE_SIZE
+#   pool.queue_high_water -> POOL_QUEUE_HIGH_WATER
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -69,7 +70,11 @@ sweep:
 
 # Bounded in-process pool for inline builds. size is the number of persistent
 # workers; queue_size bounds accepted-but-not-yet-running builds — a full
-# queue sheds new submissions to the sweep.
+# queue sheds new submissions to the sweep. queue_high_water is the queued-build
+# count at or above which the pool is under pressure; 0 means 80% of queue_size.
+# Only WaitForSlot registrations pace on it, and the app's RPCs never wait
+# (ADR 0008), so it has no effect here yet.
 pool:
   size: 10
   queue_size: 100
+  queue_high_water: 0

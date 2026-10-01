@@ -178,3 +178,50 @@ resource_config_path: "resources.from.file.yml"
 		t.Fatalf("ResourceConfigPath mismatch: got %q", cfg.ResourceConfigPath)
 	}
 }
+
+func TestLoadAppConfig_PoolQueueHighWater(t *testing.T) {
+	t.Setenv("POOL_QUEUE_HIGH_WATER", "")
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.Pool.QueueHighWater != 0 {
+		t.Errorf("pool.queue_high_water default = %d, want 0 (core's default)", cfg.Pool.QueueHighWater)
+	}
+
+	t.Setenv("POOL_QUEUE_HIGH_WATER", "90")
+	cfg, err = loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig with env only: %v", err)
+	}
+	if cfg.Pool.QueueHighWater != 90 {
+		t.Errorf("POOL_QUEUE_HIGH_WATER without a file = %d, want 90", cfg.Pool.QueueHighWater)
+	}
+	t.Setenv("POOL_QUEUE_HIGH_WATER", "")
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+pool:
+  queue_size: 200
+  queue_high_water: 150
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig from file: %v", err)
+	}
+	if cfg.Pool.QueueHighWater != 150 {
+		t.Errorf("pool.queue_high_water from file = %d, want 150", cfg.Pool.QueueHighWater)
+	}
+
+	t.Setenv("POOL_QUEUE_HIGH_WATER", "120")
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig with env: %v", err)
+	}
+	if cfg.Pool.QueueHighWater != 120 {
+		t.Errorf("POOL_QUEUE_HIGH_WATER override = %d, want 120", cfg.Pool.QueueHighWater)
+	}
+}

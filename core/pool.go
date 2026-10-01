@@ -165,9 +165,8 @@ func (p *buildPool) signalSlotFreed() {
 }
 
 // pressured reports whether the queue is at or above the high-water mark.
-// WaitForSlot registrations and the reverse sweep pace on it. It takes no
-// lock: len of a channel is a single read, and a stale answer only shifts a
-// wait by one dequeue.
+// WaitForSlot registrations pace on it. It takes no lock: len of a channel is
+// a single read, and a stale answer only shifts a wait by one dequeue.
 func (p *buildPool) pressured() bool {
 	return len(p.queue) >= p.highWater
 }

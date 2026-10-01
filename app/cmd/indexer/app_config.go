@@ -33,6 +33,7 @@ import (
 //	sweep.batch_size       → SWEEP_BATCH_SIZE
 //	pool.size              → POOL_SIZE
 //	pool.queue_size        → POOL_QUEUE_SIZE
+//	pool.queue_high_water  → POOL_QUEUE_HIGH_WATER
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -97,6 +98,11 @@ type poolConfig struct {
 	// QueueSize bounds accepted-but-not-yet-running inline builds; a full
 	// queue sheds new submissions to the sweep.
 	QueueSize int `mapstructure:"queue_size"`
+	// QueueHighWater is the queued-build count at or above which the pool is
+	// under pressure (core.Config.QueueHighWater). 0 means core's default,
+	// 80% of QueueSize. Only WaitForSlot registrations pace on it, and the
+	// app's RPCs never wait (ADR 0008), so it has no effect here yet.
+	QueueHighWater int `mapstructure:"queue_high_water"`
 }
 
 // loadAppConfig reads the config file at configFilePath (if present) and
@@ -128,6 +134,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("sweep.batch_size", 500)
 	v.SetDefault("pool.size", 10)
 	v.SetDefault("pool.queue_size", 100)
+	v.SetDefault("pool.queue_high_water", 0)
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {
