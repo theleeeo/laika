@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/projection"
@@ -183,6 +184,8 @@ func New(cfg Config) (*Indexer, error) {
 // finalizeResourceConfigs applies defaults and validates a resource config
 // set at the library boundary (New, SetPlans). An empty set is allowed: an
 // Indexer with nothing configured is legal, and rejecting it is app policy.
+// A valid set is then checked for versions with no primary-tier field, which
+// are warned about, not rejected.
 func finalizeResourceConfigs(resources resource.Configs) error {
 	for _, rc := range resources {
 		rc.ApplyDefaults()
@@ -190,6 +193,7 @@ func finalizeResourceConfigs(resources resource.Configs) error {
 	if err := resources.Validate(); err != nil {
 		return fmt.Errorf("invalid resource config: %w", err)
 	}
+	resources.WarnMissingPrimaryTier(slog.Default())
 	return nil
 }
 

@@ -2,6 +2,7 @@ package resource
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 )
 
@@ -14,6 +15,22 @@ func (c Configs) Get(resource string) *Config {
 		}
 	}
 	return nil
+}
+
+// WarnMissingPrimaryTier logs a Warn for every version that has no
+// primary-tier field. Such a version is legal (a filter-only resource), but
+// its documents get no search_primary surface, so free-text queries never
+// match them.
+func (c Configs) WarnMissingPrimaryTier(logger *slog.Logger) {
+	for _, rc := range c {
+		for i := range rc.Versions {
+			vc := &rc.Versions[i]
+			if !vc.HasPrimaryTierField() {
+				logger.Warn("schema version declares no primary-tier field; free-text queries will match nothing",
+					slog.String("resource", rc.Resource), slog.Int("version", vc.Version))
+			}
+		}
+	}
 }
 
 // VersionConfig holds the schema definition for a single version of a resource.
@@ -43,6 +60,28 @@ func (vc *VersionConfig) GetSearchableFields() []string {
 	}
 
 	return fields
+}
+
+// HasPrimaryTierField reports whether any field feeds this version's
+// search_primary surface: a root field or a denormalized-relation field with
+// tier primary. Reference-relation and nested-block fields never do.
+func (vc *VersionConfig) HasPrimaryTierField() bool {
+	for _, f := range vc.Fields {
+		if f.Query.Tier() == SearchTierPrimary {
+			return true
+		}
+	}
+	for _, r := range vc.Relations {
+		if r.IsReference() {
+			continue
+		}
+		for _, f := range r.Fields {
+			if f.Query.Tier() == SearchTierPrimary {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // GetRelation returns the relation config for the given resource name, or nil.

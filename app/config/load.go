@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/goccy/go-yaml"
@@ -37,7 +38,8 @@ type rawEntry struct {
 	NestedBlocks []resource.NestedBlockConfig `yaml:"nestedBlocks,omitempty"`
 }
 
-// ParseConfig parses resource config YAML bytes into Configs.
+// ParseConfig parses resource config YAML bytes into Configs and warns about
+// every version with no primary-tier field.
 func ParseConfig(data []byte) (resource.Configs, error) {
 	var raw rawFile
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -94,6 +96,7 @@ func ParseConfig(data []byte) (resource.Configs, error) {
 		cfg.ApplyDefaults()
 		configs = append(configs, cfg)
 	}
+	configs.WarnMissingPrimaryTier(slog.Default())
 
 	return configs, nil
 }

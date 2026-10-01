@@ -1,8 +1,13 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -243,4 +248,82 @@ resources:
 func TestParseConfig_NoResourcesRejected(t *testing.T) {
 	_, err := ParseConfig([]byte("resources: []"))
 	require.ErrorContains(t, err, "at least one resource")
+}
+
+// A schema version with no primary-tier field builds documents free-text
+// queries never match; the loader warns once, naming the resource and version.
+// It swaps slog.Default, so it must not run in parallel.
+func TestLoadConfig_WarnsOnTierlessVersion(t *testing.T) {
+	tierless := `
+resources:
+  - type: a
+    version: 1
+    fields:
+      - name: title
+        query:
+          search: primary
+  - type: a
+    version: 2
+    fields:
+      - name: title
+        query:
+          search: secondary
+`
+	path := filepath.Join(t.TempDir(), "resources.yml")
+	require.NoError(t, os.WriteFile(path, []byte(tierless), 0o600))
+
+	logs := captureDefaultLogs(t)
+	_, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Equal(t, []tierlessWarning{{Resource: "a", Version: 2}}, tierlessWarnings(t, logs))
+
+	withPrimary := `
+resources:
+  - type: a
+    fields:
+      - name: title
+        query:
+          search: primary
+`
+	logs = captureDefaultLogs(t)
+	_, err = ParseConfig([]byte(withPrimary))
+	require.NoError(t, err)
+	require.Empty(t, tierlessWarnings(t, logs))
+}
+
+type tierlessWarning struct {
+	Resource string
+	Version  int
+}
+
+// captureDefaultLogs swaps slog.Default for a buffer-backed JSON logger until
+// the test ends. Callers must not run in parallel.
+func captureDefaultLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	prev := slog.Default()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// tierlessWarnings returns the tier-less-version warnings in the captured logs.
+func tierlessWarnings(t *testing.T, logs *bytes.Buffer) []tierlessWarning {
+	t.Helper()
+	var out []tierlessWarning
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+		msg, _ := rec["msg"].(string)
+		if rec["level"] != "WARN" || !strings.Contains(msg, "no primary-tier field") {
+			continue
+		}
+		res, _ := rec["resource"].(string)
+		ver, _ := rec["version"].(float64)
+		out = append(out, tierlessWarning{res, int(ver)})
+	}
+	return out
 }
