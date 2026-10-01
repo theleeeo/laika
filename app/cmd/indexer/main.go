@@ -37,6 +37,12 @@ func main() {
 		log.Fatalf("load app config: %v", err)
 	}
 
+	logLevel, err := core.ParseLevel(cfg.Log.Level)
+	if err != nil {
+		log.Fatalf("parse log level: %v", err)
+	}
+	core.InitTextLogging(os.Stderr, logLevel)
+
 	resources, err := config.LoadConfig(cfg.ResourceConfigPath)
 
 	if err != nil {
@@ -73,12 +79,6 @@ func main() {
 		log.Fatalf("pgxpool: %v", err)
 	}
 	defer dbpool.Close()
-
-	logLevel, err := core.ParseLevel(cfg.Log.Level)
-	if err != nil {
-		log.Fatalf("parse log level: %v", err)
-	}
-	core.InitTextLogging(os.Stderr, logLevel)
 
 	// Every configured Schema Version's index must already exist — the indexer
 	// never creates indices (gen-mapping is the only bootstrap tool). Without

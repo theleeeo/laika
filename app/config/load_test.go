@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -300,10 +301,16 @@ type tierlessWarning struct {
 // the test ends. Callers must not run in parallel.
 func captureDefaultLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
-	prev := slog.Default()
+	prev, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
+	// SetDefault also redirects the log package; restoring slog alone would
+	// leave log output, and the built-in slog default, writing into the buffer.
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
 	return &buf
 }
 

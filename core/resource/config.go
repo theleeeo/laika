@@ -19,14 +19,14 @@ func (c Configs) Get(resource string) *Config {
 
 // WarnMissingPrimaryTier logs a Warn for every version that has no
 // primary-tier field. Such a version is legal (a filter-only resource), but
-// its documents get no search_primary surface, so free-text queries never
-// match them.
+// its documents get no search_primary surface, so single-resource free-text
+// search never matches them (federated search still sees search_secondary).
 func (c Configs) WarnMissingPrimaryTier(logger *slog.Logger) {
 	for _, rc := range c {
 		for i := range rc.Versions {
 			vc := &rc.Versions[i]
 			if !vc.HasPrimaryTierField() {
-				logger.Warn("schema version declares no primary-tier field; free-text queries will match nothing",
+				logger.Warn("schema version declares no primary-tier field; single-resource free-text search will match nothing",
 					slog.String("resource", rc.Resource), slog.Int("version", vc.Version))
 			}
 		}
