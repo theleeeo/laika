@@ -112,9 +112,10 @@ func (t *TestSuite) Test_DeleteNotification_RemovesDocAndRow() {
 	t.Require().False(t.docExists("a", "1"), "delete must remove the document")
 }
 
-// Sweep finishes a tombstone whose inline delete never ran (e.g. the pool shed
-// the work or the process crashed). The sweep resolves the tombstone
-// synchronously: hard-deletes the row and removes the document.
+// Sweep finishes a tombstone whose inline delete never ran (e.g. the process
+// crashed after the mark claimed it). The sweep skips a row with a live owner,
+// so the case lets the claim's lease expire; the sweep then resolves the
+// tombstone synchronously: hard-deletes the row and removes the document.
 func (t *TestSuite) Test_SweepStale_FinishesTombstone() {
 	t.setResourceConfig(DefaultResourceConfig)
 
@@ -126,12 +127,18 @@ func (t *TestSuite) Test_SweepStale_FinishesTombstone() {
 	t.worker.Drain(t.T().Context())
 	t.Require().True(t.docExists("a", "1"))
 
-	// Simulate a shed inline delete: tombstone the row directly, no pool work.
+	// Simulate a crashed inline delete: tombstone the row directly, no pool
+	// work. The registration claims the row for the delete that never runs.
 	_, err = t.st.RegisterChanges(t.T().Context(), []core.Registration{
 		{Resource: model.Resource{Type: "a", Id: "1"}, Deleted: true},
 	}, time.Minute)
 	t.Require().NoError(err)
 	t.Require().Equal(1, t.resourceRowCount("a", "1"), "tombstone must leave the row present until swept")
+
+	// The crashed owner's lease expires.
+	_, err = t.pool.Exec(t.T().Context(),
+		`UPDATE resources SET owner_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
 
 	n, err := t.idx.SweepStale(t.T().Context(), 0, 100)
 	t.Require().NoError(err)

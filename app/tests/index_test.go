@@ -1014,6 +1014,18 @@ func (t *TestSuite) Test_ConcurrentRequests_MultipleVersions_ConvergeToLatest() 
 	t.Require().Len(staleResp.Hits, 0)
 }
 
+// Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverwriteNewer: an
+// older build that writes after a newer one must not overwrite the newer
+// document. The older build is a direct idx.Build, which owns nothing: an
+// owned inline build would keep the newer registration from submitting (its
+// change would be the older build's follow-up), so it could not run first.
+//
+// Interleaving: a/1 is built at v1. A direct Build of a/1 takes its Build
+// Sequence at BeginBuild (B0+1) and is held in FetchResource. The v3
+// registration claims the unowned row and its inline build (B0+2) fetches
+// v3_new, writes it at external version B0+2 and finishes. Released, the
+// held build fetches its override v2_old and writes at B0+1, losing ES OCC;
+// its ClearStale is a no-op against the moved stale_seq.
 func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverwriteNewer() {
 	t.setResourceConfig(DefaultResourceConfig)
 
@@ -1027,16 +1039,15 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 	})
 	t.Require().NoError(err)
 	t.worker.Drain(t.T().Context())
+	b0 := t.resourceRebuildCounter("a", "1")
 
 	gateReached := t.fakeProvider.SetFetchGate("old-a-build")
 
 	oldErrCh := make(chan error, 1)
 	go func() {
-		oldErrCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
+		oldErrCh <- t.idx.Build(t.T().Context(), core.BuildArgs{
 			ResourceType: "a",
-			ResourceID:   "1",
-			Kind:         core.ChangeUpdated,
-			Version:      2,
+			ResourceIds:  []string{"1"},
 			Metadata: map[string]string{
 				"test_fetch_gate":          "old-a-build",
 				"test_fetch_gate_resource": "a",
@@ -1044,12 +1055,8 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 			},
 		})
 	}()
-
-	select {
-	case <-gateReached:
-	case <-time.After(10 * time.Second):
-		t.FailNow("timed out waiting for blocked old a build to reach gate")
-	}
+	t.awaitGate(gateReached, "the older direct build to reach its FetchResource gate")
+	t.Require().Equal(b0+1, t.resourceRebuildCounter("a", "1"), "the older build has begun")
 
 	err = t.idx.RegisterChange(t.T().Context(), core.Notification{
 		ResourceType: "a",
@@ -1061,33 +1068,29 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 		},
 	})
 	t.Require().NoError(err)
+	// The direct Build runs outside the pool, so this waits for the v3 build
+	// alone.
+	t.worker.Drain(t.T().Context())
+	t.Require().Equal(b0+2, t.resourceRebuildCounter("a", "1"), "the newer build ran while the older one is held")
 
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		resp, searchErr := t.idx.Search(t.T().Context(), core.SearchRequest{
-			Resource: "a",
-			Query:    "v3_new",
-		})
-		t.Require().NoError(searchErr)
-		if len(resp.Hits) == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.FailNow("timed out waiting for newer a build to be indexed")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a", Query: "v3_new"})
+	t.Require().NoError(err)
+	t.Require().Len(resp.Hits, 1, "the newer build is indexed while the older one is held")
 
 	t.fakeProvider.ReleaseFetchGate("old-a-build")
-
-	oldErr := <-oldErrCh
-	t.Require().NoError(oldErr)
-
+	select {
+	case oldErr := <-oldErrCh:
+		t.Require().NoError(oldErr)
+	case <-time.After(30 * time.Second):
+		t.FailNow("timed out waiting for the older direct build to return")
+	}
 	t.worker.Drain(t.T().Context())
 
 	t.Require().Equal(int64(3), t.resourceVersion("a", "1"))
+	t.Require().Equal(b0+2, t.resourceRebuildCounter("a", "1"), "the older build's write re-schedules nothing")
+	t.Require().Nil(t.staleSince("a", "1"))
 
-	resp, err := t.idx.Search(t.T().Context(), core.SearchRequest{
+	resp, err = t.idx.Search(t.T().Context(), core.SearchRequest{
 		Resource: "a",
 		Query:    "v3_new",
 	})
