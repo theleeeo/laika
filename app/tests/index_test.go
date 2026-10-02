@@ -1112,14 +1112,19 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 // order. So the Build that wins the ES OCC race is whichever grabs the counter
 // last, independent of which child update was logically latest. Convergence
 // therefore does not rely on the "right" Build winning; it relies on every Build
-// re-fetching live source data and on the drift check re-enqueueing any Build
-// that observed a now-superseded child version. The terminal Build (highest
-// counter, no re-enqueue) is the one that observed current versions, so after
-// the queue drains the parent holds the latest data of both children.
+// re-fetching live source data and on the drift check re-scheduling any Build
+// with a fetched child whose change_seq is above the build's start — a change
+// accepted after the build took its start from the Change Sequence, which its
+// fetch may have missed. A Build started after the last child change sees no
+// such child and re-schedules nothing, and it fetched every child's current
+// data, so after the queue drains the parent holds the latest data of both
+// children.
 //
-// The child updates are modelled in the source with versioned relations (not in
-// Notification metadata) so drift detection can compare observed vs stored
-// versions — the mechanism that actually drives convergence in production.
+// The child updates are modelled in the source (resource and relation data,
+// not Notification metadata), so every Build fetches what the source holds at
+// that moment — the mechanism that actually drives convergence in production.
+// The relation versions are still served but not read by the drift check,
+// which compares Change Sequence values, never observed versions.
 //
 // Field values are single letter/digit runs ("av2", not "a_v2") on purpose. The
 // searchable surfaces are n-grammed with token_chars letter+digit and min_gram
@@ -1151,7 +1156,7 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	// Concurrently advance both children to version 2 in the source and notify.
 	// Each fans out to parent c; their Builds of c race on the Build Sequence.
 	// The source data is written before RegisterChange so the fanned-out Build
-	// observes the new version.
+	// fetches the new data.
 	start := make(chan struct{})
 	errCh := make(chan error, 2)
 	var wg sync.WaitGroup
@@ -1224,12 +1229,19 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	}
 }
 
-// Test_RaceCondition_ChildUpdatedDuringParentBuild reproduces the race where a
-// child resource is updated while a parent rebuild is in flight, after the
-// parent's old relation edge has been removed and before the new one is
-// persisted. RegisterChange for the child sees no parent edge to fan out to,
-// so without drift detection the parent would index permanently-stale child
-// data. The drift check in buildOne re-enqueues the parent on detection.
+// Test_RaceCondition_ChildUpdatedDuringParentBuild forces a child change
+// accepted while a parent build is in flight: c's build has taken its start
+// from the Change Sequence (BeginBuild) and fetched a/1's old data when a/1's
+// change registers, stamping a/1's change_seq above that start. Released, the
+// build writes its stale document (or loses it on OCC to a newer build), and
+// the drift check in buildOne finds a/1's change_seq above its start and
+// re-schedules c, so c converges to the new data.
+//
+// c's c->a edge still exists while the build fetches — buildOne replaces its
+// edges only after its plans ran — so a/1's notification also fans out to c,
+// and either path alone would converge. The path where the drift check is the
+// only one, a child with no edge yet, is pinned by
+// Test_DriftCheck_ChildRegisteredDuringParentFirstBuild_ReschedulesOnce.
 //
 // Values are separator-free ("av1", not "a_v1") for the n-gram reason spelled
 // out on Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdatesConverge.
@@ -1240,7 +1252,8 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av1"})
 	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "bv1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "cv1"})
-	// Use versioned relations so drift detection can compare observed vs stored.
+	// The relation versions are served but not read by the drift check, which
+	// compares Change Sequence values.
 	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av1"}, Version: 1}})
 	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "bv1"}, Version: 1}})
 
@@ -1274,9 +1287,8 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	}
 
 	// While c is paused holding the snapshot of a at version 1, advance a to
-	// version 2 in the source and notify. The c->a edge was already removed at
-	// the start of c's build, so this notification finds no parents and cannot
-	// fan out to c.
+	// version 2 in the source and notify. The accepted change stamps a/1's
+	// change_seq above the start c's build took at BeginBuild.
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av2"})
 	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av2"}, Version: 2}})
 
@@ -1287,8 +1299,9 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 		Version:      2,
 	}))
 
-	// Release: c finishes writing the stale doc, then drift detection compares
-	// observed version (1) vs stored version (2) and re-enqueues c.
+	// Release: c finishes writing the stale doc (or loses it on OCC to the
+	// fanout build), then the drift check finds a/1's change_seq above the
+	// build's start and re-schedules c.
 	t.fakeProvider.ReleaseFetchGate("c-related-a")
 	t.worker.Drain(t.T().Context())
 
@@ -1320,7 +1333,8 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.Require().NoError(err)
 	t.Require().Len(staleResp.Hits, 0)
 
-	// c was rebuilt at least twice: once originally, once after concurrent
-	// update was detected via drift.
+	// c was rebuilt at least twice after its first build: the gated build, and
+	// at least one follow-up for the concurrent update (the drift re-schedule;
+	// the fanout build comes on top).
 	t.Require().GreaterOrEqual(t.resourceRebuildCounter("c", "1"), int64(3))
 }
