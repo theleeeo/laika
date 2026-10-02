@@ -122,6 +122,14 @@ func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, ch
 // fresh Change Sequence value; a rejected item and a marked Parent keep
 // theirs. The value is drawn for every input row, so a rejected item leaves
 // a gap in the sequence, which the drift check doesn't mind.
+//
+// Every row the statement marks — accepted item or Parent — is also claimed
+// for a Build owner when it has none or its owner's lease has expired: the
+// claim is decided in the upsert's SET, under the row lock ON CONFLICT takes,
+// so of two concurrent marks of one row only the first to lock it claims.
+// RETURNING sees only the new row (Postgres 17 has no RETURNING OLD), so a
+// claim reads as owner_seq = stale_seq: an owner that was not replaced holds
+// an older stale_seq, since marks only ever bump it.
 func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, lease time.Duration) (core.Registered, error) {
 	if len(items) == 0 {
 		return core.Registered{}, nil
@@ -153,8 +161,8 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		     JOIN jsonb_array_elements($5::jsonb) WITH ORDINALITY AS m(meta, ord) USING (ord)
 		 ),
 		 accepted AS (
-		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata, change_seq)
-		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence') FROM input
+		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata, change_seq, owner_seq, owner_since)
+		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence'), 1, now() FROM input
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET version = CASE WHEN EXCLUDED.deleted THEN 0
 		                        WHEN EXCLUDED.version = 0 THEN r.version
@@ -163,9 +171,11 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		         change_seq = EXCLUDED.change_seq,
 		         stale_seq = r.stale_seq + 1,
 		         stale_since = COALESCE(r.stale_since, now()),
-		         metadata = EXCLUDED.metadata
+		         metadata = EXCLUDED.metadata,
+		         owner_seq = CASE WHEN `+claimable("$6")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
 		     WHERE EXCLUDED.deleted OR EXCLUDED.version = 0 OR r.version < EXCLUDED.version
-		     RETURNING r.type, r.id, r.stale_seq
+		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed
 		 ),
 		 parents AS (
 		     SELECT DISTINCT ON (rel.resource, rel.resource_id)
@@ -177,19 +187,21 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		     ORDER BY rel.resource, rel.resource_id, input.ord DESC
 		 ),
 		 marked AS (
-		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
-		     SELECT t, i, 1, now(), meta FROM parents
+		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
+		     SELECT t, i, 1, now(), meta, 1, now() FROM parents
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET stale_seq = r.stale_seq + 1,
 		         stale_since = COALESCE(r.stale_since, now()),
-		         metadata = EXCLUDED.metadata
-		     RETURNING r.type, r.id, r.metadata
+		         metadata = EXCLUDED.metadata,
+		         owner_seq = CASE WHEN `+claimable("$6")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
+		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed, r.metadata
 		 )
-		 SELECT input.ord, a.stale_seq, NULL::text, NULL::text, NULL::jsonb
+		 SELECT input.ord, a.stale_seq, a.claimed, NULL::text, NULL::text, NULL::jsonb
 		 FROM input LEFT JOIN accepted a ON a.type = input.t AND a.id = input.i
 		 UNION ALL
-		 SELECT NULL, NULL, type, id, metadata FROM marked`,
-		types, ids, deleted, versions, metaJSON,
+		 SELECT NULL, stale_seq, claimed, type, id, metadata FROM marked`,
+		types, ids, deleted, versions, metaJSON, lease.Microseconds(),
 	)
 	if err != nil {
 		return core.Registered{}, err
@@ -199,18 +211,24 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 	out := core.Registered{Items: make([]core.RegisteredItem, len(items))}
 	for rows.Next() {
 		var ord, staleSeq *int64
+		var claimed *bool
 		var typ, id *string
 		var meta map[string]string
-		if err := rows.Scan(&ord, &staleSeq, &typ, &id, &meta); err != nil {
+		if err := rows.Scan(&ord, &staleSeq, &claimed, &typ, &id, &meta); err != nil {
 			return core.Registered{}, err
 		}
+		if staleSeq == nil {
+			continue // a rejected item
+		}
+		var token int64
+		if *claimed {
+			token = *staleSeq
+		}
 		if ord == nil {
-			out.Parents = append(out.Parents, core.MarkedParent{Resource: model.Resource{Type: *typ, Id: *id}, Metadata: meta})
+			out.Parents = append(out.Parents, core.MarkedParent{Resource: model.Resource{Type: *typ, Id: *id}, Metadata: meta, Token: token})
 			continue
 		}
-		if staleSeq != nil {
-			out.Items[*ord-1] = core.RegisteredItem{Accepted: true, StaleSeq: *staleSeq}
-		}
+		out.Items[*ord-1] = core.RegisteredItem{Accepted: true, StaleSeq: *staleSeq, Token: token}
 	}
 	if err := rows.Err(); err != nil {
 		return core.Registered{}, err
@@ -218,13 +236,28 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 	return out, nil
 }
 
+var _ core.Store = (*Store)(nil)
+
+// claimable is the SQL condition under which a statement claims the row
+// aliased r for a Build owner: it has no owner, or its owner's lease has
+// expired. lease is the placeholder of the lease in microseconds. A lease of
+// zero treats every owner as expired; MarkStale is the one statement that
+// reads zero as "claim nothing" instead (core never passes zero otherwise).
+// now() is the transaction start, so a claim that waited for the row lock
+// stamps owner_since with the wait included: the lease runs short by it.
+func claimable(lease string) string {
+	return `(r.owner_seq IS NULL OR r.owner_since IS NULL OR r.owner_since < now() - ` + lease + `::bigint * interval '1 microsecond')`
+}
+
 // MarkStale durably records build intent for the given resources: bump
 // stale_seq and set stale_since — keeping the OLDEST timestamp, so
 // "stale for too long" measures the oldest unserved change. The notification
 // metadata is stored alongside the mark (last mark wins) so a sweep-recovered
 // build runs with the same context an inline build would have.
-var _ core.Store = (*Store)(nil)
-
+//
+// A lease above zero also claims each row without a live owner, as
+// RegisterChanges does, and returns those; a lease of zero leaves the owner
+// columns alone and returns nil.
 func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -235,36 +268,112 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 		types[i] = r.Type
 		ids[i] = r.Id
 	}
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO resources (type, id, stale_seq, stale_since, metadata)
-		 SELECT DISTINCT t, i, 1, now(), $3::jsonb FROM unnest($1::text[], $2::text[]) AS x(t, i)
-		 ON CONFLICT (type, id) DO UPDATE
-		 SET stale_seq = resources.stale_seq + 1,
-		     stale_since = COALESCE(resources.stale_since, now()),
-		     metadata = EXCLUDED.metadata`,
-		types, ids, metadata,
+	if lease <= 0 {
+		_, err := s.pool.Exec(ctx,
+			`INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
+			 SELECT DISTINCT t, i, 1, now(), $3::jsonb FROM unnest($1::text[], $2::text[]) AS x(t, i)
+			 ON CONFLICT (type, id) DO UPDATE
+			 SET stale_seq = r.stale_seq + 1,
+			     stale_since = COALESCE(r.stale_since, now()),
+			     metadata = EXCLUDED.metadata`,
+			types, ids, metadata,
+		)
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`WITH marked AS (
+		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
+		     SELECT DISTINCT t, i, 1, now(), $3::jsonb, 1, now() FROM unnest($1::text[], $2::text[]) AS x(t, i)
+		     ON CONFLICT (type, id) DO UPDATE
+		     SET stale_seq = r.stale_seq + 1,
+		         stale_since = COALESCE(r.stale_since, now()),
+		         metadata = EXCLUDED.metadata,
+		         owner_seq = CASE WHEN `+claimable("$4")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_since = CASE WHEN `+claimable("$4")+` THEN now() ELSE r.owner_since END
+		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq
+		 )
+		 SELECT type, id, stale_seq FROM marked WHERE owner_seq = stale_seq`,
+		types, ids, metadata, lease.Microseconds(),
 	)
-	return nil, err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var owned []core.Owned
+	for rows.Next() {
+		var o core.Owned
+		if err := rows.Scan(&o.Type, &o.Id, &o.Token); err != nil {
+			return nil, err
+		}
+		owned = append(owned, o)
+	}
+	return owned, rows.Err()
 }
 
 // BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version),
-// captures the current stale_seq for the race-safe ClearStale at the end of
-// the build, and takes the build's start from the Change Sequence in the same
+// captures the current stale_seq for the race-safe finish at the end of the
+// build, and takes the build's start from the Change Sequence in the same
 // statement. It leaves the row's change_seq alone: a build is not a change.
+// A token that is the row's owner token renews the owner's lease.
 func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token int64) (core.BuildBegun, error) {
 	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO resources (type, id, build_idx)
+		`INSERT INTO resources AS r (type, id, build_idx)
 		 VALUES ($1, $2, 1)
 		 ON CONFLICT (type, id) DO UPDATE
-		 SET build_idx = resources.build_idx + 1
+		 SET build_idx = r.build_idx + 1,
+		     owner_since = CASE WHEN $3::bigint <> 0 AND r.owner_seq = $3 THEN now() ELSE r.owner_since END
 		 RETURNING build_idx, stale_seq, nextval('change_sequence')`,
-		resource.Type, resource.Id,
+		resource.Type, resource.Id, token,
 	).Scan(&b.BuildIdx, &b.StaleSeq, &b.Start)
 	if err != nil {
 		return core.BuildBegun{}, err
 	}
 	return b, nil
+}
+
+// ownedArrays splits ownerships into the parallel arrays the owner
+// statements unnest.
+func ownedArrays(owned []core.Owned) (types, ids []string, tokens []int64) {
+	types = make([]string, len(owned))
+	ids = make([]string, len(owned))
+	tokens = make([]int64, len(owned))
+	for i, o := range owned {
+		types[i], ids[i], tokens[i] = o.Type, o.Id, o.Token
+	}
+	return types, ids, tokens
+}
+
+// RenewOwners renews the lease of every given ownership whose token is still
+// the row's owner token.
+func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) error {
+	if len(owned) == 0 {
+		return nil
+	}
+	types, ids, tokens := ownedArrays(owned)
+	_, err := s.pool.Exec(ctx,
+		`UPDATE resources r SET owner_since = now()
+		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token)
+		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token`,
+		types, ids, tokens,
+	)
+	return err
+}
+
+// ReleaseOwners drops every given ownership whose token is still the row's
+// owner token. The stale mark stays for the next change or the sweep.
+func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
+	if len(owned) == 0 {
+		return nil
+	}
+	types, ids, tokens := ownedArrays(owned)
+	_, err := s.pool.Exec(ctx,
+		`UPDATE resources r SET owner_seq = NULL, owner_since = NULL
+		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token)
+		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token`,
+		types, ids, tokens,
+	)
+	return err
 }
 
 // NextChangeSeq takes a value of the Change Sequence.
@@ -301,53 +410,101 @@ func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) 
 	return changed, err
 }
 
-// ClearStale clears the stale mark only if no newer change arrived since the
-// build captured staleSeq. A moved seq makes this a no-op, leaving the row
-// stale for the newer change's own build or the sweep.
+// ClearStale clears the stale mark, and any ownership with it, only if no
+// newer change arrived since the build captured staleSeq. A moved seq makes
+// this a no-op, leaving the row stale for its owner's follow-up or the sweep.
 func (s *Store) ClearStale(ctx context.Context, resource model.Resource, staleSeq int64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE resources SET stale_since = NULL
+		`UPDATE resources SET stale_since = NULL, owner_seq = NULL, owner_since = NULL
 		 WHERE type=$1 AND id=$2 AND stale_seq=$3`,
 		resource.Type, resource.Id, staleSeq,
 	)
 	return err
 }
 
+// FinishOwned finishes an owned build in one statement: a settled mark
+// (stale_seq still staleSeq) is cleared with its ownership whatever the
+// token; a moved one is re-claimed for a follow-up if token is still the
+// owner token. The WHERE is re-checked against the latest row version when a
+// concurrent mark committed after the statement's snapshot, so a mark that
+// lands while it waits for the row lock moves it into the re-claim branch
+// rather than being cleared.
+func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
+	var f core.FollowUp
+	var owner *int64
+	err := s.pool.QueryRow(ctx,
+		`UPDATE resources
+		 SET stale_since = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_since END,
+		     owner_seq = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_seq END,
+		     owner_since = CASE WHEN stale_seq = $3 THEN NULL ELSE now() END
+		 WHERE type=$1 AND id=$2 AND (stale_seq = $3 OR ($4::bigint <> 0 AND owner_seq = $4))
+		 RETURNING owner_seq, metadata, deleted`,
+		resource.Type, resource.Id, staleSeq, token,
+	).Scan(&owner, &f.Metadata, &f.Deleted)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && owner == nil) {
+		return core.FollowUp{}, nil
+	}
+	if err != nil {
+		return core.FollowUp{}, err
+	}
+	f.Token = *owner
+	return f, nil
+}
+
 // DeleteResourceIfSeq hard-deletes a tombstoned row, guarded by stale_seq so a
-// concurrent re-create (which bumps the seq) wins over the in-flight delete.
+// concurrent re-create (which bumps the seq) wins over the in-flight delete;
+// the ownership goes with the row. When the seq moved and token is still the
+// owner token, the owner re-claims the row for its follow-up. The two
+// statements run in order, each on its own snapshot, so a re-create that
+// commits while the delete waits for the row lock is seen by the re-claim.
 func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
-	_, err := s.pool.Exec(ctx,
+	tag, err := s.pool.Exec(ctx,
 		`DELETE FROM resources WHERE type=$1 AND id=$2 AND stale_seq=$3 AND deleted`,
 		resource.Type, resource.Id, staleSeq,
 	)
-	return core.FollowUp{}, err
-}
-
-// FinishOwned finishes an owned build; see core.Store.
-func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
-	return core.FollowUp{}, errors.New("FinishOwned: not implemented (L1.4 lane A)")
-}
-
-// RenewOwners renews the leases of the given ownerships; see core.Store.
-func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) error {
-	return errors.New("RenewOwners: not implemented (L1.4 lane A)")
-}
-
-// ReleaseOwners drops the given ownerships; see core.Store.
-func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
-	return errors.New("ReleaseOwners: not implemented (L1.4 lane A)")
+	if err != nil || tag.RowsAffected() > 0 {
+		return core.FollowUp{}, err
+	}
+	var f core.FollowUp
+	err = s.pool.QueryRow(ctx,
+		`UPDATE resources SET owner_seq = stale_seq, owner_since = now()
+		 WHERE type=$1 AND id=$2 AND stale_seq <> $3 AND $4::bigint <> 0 AND owner_seq = $4
+		 RETURNING owner_seq, metadata, deleted`,
+		resource.Type, resource.Id, staleSeq, token,
+	).Scan(&f.Token, &f.Metadata, &f.Deleted)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.FollowUp{}, nil
+	}
+	if err != nil {
+		return core.FollowUp{}, err
+	}
+	return f, nil
 }
 
 // ListStale returns up to limit resources whose stale mark is older than
-// before, oldest first, including delete tombstones. Each entry carries the
-// metadata stored by its most recent MarkStale.
+// before and that have no live owner, oldest first, including delete
+// tombstones, and claims each one in the same statement at its current
+// stale_seq (no bump), which is its Token. Each entry carries the metadata
+// stored by its most recent mark. The candidates are locked FOR UPDATE SKIP
+// LOCKED inside the claiming UPDATE, so of two concurrent sweeps only one
+// claims a row: the other skips it while it is locked, and re-checks the
+// owner condition against the claimed row once it has committed.
 func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]core.StaleResource, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT type, id, stale_seq, deleted, metadata FROM resources
-		 WHERE stale_since IS NOT NULL AND stale_since < $1
-		 ORDER BY stale_since
-		 LIMIT $2`,
-		before, limit,
+		`WITH candidates AS (
+		     SELECT r.type, r.id FROM resources r
+		     WHERE r.stale_since IS NOT NULL AND r.stale_since < $1 AND `+claimable("$3")+`
+		     ORDER BY r.stale_since
+		     LIMIT $2
+		     FOR UPDATE SKIP LOCKED
+		 ),
+		 claimed AS (
+		     UPDATE resources r SET owner_seq = r.stale_seq, owner_since = now()
+		     FROM candidates c WHERE r.type = c.type AND r.id = c.id
+		     RETURNING r.type, r.id, r.stale_seq, r.deleted, r.metadata, r.stale_since
+		 )
+		 SELECT type, id, stale_seq, deleted, metadata FROM claimed ORDER BY stale_since`,
+		before, limit, lease.Microseconds(),
 	)
 	if err != nil {
 		return nil, err
@@ -360,6 +517,7 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 		if err := rows.Scan(&e.Type, &e.Id, &e.StaleSeq, &e.Deleted, &e.Metadata); err != nil {
 			return nil, err
 		}
+		e.Token = e.StaleSeq
 		out = append(out, e)
 	}
 	return out, rows.Err()
