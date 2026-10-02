@@ -172,8 +172,9 @@ func (p *buildPool) pressured() bool {
 }
 
 // waitIdle blocks until no tasks are queued or running. Tasks submit their
-// follow-up work (parent cascades, drift re-builds) before finishing, so
-// pending only reaches zero once a whole cascade has settled.
+// follow-up work (parent cascades, drift re-builds, an owned build's or
+// delete's follow-up) before finishing, so pending only reaches zero once a
+// whole cascade has settled.
 func (p *buildPool) waitIdle(ctx context.Context) error {
 	for {
 		if p.pending.Load() == 0 {

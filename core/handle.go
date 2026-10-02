@@ -45,16 +45,29 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload) error {
 }
 
 // deleteOne removes the resource's documents and edges, then hard-deletes the
-// tombstoned row if no newer change arrived. Failures are logged, not
-// returned: the tombstone stays stale and the sweep retries it.
+// tombstoned row if no newer change arrived. token is the delete's ownership
+// (0 = none): a newer change registered meanwhile, which its ownership kept
+// from submitting, comes back from DeleteResourceIfSeq as the follow-up — a
+// build for a recreate — and is submitted. Failures are logged, not returned:
+// the tombstone stays stale, its ownership is released, and the next change
+// or the sweep retries it.
 func (idx *Indexer) deleteOne(ctx context.Context, res model.Resource, staleSeq, token int64) {
+	owned := []Owned{{Resource: res, Token: token}}
+	if token == 0 {
+		owned = nil
+	}
 	if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}); err != nil {
 		slog.Warn("inline delete failed; tombstone remains for sweep",
 			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+		idx.releaseOwners(ctx, owned)
 		return
 	}
-	if _, err := idx.st.DeleteResourceIfSeq(ctx, res, staleSeq, token); err != nil {
+	fu, err := idx.st.DeleteResourceIfSeq(ctx, res, staleSeq, token)
+	if err != nil {
 		slog.Warn("tombstone cleanup failed; sweep will retry",
 			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+		idx.releaseOwners(ctx, owned)
+		return
 	}
+	idx.submitFollowUp(ctx, res, fu)
 }

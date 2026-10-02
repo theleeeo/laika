@@ -37,8 +37,10 @@ const (
 // accepted item's version or tombstone, stale mark and metadata, and the
 // marks of their Parents, commit in one statement or not at all. A non-nil
 // error means nothing was committed and the whole batch may be retried.
-// After the commit, deletes and builds are submitted per id (WaitForSlot
-// applies to them). The statuses are index-aligned with ns.
+// After the commit, a delete or build is submitted per id the statement
+// claimed (WaitForSlot applies to them); an item or Parent with a live owner
+// is only marked, and its owner's follow-up carries the change. The statuses
+// are index-aligned with ns.
 //
 // The batch is validated before any statement: an unknown resource or two
 // notifications naming the same resource fail the call.
@@ -82,20 +84,14 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 		if !it.Accepted {
 			continue
 		}
-		res, seq := items[i].Resource, it.StaleSeq
-		if !items[i].Deleted {
-			idx.submitBuild(ctx, res, items[i].Metadata, wait)
+		if items[i].Deleted {
+			idx.submitDelete(ctx, items[i].Resource, it.StaleSeq, it.Token, wait)
 			continue
 		}
-		if !idx.submit(ctx, wait, func(taskCtx context.Context) {
-			idx.deleteOne(taskCtx, res, seq, it.Token)
-		}) {
-			slog.Info(notSubmittedMsg(wait, "tombstone left for sweep"),
-				slog.String("type", res.Type), slog.String("id", res.Id))
-		}
+		idx.submitBuild(ctx, items[i].Resource, items[i].Metadata, it.Token, wait)
 	}
 	for _, p := range reg.Parents {
-		idx.submitBuild(ctx, p.Resource, p.Metadata, wait)
+		idx.submitBuild(ctx, p.Resource, p.Metadata, p.Token, wait)
 	}
 	return statuses, nil
 }

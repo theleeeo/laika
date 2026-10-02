@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/theleeeo/laika/model"
@@ -59,8 +60,8 @@ func TestRegisterChange_WaitForSlot_WaitsForPressureToClear_ThenBuilds(t *testin
 	if err := idx.WaitForIdle(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if st.indexOf("ClearStale:product/1:3") == -1 {
-		t.Fatalf("the waited-for build must run and clear the mark: %v", st.callsSnapshot())
+	if st.indexOf("FinishOwned:product/1:1:1") == -1 {
+		t.Fatalf("the waited-for owned build must run and finish the mark: %v", st.callsSnapshot())
 	}
 }
 
@@ -100,7 +101,7 @@ func TestRegisterChange_WaitForSlot_Delete_WaitsThenDeletes(t *testing.T) {
 	if err := idx.WaitForIdle(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if st.indexOf("DeleteResourceIfSeq:product/1:7") == -1 {
+	if st.indexOf("DeleteResourceIfSeq:product/1:1:1") == -1 {
 		t.Fatalf("the waited-for delete must run: %v", st.callsSnapshot())
 	}
 }
@@ -162,6 +163,7 @@ func TestRegisterChange_WaitForSlot_CtxCancel_ReturnsNilWithMarkInPlace(t *testi
 	if st.indexOf("BeginBuild") != -1 {
 		t.Fatalf("a cancelled wait must leave the build to the sweep: %v", st.callsSnapshot())
 	}
+	assertReleasedOnALiveCtx(t, st, product("1"), 1)
 }
 
 func TestRegisterChange_WaitForSlot_Shutdown_ReturnsNilWithMarkInPlace(t *testing.T) {
@@ -190,6 +192,7 @@ func TestRegisterChange_WaitForSlot_Shutdown_ReturnsNilWithMarkInPlace(t *testin
 	if st.indexOf("BeginBuild") != -1 {
 		t.Fatalf("a wait ended by shutdown must leave the build to the sweep: %v", st.callsSnapshot())
 	}
+	assertReleasedOnALiveCtx(t, st, product("1"), 1)
 }
 
 // Cascades submitted from inside a running build must shed, never wait. The
@@ -310,7 +313,19 @@ func TestRegisterChanges_WaitForSlot_EverySubmitWaitsThenRuns(t *testing.T) {
 	if _, ok := built["p"]; !ok {
 		t.Fatalf("the Parent's waited-for build must run: %v", built)
 	}
-	if st.indexOf("DeleteResourceIfSeq:product/2:8") == -1 {
+	if st.indexOf("DeleteResourceIfSeq:product/2:2:2") == -1 {
 		t.Fatalf("the waited-for delete must run: %v", st.callsSnapshot())
+	}
+}
+
+// assertReleasedOnALiveCtx checks that a wait that ended without a submit
+// released the claim it made, on a context the ending didn't cancel.
+func assertReleasedOnALiveCtx(t *testing.T, st *recordingStore, res model.Resource, token int64) {
+	t.Helper()
+	if st.indexOf(fmt.Sprintf("ReleaseOwners:%s/%s:%d", res.Type, res.Id, token)) == -1 || st.count("ReleaseOwnersFailed") != 0 {
+		t.Fatalf("the ended wait must release its claim (token %d) on a live ctx: %v", token, st.callsSnapshot())
+	}
+	if got := st.owner(res); got != 0 {
+		t.Fatalf("the released row must have no owner, got %d", got)
 	}
 }

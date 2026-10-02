@@ -12,8 +12,8 @@ import (
 // Sequence OCC race: the index already holds the document at a strictly
 // higher external version, written by a concurrent build. Losing this race
 // is benign — the winner carried fresher data — so callers treat it as a
-// no-op, and the seq-guarded ClearStale keeps recovery correct when the
-// superseding build served a different change.
+// no-op, and the seq-guarded finish (ClearStale or FinishOwned) keeps
+// recovery correct when the superseding build served a different change.
 var ErrVersionConflict = errors.New("version conflict")
 
 // SearchBackend is the interface that wraps the document-level operations

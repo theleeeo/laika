@@ -8,9 +8,12 @@ import (
 )
 
 // SweepStale rebuilds (or finishes deleting) up to limit resources whose
-// stale mark is older than threshold, synchronously. It returns the number of
-// stale entries it attempted. Per-resource failures are logged, not returned:
-// the mark or tombstone survives and the next sweep retries it.
+// stale mark is older than threshold and that no live owner is building,
+// synchronously. ListStale claims every entry it returns, so each is an owned
+// build or delete: it finishes like an inline one, and a follow-up it hands on
+// goes to the pool. It returns the number of stale entries it attempted.
+// Per-resource failures are logged, not returned: the mark or tombstone
+// survives, its ownership is released, and the next sweep retries it.
 //
 // This is the safety net behind the inline build pool (ADR 0008). It runs as
 // the body of the StaleSweep Temporal activity; embedders without Temporal
@@ -26,12 +29,21 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 
 	// Builds run one entry at a time: each stale mark carries the metadata of
 	// the notification that set it, and the recovered build must replay it.
+	// ListStale claimed the whole batch at once, so each entry renews its
+	// lease when the pass reaches it: a later entry's claim must not lapse
+	// while the ones before it run.
 	for _, e := range entries {
+		idx.renewOwners(ctx, []Owned{{Resource: e.Resource, Token: e.Token}})
 		if e.Deleted {
 			idx.deleteOne(ctx, e.Resource, e.StaleSeq, e.Token)
 			continue
 		}
-		if err := idx.Build(ctx, BuildArgs{ResourceType: e.Type, ResourceIds: []string{e.Id}, Metadata: e.Metadata}); err != nil {
+		if err := idx.Build(ctx, BuildArgs{
+			ResourceType: e.Type,
+			ResourceIds:  []string{e.Id},
+			Metadata:     e.Metadata,
+			OwnerTokens:  map[string]int64{e.Id: e.Token},
+		}); err != nil {
 			slog.Warn("sweep build failed; resource remains stale",
 				slog.String("type", e.Type), slog.String("id", e.Id), slog.String("error", err.Error()))
 		}

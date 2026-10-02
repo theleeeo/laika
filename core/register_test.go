@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,7 +16,12 @@ import (
 	"github.com/theleeeo/laika/projection"
 )
 
-// recordingStore records the order of Store calls and serves canned data.
+// recordingStore records the order of Store calls and keeps the stale-mark
+// and ownership state of core/store.go in memory: one row per resource with
+// its stale_seq, mark, owner token, metadata and tombstone. A non-zero owner
+// is a live lease — leases never expire here — and every mark takes the next
+// value of one global counter as its stale_seq; a claim makes the row's new
+// stale_seq its owner token.
 type recordingStore struct {
 	mu    sync.Mutex
 	calls []string
@@ -31,13 +37,44 @@ type recordingStore struct {
 	// RegisterChanges: the point past which a WaitForSlot registration may wait.
 	marked chan struct{}
 
-	// RegisterChanges serves these: parents as Registered.Parents, stale
-	// resources rejected, registerErr failing the call. An accepted item i
-	// gets StaleSeq 7+i. registrations records every batch it received.
+	// RegisterChanges serves these: parents are marked as Parents of every
+	// batch, each with its own Metadata; parentsOf maps a child to the
+	// Parents each accepted registration of it marks; stale resources are
+	// rejected; registerErr fails the call. registrations records every batch
+	// it received.
 	parents       []MarkedParent
+	parentsOf     map[model.Resource][]model.Resource
 	stale         map[model.Resource]bool
 	registerErr   error
 	registrations [][]Registration
+
+	// beginErr fails every BeginBuild, removeErr every RemoveResource,
+	// finishErr every FinishOwned and deleteErr every DeleteResourceIfSeq.
+	beginErr  error
+	removeErr error
+	finishErr error
+	deleteErr error
+	// onRemove, when set, runs inside every RemoveResource, outside the lock
+	// and before it returns: a test can register a change while a delete (or
+	// a build's edge wipe) is in flight.
+	onRemove func(model.Resource)
+
+	rows     map[model.Resource]*memRow
+	seq      int64 // the last stale_seq handed out
+	buildIdx int64
+	// followUps records every non-zero FollowUp FinishOwned and
+	// DeleteResourceIfSeq returned, per resource, in order.
+	followUps map[model.Resource][]FollowUp
+}
+
+// memRow is one resource row of recordingStore.
+type memRow struct {
+	staleSeq int64
+	stale    bool
+	// owner is the owner token; 0 = no owner.
+	owner    int64
+	metadata map[string]string
+	deleted  bool
 }
 
 func (s *recordingStore) signalMarked() {
@@ -63,6 +100,10 @@ func (s *recordingStore) count(prefix string) int {
 func (s *recordingStore) record(format string, args ...any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.recordLocked(format, args...)
+}
+
+func (s *recordingStore) recordLocked(format string, args ...any) {
 	s.calls = append(s.calls, fmt.Sprintf(format, args...))
 }
 
@@ -87,18 +128,118 @@ func (s *recordingStore) indexOf(prefix string) int {
 	return -1
 }
 
+// row returns a copy of res's row and whether it exists.
+func (s *recordingStore) row(res model.Resource) (memRow, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.rows[res]
+	if !ok {
+		return memRow{}, false
+	}
+	out := *r
+	out.metadata = maps.Clone(r.metadata)
+	return out, true
+}
+
+// owner is res's owner token, 0 for none.
+func (s *recordingStore) owner(res model.Resource) int64 {
+	r, _ := s.row(res)
+	return r.owner
+}
+
+// followUpsOf is every non-zero FollowUp returned for res, in order.
+func (s *recordingStore) followUpsOf(res model.Resource) []FollowUp {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]FollowUp, len(s.followUps[res]))
+	for i, fu := range s.followUps[res] {
+		fu.Metadata = maps.Clone(fu.Metadata)
+		out[i] = fu
+	}
+	return out
+}
+
+// markLocked marks res stale under a new stale_seq with metadata; deleted,
+// when non-nil, sets the tombstone. It returns the row.
+func (s *recordingStore) markLocked(res model.Resource, metadata map[string]string, deleted *bool) *memRow {
+	if s.rows == nil {
+		s.rows = make(map[model.Resource]*memRow)
+	}
+	r, ok := s.rows[res]
+	if !ok {
+		r = &memRow{}
+		s.rows[res] = r
+	}
+	s.seq++
+	r.staleSeq = s.seq
+	r.stale = true
+	r.metadata = maps.Clone(metadata)
+	if deleted != nil {
+		r.deleted = *deleted
+	}
+	return r
+}
+
+// claimLocked claims an unowned row, returning the token; 0 when owned.
+func claimLocked(r *memRow) int64 {
+	if r.owner != 0 {
+		return 0
+	}
+	r.owner = r.staleSeq
+	return r.owner
+}
+
+// followUpLocked is the shared moved-seq branch of FinishOwned and
+// DeleteResourceIfSeq: re-claim for token, if it still owns the row.
+func (s *recordingStore) followUpLocked(res model.Resource, r *memRow, token int64) FollowUp {
+	if token == 0 || r.owner != token {
+		return FollowUp{}
+	}
+	r.owner = r.staleSeq
+	fu := FollowUp{Token: r.owner, Metadata: maps.Clone(r.metadata), Deleted: r.deleted}
+	if s.followUps == nil {
+		s.followUps = make(map[model.Resource][]FollowUp)
+	}
+	snap := fu
+	snap.Metadata = maps.Clone(fu.Metadata)
+	s.followUps[res] = append(s.followUps[res], snap)
+	return fu
+}
+
 // MarkStale fails on a done ctx, as a real store's query would.
-func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, _ time.Duration) ([]Owned, error) {
+func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, md map[string]string, lease time.Duration) ([]Owned, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	s.record("MarkStale:%d", len(rs))
+	s.mu.Lock()
+	s.recordLocked("MarkStale:%d", len(rs))
+	var owned []Owned
+	for _, res := range rs {
+		r := s.markLocked(res, md, nil)
+		if lease > 0 {
+			if tok := claimLocked(r); tok != 0 {
+				owned = append(owned, Owned{Resource: res, Token: tok})
+			}
+		}
+	}
+	s.mu.Unlock()
 	s.signalMarked()
-	return nil, nil
+	return owned, nil
 }
-func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, _ int64) (BuildBegun, error) {
-	s.record("BeginBuild:%s/%s", r.Type, r.Id)
-	return BuildBegun{BuildIdx: 1, StaleSeq: 3, Start: s.start}, nil
+
+func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, token int64) (BuildBegun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("BeginBuild:%s/%s:%d", r.Type, r.Id, token)
+	if s.beginErr != nil {
+		return BuildBegun{}, s.beginErr
+	}
+	s.buildIdx++
+	var seq int64
+	if row, ok := s.rows[r]; ok {
+		seq = row.staleSeq
+	}
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: seq, Start: s.start}, nil
 }
 func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
@@ -112,20 +253,92 @@ func (s *recordingStore) AnyChangedSince(_ context.Context, checks []ChangeCheck
 	return s.drift.Swap(false), s.driftErr
 }
 func (s *recordingStore) ClearStale(_ context.Context, r model.Resource, seq int64) error {
-	s.record("ClearStale:%s/%s:%d", r.Type, r.Id, seq)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("ClearStale:%s/%s:%d", r.Type, r.Id, seq)
+	if row, ok := s.rows[r]; ok && row.staleSeq == seq {
+		row.stale = false
+		row.owner = 0
+	}
 	return nil
 }
-func (s *recordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq, _ int64) (FollowUp, error) {
-	s.record("DeleteResourceIfSeq:%s/%s:%d", r.Type, r.Id, seq)
-	return FollowUp{}, nil
+
+// FinishOwned fails on a done ctx, as a real store's query would, and then
+// records FinishOwnedFailed instead.
+func (s *recordingStore) FinishOwned(ctx context.Context, r model.Resource, staleSeq, token int64) (FollowUp, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		s.recordLocked("FinishOwnedFailed:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token)
+		return FollowUp{}, err
+	}
+	s.recordLocked("FinishOwned:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token)
+	if s.finishErr != nil {
+		return FollowUp{}, s.finishErr
+	}
+	row, ok := s.rows[r]
+	if !ok {
+		return FollowUp{}, nil
+	}
+	if row.staleSeq == staleSeq {
+		row.stale = false
+		row.owner = 0
+		return FollowUp{}, nil
+	}
+	return s.followUpLocked(r, row, token), nil
+}
+func (s *recordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, staleSeq, token int64) (FollowUp, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("DeleteResourceIfSeq:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token)
+	if s.deleteErr != nil {
+		return FollowUp{}, s.deleteErr
+	}
+	row, ok := s.rows[r]
+	if !ok {
+		return FollowUp{}, nil
+	}
+	if row.staleSeq == staleSeq {
+		delete(s.rows, r)
+		return FollowUp{}, nil
+	}
+	return s.followUpLocked(r, row, token), nil
 }
 func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
 	return nil, nil
 }
-func (s *recordingStore) RenewOwners(context.Context, []Owned) error   { return nil }
-func (s *recordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
-func (s *recordingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
-	return FollowUp{}, nil
+
+// RenewOwners and ReleaseOwners fail on a done ctx, as a real store's query
+// would, and then record RenewOwnersFailed / ReleaseOwnersFailed per entry
+// instead — so a release made on a detached ctx is observable.
+func (s *recordingStore) RenewOwners(ctx context.Context, owned []Owned) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := ctx.Err()
+	for _, o := range owned {
+		if err != nil {
+			s.recordLocked("RenewOwnersFailed:%s/%s:%d", o.Type, o.Id, o.Token)
+		} else {
+			s.recordLocked("RenewOwners:%s/%s:%d", o.Type, o.Id, o.Token)
+		}
+	}
+	return err
+}
+func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err := ctx.Err()
+	for _, o := range owned {
+		if err != nil {
+			s.recordLocked("ReleaseOwnersFailed:%s/%s:%d", o.Type, o.Id, o.Token)
+			continue
+		}
+		s.recordLocked("ReleaseOwners:%s/%s:%d", o.Type, o.Id, o.Token)
+		if row, ok := s.rows[o.Resource]; ok && row.owner == o.Token {
+			row.owner = 0
+		}
+	}
+	return err
 }
 func (s *recordingStore) AddChildResources(context.Context, model.Resource, []model.Resource) error {
 	return nil
@@ -139,22 +352,57 @@ func (s *recordingStore) GetParentResources(context.Context, model.Resource) ([]
 }
 func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource) error {
 	s.record("RemoveResource:%s/%s", r.Type, r.Id)
-	return nil
+	if s.onRemove != nil {
+		s.onRemove(r)
+	}
+	return s.removeErr
 }
+
+// RegisterChanges marks and claims as the real statement does: each accepted
+// item's row, then the Parents of the batch — the canned parents, and every
+// accepted item's parentsOf, a Parent storing the metadata of its last
+// accepted child in batch order — excluding the batch's accepted items, each
+// once.
 func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration, _ time.Duration) (Registered, error) {
-	s.record("RegisterChanges:%d", len(items))
 	s.mu.Lock()
+	s.recordLocked("RegisterChanges:%d", len(items))
 	s.registrations = append(s.registrations, items)
-	s.mu.Unlock()
 	if s.registerErr != nil {
+		s.mu.Unlock()
 		return Registered{}, s.registerErr
 	}
-	out := Registered{Items: make([]RegisteredItem, len(items)), Parents: s.parents}
+	out := Registered{Items: make([]RegisteredItem, len(items))}
+	accepted := make(map[model.Resource]bool, len(items))
+	var parentOrder []model.Resource
+	parentMeta := make(map[model.Resource]map[string]string)
+	addParent := func(p model.Resource, md map[string]string) {
+		if _, seen := parentMeta[p]; !seen {
+			parentOrder = append(parentOrder, p)
+		}
+		parentMeta[p] = md
+	}
+	for _, p := range s.parents {
+		addParent(p.Resource, p.Metadata)
+	}
 	for i, it := range items {
-		if !s.stale[it.Resource] {
-			out.Items[i] = RegisteredItem{Accepted: true, StaleSeq: int64(7 + i)}
+		if s.stale[it.Resource] {
+			continue
+		}
+		accepted[it.Resource] = true
+		r := s.markLocked(it.Resource, it.Metadata, &it.Deleted)
+		out.Items[i] = RegisteredItem{Accepted: true, StaleSeq: r.staleSeq, Token: claimLocked(r)}
+		for _, p := range s.parentsOf[it.Resource] {
+			addParent(p, it.Metadata)
 		}
 	}
+	for _, p := range parentOrder {
+		if accepted[p] {
+			continue
+		}
+		r := s.markLocked(p, parentMeta[p], nil)
+		out.Parents = append(out.Parents, MarkedParent{Resource: p, Metadata: parentMeta[p], Token: claimLocked(r)})
+	}
+	s.mu.Unlock()
 	s.signalMarked()
 	return out, nil
 }
@@ -190,7 +438,9 @@ func TestRegisterChange_MarksStaleBeforeBuilding_ThenClears(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mark, begin, clear := st.indexOf("RegisterChanges"), st.indexOf("BeginBuild"), st.indexOf("ClearStale:product/1:3")
+	// The registration's mark is stale_seq 1 and claims the row under token 1;
+	// the owned build finishes with FinishOwned, which clears mark and owner.
+	mark, begin, clear := st.indexOf("RegisterChanges"), st.indexOf("BeginBuild:product/1:1"), st.indexOf("FinishOwned:product/1:1:1")
 	if mark == -1 || begin == -1 || clear == -1 {
 		t.Fatalf("missing calls: %v", st.callsSnapshot())
 	}
@@ -198,7 +448,10 @@ func TestRegisterChange_MarksStaleBeforeBuilding_ThenClears(t *testing.T) {
 		t.Fatalf("the registration's mark must land before the build starts: %v", st.callsSnapshot())
 	}
 	if clear < begin {
-		t.Fatalf("ClearStale must follow the build: %v", st.callsSnapshot())
+		t.Fatalf("FinishOwned must follow the build: %v", st.callsSnapshot())
+	}
+	if r, _ := st.row(product("1")); r.stale || r.owner != 0 {
+		t.Fatalf("the finished build must clear the mark and the ownership: %+v", r)
 	}
 }
 
@@ -250,8 +503,9 @@ func TestRegisterChange_Delete_TombstonesAndRunsInlineDelete(t *testing.T) {
 	if st.indexOf("RegisterChanges") == -1 {
 		t.Fatalf("delete must tombstone first: %v", st.callsSnapshot())
 	}
-	if st.indexOf("DeleteResourceIfSeq:product/1:7") == -1 {
-		t.Fatalf("inline delete must finish the tombstone with the captured seq: %v", st.callsSnapshot())
+	// The tombstone is stale_seq 1, claimed under token 1.
+	if st.indexOf("DeleteResourceIfSeq:product/1:1:1") == -1 {
+		t.Fatalf("inline delete must finish the tombstone with the captured seq and its token: %v", st.callsSnapshot())
 	}
 }
 
@@ -442,27 +696,50 @@ func TestBuild_DriftQueryError_LeavesTheMarkAndSchedulesNothing(t *testing.T) {
 type recordingExecuter struct {
 	mu   sync.Mutex
 	reqs []projection.BuildRequest
-	// arrived and proceed, when set, park every Execute: it sends its id on
-	// arrived and returns only once proceed is closed.
+	// arrived and proceed, when set, park every Execute — or, with parkIDs
+	// set, only those of the ids it names: it sends its id on arrived and
+	// returns once it receives from proceed (one send releases one parked
+	// Execute, a close releases all).
 	arrived chan string
 	proceed chan struct{}
+	parkIDs map[string]bool
+	// failIDs fails the Execute of the ids it names.
+	failIDs map[string]bool
 }
 
 func (e *recordingExecuter) Execute(_ context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
 	e.mu.Lock()
 	e.reqs = append(e.reqs, req)
 	e.mu.Unlock()
-	if e.arrived != nil {
+	if e.arrived != nil && (e.parkIDs == nil || e.parkIDs[req.ResourceID]) {
 		e.arrived <- req.ResourceID
 		<-e.proceed
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
+	if e.failIDs[req.ResourceID] {
+		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Err: errors.New("plan failed")}
+		close(ch)
+		return ch
+	}
 	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
 		Root: model.Resource{Type: req.ResourceType, Id: req.ResourceID},
 		Doc:  map[string]any{"fields": map[string]any{"title": "t"}},
 	}}}
 	close(ch)
 	return ch
+}
+
+// requestsFor is every request for id, in arrival order.
+func (e *recordingExecuter) requestsFor(id string) []projection.BuildRequest {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []projection.BuildRequest
+	for _, r := range e.reqs {
+		if r.ResourceID == id {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // metadataByID is the metadata each built id ran with.
@@ -600,8 +877,9 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 	if built := ex.metadataByID(); fmt.Sprint(built) != fmt.Sprint(wantBuilt) {
 		t.Fatalf("built %v, want %v", built, wantBuilt)
 	}
-	// The delete runs with the StaleSeq the store returned for it (7+2).
-	if st.indexOf("DeleteResourceIfSeq:product/3:9") == -1 {
+	// The delete runs with the StaleSeq and Token the store returned for it:
+	// the second mark of the batch (item 2 is stale and marks nothing).
+	if st.indexOf("DeleteResourceIfSeq:product/3:2:2") == -1 {
 		t.Fatalf("the delete must be submitted with its own stale seq: %v", st.callsSnapshot())
 	}
 

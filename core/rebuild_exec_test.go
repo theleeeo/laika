@@ -169,6 +169,12 @@ type rebuildRecordingStore struct {
 	// ctxAware makes MarkStale and AnyChangedSince fail on a done context, as
 	// the real store does. ClearStale stays context-blind.
 	ctxAware bool
+	// tokens hands out owner tokens: a MarkStale with a lease claims every
+	// resource it marks under a fresh one. This store keeps no ownership
+	// state — it claims even a row a live owner holds, and its FinishOwned
+	// never hands on a follow-up — so ownership behaviour is tested on
+	// recordingStore, not here.
+	tokens int64
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -200,7 +206,7 @@ func (s *rebuildRecordingStore) has(prefix string) bool {
 	return false
 }
 
-func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, _ time.Duration) ([]Owned, error) {
+func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, lease time.Duration) ([]Owned, error) {
 	var err error
 	if s.ctxAware && ctx.Err() != nil {
 		err = ctx.Err()
@@ -220,7 +226,17 @@ func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resour
 			s.record("MarkStale:%s/%s", r.Type, r.Id)
 		}
 	}
-	return nil, err
+	if err != nil || lease <= 0 {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	owned := make([]Owned, len(rs))
+	for i, r := range rs {
+		s.tokens++
+		owned[i] = Owned{Resource: r, Token: s.tokens}
+	}
+	return owned, nil
 }
 
 func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource, _ int64) (BuildBegun, error) {
@@ -281,7 +297,8 @@ func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.
 
 func (s *rebuildRecordingStore) RenewOwners(context.Context, []Owned) error   { return nil }
 func (s *rebuildRecordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
-func (s *rebuildRecordingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
+func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource, _, _ int64) (FollowUp, error) {
+	s.record("FinishOwned:%s/%s", r.Type, r.Id)
 	return FollowUp{}, nil
 }
 

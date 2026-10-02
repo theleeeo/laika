@@ -12,6 +12,9 @@ import (
 )
 
 // staleListingStore returns a canned stale backlog on top of recordingStore.
+// Listing an entry puts its row in recordingStore's state as the real
+// statement leaves it: marked under the entry's StaleSeq and claimed under its
+// Token (0 = unowned), with its metadata and tombstone.
 type staleListingStore struct {
 	recordingStore
 	entries []StaleResource
@@ -19,10 +22,20 @@ type staleListingStore struct {
 
 func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit int, _ time.Duration) ([]StaleResource, error) {
 	s.record("ListStale")
-	if len(s.entries) > limit {
-		return s.entries[:limit], nil
+	entries := s.entries
+	if len(entries) > limit {
+		entries = entries[:limit]
 	}
-	return s.entries, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rows == nil {
+		s.rows = make(map[model.Resource]*memRow)
+	}
+	for _, e := range entries {
+		s.rows[e.Resource] = &memRow{staleSeq: e.StaleSeq, stale: true, owner: e.Token, metadata: e.Metadata, deleted: e.Deleted}
+		s.seq = max(s.seq, e.StaleSeq, e.Token)
+	}
+	return entries, nil
 }
 
 func TestSweepStale_RebuildsMarksAndFinishesTombstones(t *testing.T) {

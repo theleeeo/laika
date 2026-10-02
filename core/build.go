@@ -27,30 +27,42 @@ type RebuildArgs struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
+// Build builds each of params' ids. An id with an owner token (OwnerTokens)
+// is an owned inline build: BeginBuild renews its lease, and a success
+// finishes it with FinishOwned, submitting the follow-up FinishOwned hands on.
+// An id without one owns nothing and finishes with ClearStale. A failed owned
+// id releases its ownership and keeps its mark, so the next change claims it
+// or the sweep rebuilds it; so does every owned id left unfinished when ctx
+// ends.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
 	cfg := idx.resources.Get(params.ResourceType)
 	if cfg == nil {
+		idx.releaseOwners(ctx, params.owned(params.ResourceIds))
 		return fmt.Errorf("resource type %q: %w", params.ResourceType, ErrUnknownResource)
 	}
 
 	plans := idx.plans[params.ResourceType]
 	if len(plans) == 0 {
+		idx.releaseOwners(ctx, params.owned(params.ResourceIds))
 		return fmt.Errorf("no plans for resource type %q", params.ResourceType)
 	}
 
 	var failed int
-	for _, id := range params.ResourceIds {
+	for i, id := range params.ResourceIds {
 		if ctx.Err() != nil {
+			idx.releaseOwners(ctx, params.owned(params.ResourceIds[i:]))
 			return ctx.Err()
 		}
 
 		res := model.Resource{Type: params.ResourceType, Id: id}
-		begun, err := idx.st.BeginBuild(ctx, res, 0)
+		token := params.OwnerTokens[id]
+		begun, err := idx.st.BeginBuild(ctx, res, token)
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
+			idx.releaseOwners(ctx, params.owned([]string{id}))
 			continue
 		}
 
@@ -58,21 +70,49 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, begun.BuildIdx, begun.Start); err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
+			idx.releaseOwners(ctx, params.owned([]string{id}))
 			continue
 		}
 
-		// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
-		// including buildOne's own drift re-mark, which must survive this clear.
-		if err := idx.st.ClearStale(ctx, res, begun.StaleSeq); err != nil {
-			logger.Warn("clear stale failed; sweep may rebuild redundantly",
-				slog.String("id", id), slog.String("error", err.Error()))
+		if token == 0 {
+			// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
+			// including buildOne's own drift re-mark, which must survive this
+			// clear.
+			if err := idx.st.ClearStale(ctx, res, begun.StaleSeq); err != nil {
+				logger.Warn("clear stale failed; sweep may rebuild redundantly",
+					slog.String("id", id), slog.String("error", err.Error()))
+			}
+			continue
 		}
+
+		// Race-safe the same way: a change that moved stale_seq mid-build —
+		// a registration this owner kept from submitting, or buildOne's own
+		// drift re-mark — re-claims the row for one follow-up instead.
+		fu, err := idx.st.FinishOwned(ctx, res, begun.StaleSeq, token)
+		if err != nil {
+			logger.Warn("finishing owned build failed; resource remains stale for sweep",
+				slog.String("id", id), slog.String("error", err.Error()))
+			idx.releaseOwners(ctx, params.owned([]string{id}))
+			continue
+		}
+		idx.submitFollowUp(ctx, res, fu)
 	}
 
 	if failed > 0 {
 		logger.Warn("build complete with failures", slog.Int("total", len(params.ResourceIds)), slog.Int("failed", failed))
 	}
 	return nil
+}
+
+// owned is the ownership params holds over ids: those with an owner token.
+func (params BuildArgs) owned(ids []string) []Owned {
+	var out []Owned
+	for _, id := range ids {
+		if token := params.OwnerTokens[id]; token != 0 {
+			out = append(out, Owned{Resource: model.Resource{Type: params.ResourceType, Id: id}, Token: token})
+		}
+	}
+	return out
 }
 
 // versionedDoc pairs a plan's Schema Version with the document it built.
@@ -155,8 +195,8 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		if err := idx.es.Upsert(ctx, indexName, resourceID, vd.doc.Doc, occVersion); err != nil {
 			// An OCC loss is benign: a concurrent build with a newer Build
 			// Sequence already wrote fresher data to this index. The
-			// seq-guarded ClearStale keeps recovery correct if the winner
-			// served a different change.
+			// seq-guarded finish (ClearStale or FinishOwned) keeps recovery
+			// correct if the winner served a different change.
 			if !errors.Is(err, ErrVersionConflict) {
 				return fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
 			}
@@ -188,10 +228,13 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// took before the fetches. A child whose change_seq exceeds it had a
 	// change accepted after the build started that the fetch may have missed
 	// — e.g. while our edge was missing, so fanout could not reach us.
-	// Re-schedule (mark first) to converge. The root is not checked: its
-	// BeginBuild precedes its own fetch, so a root change numbered below
-	// start is seen by the fetch, and one above it bumped stale_seq, so the
-	// guarded ClearStale leaves the mark for the follow-up build.
+	// Re-schedule (mark first) to converge. An owned build is the root's live
+	// owner, so its re-mark submits nothing and its FinishOwned runs the
+	// follow-up; an unowned one claims the root and submits it, unless
+	// another build owns it. The root is not checked: its BeginBuild precedes
+	// its own fetch, so a root change numbered below start is seen by the
+	// fetch, and one above it bumped stale_seq, so the guarded finish leaves
+	// the mark for the follow-up build.
 	if len(allRelations) > 0 {
 		checks := make([]ChangeCheck, len(allRelations))
 		for i, r := range allRelations {
