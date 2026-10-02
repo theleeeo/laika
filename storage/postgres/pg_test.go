@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,13 +42,8 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "pgxpool: %v\n", err)
 		os.Exit(1)
 	}
-	schema, err := os.ReadFile("pg_schema.sql")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read schema: %v\n", err)
-		os.Exit(1)
-	}
-	if _, err := pool.Exec(ctx, string(schema)); err != nil {
-		fmt.Fprintf(os.Stderr, "apply schema: %v\n", err)
+	if err := applySchema(ctx, pool); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 	testPool = pool
@@ -55,6 +51,19 @@ func TestMain(m *testing.M) {
 	pool.Close()
 	_ = testcontainers.TerminateContainer(c)
 	os.Exit(code)
+}
+
+// applySchema runs pg_schema.sql, as a deployment applies it, against the
+// schema first on the pool's search_path.
+func applySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	schema, err := os.ReadFile("pg_schema.sql")
+	if err != nil {
+		return fmt.Errorf("read schema: %w", err)
+	}
+	if _, err := pool.Exec(ctx, string(schema)); err != nil {
+		return fmt.Errorf("apply schema: %w", err)
+	}
+	return nil
 }
 
 // row reads the full resources row for assertions.
@@ -636,4 +645,315 @@ func TestRegisterChanges_DeleteMarksItsParents(t *testing.T) {
 	if len(got.Parents) != 1 || got.Parents[0].Resource != parent || got.Parents[0].Metadata["k"] != "M" {
 		t.Errorf("Parents: got %+v, want the Parent once with the delete's metadata", got.Parents)
 	}
+}
+
+// changeSeq reads a row's change_seq.
+func changeSeq(t *testing.T, pool *pgxpool.Pool, res model.Resource) int64 {
+	t.Helper()
+	var seq int64
+	if err := pool.QueryRow(context.Background(),
+		`SELECT change_seq FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&seq); err != nil {
+		t.Fatalf("read change_seq %s/%s: %v", res.Type, res.Id, err)
+	}
+	return seq
+}
+
+// start takes a start from the Change Sequence through the Store.
+func start(t *testing.T, st *Store) int64 {
+	t.Helper()
+	s, err := st.NextChangeSeq(context.Background())
+	if err != nil {
+		t.Fatalf("NextChangeSeq: %v", err)
+	}
+	return s
+}
+
+// changedSince runs AnyChangedSince and fails the test on error.
+func changedSince(t *testing.T, st *Store, checks ...core.ChangeCheck) bool {
+	t.Helper()
+	got, err := st.AnyChangedSince(context.Background(), checks)
+	if err != nil {
+		t.Fatalf("AnyChangedSince: %v", err)
+	}
+	return got
+}
+
+var isolatedSchemas atomic.Int64
+
+// isolatedStore applies pg_schema.sql to a fresh Postgres schema of its own,
+// so a test can reset or inspect the Change Sequence without touching the
+// one the other tests share. The returned pool resolves every unqualified
+// name — resources, change_sequence — to that schema.
+func isolatedStore(t *testing.T) (*Store, *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+	name := fmt.Sprintf("iso_%d", isolatedSchemas.Add(1))
+	if _, err := testPool.Exec(ctx, `CREATE SCHEMA `+name); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	cfg := testPool.Config().Copy()
+	cfg.ConnConfig.RuntimeParams["search_path"] = name
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		t.Fatalf("pool for %s: %v", name, err)
+	}
+	t.Cleanup(func() {
+		pool.Close()
+		_, _ = testPool.Exec(context.Background(), `DROP SCHEMA `+name+` CASCADE`)
+	})
+	if err := applySchema(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	return NewStore(pool), pool
+}
+
+// sequenceState reads the Change Sequence without advancing it.
+func sequenceState(t *testing.T, pool *pgxpool.Pool) (lastValue int64, isCalled bool) {
+	t.Helper()
+	if err := pool.QueryRow(context.Background(),
+		`SELECT last_value, is_called FROM change_sequence`).Scan(&lastValue, &isCalled); err != nil {
+		t.Fatalf("read change_sequence: %v", err)
+	}
+	return
+}
+
+func TestRegisterChanges_StampsAcceptedRowsAboveAnEarlierStart(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "cq1", Id: id} }
+	upserted, unversioned, deletedRes, inserted := r("upserted"), r("unversioned"), r("deleted"), r("inserted")
+	seed(t, upserted, 1, 0, false)
+	seed(t, unversioned, 3, 0, false)
+	seed(t, deletedRes, 2, 0, false)
+
+	fromNext := start(t, st)
+	begun, err := st.BeginBuild(ctx, r("builder"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := register(t, st,
+		core.Registration{Resource: upserted, Version: 2},
+		core.Registration{Resource: unversioned, Version: 0},
+		core.Registration{Resource: deletedRes, Deleted: true},
+		core.Registration{Resource: inserted, Version: 7},
+	)
+
+	for i, res := range []model.Resource{upserted, unversioned, deletedRes, inserted} {
+		if !got.Items[i].Accepted {
+			t.Fatalf("%s must be accepted", res.Id)
+		}
+		seq := changeSeq(t, testPool, res)
+		if seq <= fromNext || seq <= begun.Start {
+			t.Errorf("%s: change_seq %d must exceed the earlier starts (NextChangeSeq %d, BeginBuild %d)", res.Id, seq, fromNext, begun.Start)
+		}
+	}
+
+	// A second accepted change of the same row is stamped above the first.
+	first := changeSeq(t, testPool, upserted)
+	register(t, st, core.Registration{Resource: upserted, Version: 3})
+	if again := changeSeq(t, testPool, upserted); again <= first {
+		t.Errorf("re-registered row: change_seq %d, want above its previous %d", again, first)
+	}
+}
+
+func TestChangeSeq_UntouchedByStaleRejectionMarksAndBeginBuild(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "cq2", Id: id} }
+	item, parent, newParent, marked, built := r("item"), r("parent"), r("new-parent"), r("marked"), r("built")
+
+	register(t, st,
+		core.Registration{Resource: item, Version: 5},
+		core.Registration{Resource: parent, Version: 1},
+		core.Registration{Resource: marked, Version: 1},
+		core.Registration{Resource: built, Version: 1},
+	)
+	relate(t, [2]model.Resource{parent, item}, [2]model.Resource{newParent, item})
+	itemSeq := changeSeq(t, testPool, item)
+	parentSeq := changeSeq(t, testPool, parent)
+	markedSeq := changeSeq(t, testPool, marked)
+	builtSeq := changeSeq(t, testPool, built)
+
+	// A stale notification is rejected and stamps nothing.
+	if got := register(t, st, core.Registration{Resource: item, Version: 4}); got.Items[0].Accepted {
+		t.Fatal("a lower version must be rejected as stale")
+	}
+	if seq := changeSeq(t, testPool, item); seq != itemSeq {
+		t.Errorf("stale rejection moved change_seq: %d -> %d", itemSeq, seq)
+	}
+
+	// A Parent marked by fanout keeps its change_seq; one without a row
+	// gets a row that reads as never changed.
+	if got := register(t, st, core.Registration{Resource: item, Version: 6}); len(got.Parents) != 2 {
+		t.Fatalf("both Parents must be marked, got %+v", got.Parents)
+	}
+	if seq := changeSeq(t, testPool, parent); seq != parentSeq {
+		t.Errorf("parent mark moved change_seq: %d -> %d", parentSeq, seq)
+	}
+	if seq := changeSeq(t, testPool, newParent); seq != 0 {
+		t.Errorf("a row created by a parent mark must read as never changed, change_seq %d", seq)
+	}
+
+	// MarkStale, on an existing row and on a new one.
+	fresh := r("fresh-mark")
+	if err := st.MarkStale(ctx, []model.Resource{marked, fresh}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if seq := changeSeq(t, testPool, marked); seq != markedSeq {
+		t.Errorf("MarkStale moved change_seq: %d -> %d", markedSeq, seq)
+	}
+	if seq := changeSeq(t, testPool, fresh); seq != 0 {
+		t.Errorf("a row created by MarkStale must read as never changed, change_seq %d", seq)
+	}
+
+	// BeginBuild, on an existing row and on a new one.
+	freshBuild := r("fresh-build")
+	for _, res := range []model.Resource{built, freshBuild} {
+		if _, err := st.BeginBuild(ctx, res); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seq := changeSeq(t, testPool, built); seq != builtSeq {
+		t.Errorf("BeginBuild moved change_seq: %d -> %d", builtSeq, seq)
+	}
+	if seq := changeSeq(t, testPool, freshBuild); seq != 0 {
+		t.Errorf("a row created by BeginBuild must read as never changed, change_seq %d", seq)
+	}
+}
+
+func TestAnyChangedSince_ComparesEachCheckWithItsOwnStart(t *testing.T) {
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "cq3", Id: id} }
+	before, after, missing := r("before"), r("after"), r("missing")
+	check := func(res model.Resource, s int64) core.ChangeCheck { return core.ChangeCheck{Resource: res, Start: s} }
+
+	s0 := start(t, st)
+	register(t, st, core.Registration{Resource: before, Version: 1})
+	s1 := start(t, st)
+	register(t, st, core.Registration{Resource: after, Version: 1})
+	s2 := start(t, st)
+
+	if changedSince(t, st, check(before, s1)) {
+		t.Error("a change accepted before the start must not count")
+	}
+	if !changedSince(t, st, check(after, s1)) {
+		t.Error("a change accepted after the start must count")
+	}
+	if changedSince(t, st, check(missing, s0)) {
+		t.Error("a resource without a row has never changed")
+	}
+
+	// One batched call: each check against its own start.
+	if changedSince(t, st, check(before, s1), check(after, s2), check(missing, s0)) {
+		t.Error("each resource changed before its own start: no drift")
+	}
+	if !changedSince(t, st, check(before, s1), check(after, s1)) {
+		t.Error("after changed after its check's start: drift")
+	}
+	if !changedSince(t, st, check(before, s0), check(after, s2)) {
+		t.Error("before changed after its check's start: drift")
+	}
+}
+
+func TestAnyChangedSince_EmptyInputIsFalseWithoutAQuery(t *testing.T) {
+	// A nil pool panics on any query.
+	got, err := NewStore(nil).AnyChangedSince(context.Background(), nil)
+	if err != nil || got {
+		t.Fatalf("empty checks: got %v, %v; want false, nil", got, err)
+	}
+}
+
+func TestBeginBuild_TakesItsStartFromTheChangeSequence(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res, between := model.Resource{Type: "cq4", Id: "built"}, model.Resource{Type: "cq4", Id: "between"}
+
+	first, err := st.BeginBuild(ctx, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	register(t, st, core.Registration{Resource: between, Version: 1})
+	second, err := st.BeginBuild(ctx, res)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stamp := changeSeq(t, testPool, between)
+	if first.Start >= stamp || stamp >= second.Start {
+		t.Fatalf("starts and the registration between them must be ordered: %d < %d < %d", first.Start, stamp, second.Start)
+	}
+	if next := start(t, st); next <= second.Start {
+		t.Fatalf("NextChangeSeq %d must come after BeginBuild's start %d", next, second.Start)
+	}
+}
+
+func TestSchema_RaisesAChangeSequenceLeftBehindTheStamps(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		restart func(stamp int64) string
+	}{
+		// Back to the sequence's first value.
+		{"restart", func(int64) string { return `ALTER SEQUENCE change_sequence RESTART` }},
+		// Next value exactly the highest stamp: last_value equals it, but
+		// is_called is false, so a start would not exceed it.
+		{"restart at the stamp", func(stamp int64) string {
+			return fmt.Sprintf(`ALTER SEQUENCE change_sequence RESTART WITH %d`, stamp)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, pool := isolatedStore(t)
+			res := model.Resource{Type: "cq5", Id: "1"}
+			// Starts first, so the stamp is above the sequence's first value
+			// and the two restarts differ.
+			start(t, st)
+			start(t, st)
+			register(t, st, core.Registration{Resource: res, Version: 1})
+			stamp := changeSeq(t, pool, res)
+
+			if _, err := pool.Exec(ctx, tc.restart(stamp)); err != nil {
+				t.Fatal(err)
+			}
+			if err := applySchema(ctx, pool); err != nil {
+				t.Fatal(err)
+			}
+			if next := start(t, st); next <= stamp {
+				t.Fatalf("after re-applying the schema the next start %d must exceed the stamp %d", next, stamp)
+			}
+		})
+	}
+}
+
+func TestSchema_LeavesTheChangeSequenceAloneWhenEmptyOrAhead(t *testing.T) {
+	ctx := context.Background()
+	st, pool := isolatedStore(t)
+	reapply := func(why string) {
+		t.Helper()
+		lastBefore, calledBefore := sequenceState(t, pool)
+		if err := applySchema(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+		if last, called := sequenceState(t, pool); last != lastBefore || called != calledBefore {
+			t.Errorf("%s: sequence moved from (%d, %v) to (%d, %v)", why, lastBefore, calledBefore, last, called)
+		}
+	}
+
+	reapply("fresh sequence, empty table")
+
+	// Rows that never changed: change_seq 0 is below anything handed out.
+	if err := st.MarkStale(ctx, []model.Resource{{Type: "cq6", Id: "marked"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	reapply("fresh sequence, only unchanged rows")
+
+	// Starts taken with no stamped row: the sequence is ahead.
+	start(t, st)
+	start(t, st)
+	reapply("sequence ahead, no stamps")
+
+	// A stamped row with the sequence ahead of it.
+	register(t, st, core.Registration{Resource: model.Resource{Type: "cq6", Id: "stamped"}, Version: 1})
+	reapply("sequence last handed out the stamp")
+	start(t, st)
+	reapply("sequence ahead of the stamp")
 }

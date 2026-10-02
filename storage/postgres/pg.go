@@ -117,6 +117,11 @@ func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, ch
 // mark because one statement may modify a row only once, and their own row
 // already carries the mark. A Parent shared by several accepted children
 // stores the metadata of the last one in batch order.
+//
+// Every accepted row — upsert, version-0 item or delete — is stamped with a
+// fresh Change Sequence value; a rejected item and a marked Parent keep
+// theirs. The value is drawn for every input row, so a rejected item leaves
+// a gap in the sequence, which the drift check doesn't mind.
 func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) (core.Registered, error) {
 	if len(items) == 0 {
 		return core.Registered{}, nil
@@ -148,13 +153,14 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) 
 		     JOIN jsonb_array_elements($5::jsonb) WITH ORDINALITY AS m(meta, ord) USING (ord)
 		 ),
 		 accepted AS (
-		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata)
-		     SELECT t, i, v, del, 1, now(), meta FROM input
+		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata, change_seq)
+		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence') FROM input
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET version = CASE WHEN EXCLUDED.deleted THEN 0
 		                        WHEN EXCLUDED.version = 0 THEN r.version
 		                        ELSE EXCLUDED.version END,
 		         deleted = EXCLUDED.deleted,
+		         change_seq = EXCLUDED.change_seq,
 		         stale_seq = r.stale_seq + 1,
 		         stale_since = COALESCE(r.stale_since, now()),
 		         metadata = EXCLUDED.metadata
@@ -278,9 +284,10 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 	return err
 }
 
-// BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version)
-// and captures the current stale_seq for the race-safe ClearStale at the end
-// of the build.
+// BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version),
+// captures the current stale_seq for the race-safe ClearStale at the end of
+// the build, and takes the build's start from the Change Sequence in the same
+// statement. It leaves the row's change_seq alone: a build is not a change.
 func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (core.BuildBegun, error) {
 	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
@@ -288,9 +295,9 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (core.B
 		 VALUES ($1, $2, 1)
 		 ON CONFLICT (type, id) DO UPDATE
 		 SET build_idx = resources.build_idx + 1
-		 RETURNING build_idx, stale_seq`,
+		 RETURNING build_idx, stale_seq, nextval('change_sequence')`,
 		resource.Type, resource.Id,
-	).Scan(&b.BuildIdx, &b.StaleSeq)
+	).Scan(&b.BuildIdx, &b.StaleSeq, &b.Start)
 	if err != nil {
 		return core.BuildBegun{}, err
 	}
@@ -299,13 +306,36 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (core.B
 
 // NextChangeSeq takes a value of the Change Sequence.
 func (s *Store) NextChangeSeq(ctx context.Context) (int64, error) {
-	return 0, errors.New("NextChangeSeq: not implemented")
+	var seq int64
+	err := s.pool.QueryRow(ctx, `SELECT nextval('change_sequence')`).Scan(&seq)
+	return seq, err
 }
 
 // AnyChangedSince reports whether any checked resource's change_seq exceeds
-// its check's Start.
+// its check's Start, all checks in one query. A resource without a row has
+// never changed. It takes no row locks: a registration numbered above a
+// start but not yet committed is not seen (seam S6).
 func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) (bool, error) {
-	return false, errors.New("AnyChangedSince: not implemented")
+	if len(checks) == 0 {
+		return false, nil
+	}
+	types := make([]string, len(checks))
+	ids := make([]string, len(checks))
+	starts := make([]int64, len(checks))
+	for i, c := range checks {
+		types[i], ids[i], starts[i] = c.Resource.Type, c.Resource.Id, c.Start
+	}
+	var changed bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (
+		     SELECT 1
+		     FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, start)
+		     JOIN resources r ON r.type = x.t AND r.id = x.i
+		     WHERE r.change_seq > x.start
+		 )`,
+		types, ids, starts,
+	).Scan(&changed)
+	return changed, err
 }
 
 // ClearStale clears the stale mark only if no newer change arrived since the
