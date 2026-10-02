@@ -58,6 +58,10 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 	return result, nil
 }
 
+// detachedMarkTimeout bounds a stale mark made on a context detached from the
+// rebuild's cancellation (salvage, a failed drift re-mark's retry).
+const detachedMarkTimeout = 30 * time.Second
+
 // pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped
 // and, on a full rebuild, edges wiped) but not yet fully flushed.
 type pendingResource struct {
@@ -280,7 +284,8 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 
 	f.checkDrift(ctx, driftCheck)
 
-	// Complete resources whose every expected document has flushed.
+	// Complete resources whose every expected document has flushed. A root
+	// whose drift re-mark failed was failed by checkDrift and is skipped.
 	for _, it := range chunk {
 		p := f.state[it.ID]
 		if p == nil || p.failed || p.remaining > 0 {
@@ -311,7 +316,11 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 //
 // One batched query serves the common no-drift case; a hit narrows with one
 // query per root, and each changed root is re-marked and re-built via the
-// mark-first primitive.
+// mark-first primitive. A root whose re-mark fails is failed instead: clearing
+// it would leave its possibly outdated document with no mark for the sweep.
+// Its mark is retried on a context detached from cancellation — the re-mark
+// may have failed because the walk's context ended — and the rebuild reports
+// the failure.
 func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][]ChangeCheck) {
 	if len(driftCheck) == 0 {
 		return
@@ -334,7 +343,10 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		// convergence gap: a redundant rebuild is safe, a missed one is not.
 		if perErr != nil || perResource {
 			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, f.metadata); err != nil {
-				slog.Warn("drift re-schedule failed", slog.String("id", id), slog.String("error", err.Error()))
+				slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
+				mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
+				f.fail(mctx, id)
+				cancel()
 			}
 		}
 	}
@@ -369,7 +381,7 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 	if len(f.state) == 0 {
 		return
 	}
-	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
 	defer cancel()
 
 	roots := make([]model.Resource, 0, len(f.state))

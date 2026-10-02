@@ -73,6 +73,10 @@ type captureBackend struct {
 	// bulkErr fails the whole BulkUpsert request (no per-item failures) —
 	// the case where nothing can be assumed written.
 	bulkErr error
+	// onBulk, when set, runs inside every BulkUpsert after the write is
+	// recorded — e.g. to cancel the walk between the write and its drift
+	// check.
+	onBulk func()
 }
 
 func (b *captureBackend) Upsert(_ context.Context, index, docID string, _ any, _ int64) error {
@@ -90,6 +94,9 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bulkCalls = append(b.bulkCalls, append([]BulkItem(nil), items...))
+	if b.onBulk != nil {
+		b.onBulk()
+	}
 	if b.bulkErr != nil {
 		return nil, b.bulkErr
 	}
@@ -155,6 +162,13 @@ type rebuildRecordingStore struct {
 	// call on (1-based); 0 fails every call.
 	changeSeqErr     error
 	changeSeqErrFrom int64
+	// markErrs fails the first n MarkStale calls naming "<type>/<id>"; each
+	// failed attempt records "MarkStaleFailed:<type>/<id>" instead of
+	// "MarkStale:<type>/<id>".
+	markErrs map[string]int
+	// ctxAware makes MarkStale and AnyChangedSince fail on a done context, as
+	// the real store does. ClearStale stays context-blind.
+	ctxAware bool
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -186,11 +200,27 @@ func (s *rebuildRecordingStore) has(prefix string) bool {
 	return false
 }
 
-func (s *rebuildRecordingStore) MarkStale(_ context.Context, rs []model.Resource, _ map[string]string) error {
-	for _, r := range rs {
-		s.record("MarkStale:%s/%s", r.Type, r.Id)
+func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string) error {
+	var err error
+	if s.ctxAware && ctx.Err() != nil {
+		err = ctx.Err()
 	}
-	return nil
+	s.mu.Lock()
+	for _, r := range rs {
+		if key := r.Type + "/" + r.Id; s.markErrs[key] > 0 {
+			s.markErrs[key]--
+			err = errors.New("mark stale failed")
+		}
+	}
+	s.mu.Unlock()
+	for _, r := range rs {
+		if err != nil {
+			s.record("MarkStaleFailed:%s/%s", r.Type, r.Id)
+		} else {
+			s.record("MarkStale:%s/%s", r.Type, r.Id)
+		}
+	}
+	return err
 }
 
 func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
@@ -214,11 +244,14 @@ func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) {
 	return 1000 + s.changeSeqs, nil
 }
 
-func (s *rebuildRecordingStore) AnyChangedSince(_ context.Context, checks []ChangeCheck) (bool, error) {
+func (s *rebuildRecordingStore) AnyChangedSince(ctx context.Context, checks []ChangeCheck) (bool, error) {
 	s.record("AnyChangedSince:%d", len(checks))
 	s.mu.Lock()
 	s.checks = append(s.checks, append([]ChangeCheck(nil), checks...))
 	s.mu.Unlock()
+	if s.ctxAware && ctx.Err() != nil {
+		return false, ctx.Err()
+	}
 	for _, c := range checks {
 		if s.errChildren[c.Resource.Id] && s.errBudget.Add(-1) >= 0 {
 			return false, errors.New("drift query failed")
@@ -1305,6 +1338,96 @@ func TestRebuildAll_CancelledWalkNeverReportsSuccess(t *testing.T) {
 	}
 	if st.has("BeginBuild:product/5") {
 		t.Fatal("the walk stopped before page 3; product 5 must never have been begun")
+	}
+}
+
+// assertDriftRemarkFailureFailsRoot checks ruling R6 for a root whose drift
+// re-schedule could not mark it: it is not cleared, the rebuild reports it
+// failed, and its mark is retried — and lands — after the failed attempt.
+func assertDriftRemarkFailureFailsRoot(t *testing.T, st *rebuildRecordingStore, err error, id string) {
+	t.Helper()
+	calls := st.callsSnapshot()
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("a root whose drift re-mark failed must fail the rebuild, got %v: %v", err, calls)
+	}
+	if n := countPrefix(calls, "ClearStale:product/"+id+":"); n != 0 {
+		t.Fatalf("a root whose drift re-mark failed must not be cleared — nothing else would recover it: %v", calls)
+	}
+	failed, marks := callIndexes(calls, "MarkStaleFailed:product/"+id), callIndexes(calls, "MarkStale:product/"+id)
+	if len(failed) == 0 || len(marks) == 0 || marks[len(marks)-1] < failed[0] {
+		t.Fatalf("the failed re-mark must be retried and land: %v", calls)
+	}
+}
+
+// A walk root whose drift hit cannot be re-marked fails instead of clearing;
+// a root of the same chunk without drift still completes.
+func TestRebuildAll_RootDriftRemarkFails_FailsTheRoot(t *testing.T) {
+	// Budget 2: the batched hit and root 1's narrow hit.
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"1": true}, markErrs: map[string]int{"product/1": 1}}
+	st.driftBudget.Store(2)
+	err := rebuildAllProducts(t, st, &staticExecuter{docs: []projection.BuildDoc{productDocWith("1"), productDocWith("2")}})
+
+	assertDriftRemarkFailureFailsRoot(t, st, err, "1")
+	if calls := st.callsSnapshot(); len(callIndexes(calls, "ClearStale:product/2:42")) != 1 {
+		t.Fatalf("root 2 had no drift and must complete: %v", calls)
+	}
+}
+
+// The same for a child-drift hit on a targeted rebuild.
+func TestRebuildByIDs_ChildDriftRemarkFails_FailsTheRoot(t *testing.T) {
+	// Budget 2: the batched hit and root 1's narrow hit.
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"c1": true}, markErrs: map[string]int{"product/1": 1}}
+	st.driftBudget.Store(2)
+	exec := childDocs(map[string][]string{"1": {"c1"}, "2": {"c2"}})
+	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}}, 0)
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2"}}})
+	if werr := idx.WaitForIdle(t.Context()); werr != nil {
+		t.Fatal(werr)
+	}
+
+	assertDriftRemarkFailureFailsRoot(t, st, err, "1")
+	if calls := st.callsSnapshot(); len(callIndexes(calls, "ClearStale:product/2:42")) != 1 {
+		t.Fatalf("root 2 had no drift and must complete: %v", calls)
+	}
+}
+
+// A walk cancelled between its write and the drift check: the drift query
+// errors and the re-mark fails on the cancelled context, so the root fails
+// and its mark is retried on a context detached from cancellation. The only
+// flush is finish's — after the walk's own ctx checks — and finish succeeds,
+// so salvage never runs: the retried mark is the flusher's.
+func TestRebuild_CancelledBeforeDriftCheck_FailsTheRoot(t *testing.T) {
+	cases := map[string]struct {
+		exec *staticExecuter
+		sel  ResourceSelector
+	}{
+		"plan walk": {
+			exec: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}},
+			sel:  ResourceSelector{ResourceType: "product"},
+		},
+		"by IDs": {
+			exec: childDocs(map[string][]string{"1": {"c1"}}),
+			sel:  ResourceSelector{ResourceType: "product", ResourceIDs: []string{"1"}},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{ctxAware: true}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			es := &captureBackend{onBulk: cancel}
+			idx := newRebuildIndexer(st, es, map[string][]projection.Plan{"product": {{Version: 1, Executer: tc.exec}}}, 0)
+
+			err := idx.RebuildNow(ctx, []ResourceSelector{tc.sel})
+			if werr := idx.WaitForIdle(t.Context()); werr != nil {
+				t.Fatal(werr)
+			}
+
+			if calls := st.callsSnapshot(); len(es.bulkCalls) != 1 || countPrefix(calls, "AnyChangedSince:") != 1 {
+				t.Fatalf("one flush, then its (failing) drift query: %d flushes: %v", len(es.bulkCalls), calls)
+			}
+			assertDriftRemarkFailureFailsRoot(t, st, err, "1")
+		})
 	}
 }
 
