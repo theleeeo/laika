@@ -230,8 +230,8 @@ func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 			_ = idx.Build(ctx, BuildArgs{ResourceType: "product", ResourceIds: []string{"2"}})
 		},
 		"rebuild flusher drift": func(ctx context.Context, idx *Indexer) {
-			newRebuildFlusher(idx, "product", nil).checkDrift(ctx, map[string][]model.VersionedResource{
-				"2": {{Resource: model.Resource{Type: "product", Id: "child"}, Version: 1}},
+			newRebuildFlusher(idx, "product", nil).checkDrift(ctx, map[string][]ChangeCheck{
+				"2": {{Resource: model.Resource{Type: "product", Id: "child"}, Start: 1}},
 			})
 		},
 	}

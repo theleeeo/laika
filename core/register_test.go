@@ -19,9 +19,8 @@ import (
 type recordingStore struct {
 	mu    sync.Mutex
 	calls []string
-	// drift is one-shot: report drift on the first AnyChangedSince (the
-	// flusher's AnyResourceVersionDrifted shares it). driftErr fails every
-	// AnyChangedSince.
+	// drift is one-shot: report drift on the first AnyChangedSince.
+	// driftErr fails every AnyChangedSince.
 	drift    atomic.Bool
 	driftErr error
 	// start is every BeginBuild's BuildBegun.Start; checks records every

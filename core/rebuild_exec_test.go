@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,11 +142,15 @@ type rebuildRecordingStore struct {
 	// AnyChangedSince batch.
 	changeSeqs int64
 	checks     [][]ChangeCheck
-	// driftBudget bounds how many AnyChangedSince (and, for the flusher,
-	// AnyResourceVersionDrifted) calls report drift for driftChildren, so a
-	// drift-triggered re-build settles instead of looping forever.
+	// driftBudget bounds how many AnyChangedSince calls report drift for
+	// driftChildren, so a drift-triggered re-build settles instead of
+	// looping forever.
 	driftBudget   atomic.Int32
 	driftChildren map[string]bool
+	// errBudget bounds how many AnyChangedSince calls carrying an errChildren
+	// resource fail, so a re-build after a failed query settles.
+	errBudget   atomic.Int32
+	errChildren map[string]bool
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -207,6 +212,11 @@ func (s *rebuildRecordingStore) AnyChangedSince(_ context.Context, checks []Chan
 	s.mu.Lock()
 	s.checks = append(s.checks, append([]ChangeCheck(nil), checks...))
 	s.mu.Unlock()
+	for _, c := range checks {
+		if s.errChildren[c.Resource.Id] && s.errBudget.Add(-1) >= 0 {
+			return false, errors.New("drift query failed")
+		}
+	}
 	for _, c := range checks {
 		if s.driftChildren[c.Resource.Id] && s.driftBudget.Add(-1) >= 0 {
 			return true, nil
@@ -474,6 +484,191 @@ func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {
 	}
 	if st.has("MarkStale:product/2") {
 		t.Fatal("a resource without drifted children must not be re-marked")
+	}
+}
+
+// childDocs serves each root its own children, so the roots of one chunk
+// carry distinct drift checks.
+func childDocs(children map[string][]string) *staticExecuter {
+	byID := make(map[string][]projection.BuildDoc, len(children))
+	for id, cs := range children {
+		byID[id] = []projection.BuildDoc{productDocWith(id, cs...)}
+	}
+	return &staticExecuter{byID: byID}
+}
+
+// rebuildIDs runs a single-plan rebuildByIDs of ids in one chunk and waits for
+// the re-builds it schedules.
+func rebuildIDs(t *testing.T, st *rebuildRecordingStore, exec *staticExecuter, ids ...string) {
+	t.Helper()
+	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}}, 0)
+	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: ids}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sortedChecks(cs []ChangeCheck) string {
+	cs = append([]ChangeCheck(nil), cs...)
+	slices.SortFunc(cs, func(a, b ChangeCheck) int { return strings.Compare(a.Resource.Id, b.Resource.Id) })
+	return fmt.Sprint(cs)
+}
+
+// checksBelow returns the recorded AnyChangedSince batches whose checks all
+// carry a start of at most max — with rebuildRecordingStore's starts, the
+// flusher's queries for the first max-100 roots, told apart from a later
+// re-build's whatever the interleaving.
+func checksBelow(st *rebuildRecordingStore, max int64) [][]ChangeCheck {
+	var out [][]ChangeCheck
+	for _, batch := range st.checksSnapshot() {
+		if !slices.ContainsFunc(batch, func(c ChangeCheck) bool { return c.Start > max }) {
+			out = append(out, batch)
+		}
+	}
+	return out
+}
+
+func callIndexes(calls []string, call string) []int {
+	var at []int
+	for i, c := range calls {
+		if c == call {
+			at = append(at, i)
+		}
+	}
+	return at
+}
+
+func countPrefix(calls []string, prefix string) int {
+	n := 0
+	for _, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// One batched AnyChangedSince serves a no-drift chunk; every root's children
+// are measured from that root's own BeginBuild start, and no root checks
+// itself — rebuildByIDs begins a root before fetching it.
+func TestRebuildByIDs_DriftCheck_ChecksEachRootsChildrenFromItsOwnStart(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": {"c1a", "c1b"}, "2": {"c2"}}), "1", "2")
+
+	checks := st.checksSnapshot()
+	if len(checks) != 1 {
+		t.Fatalf("a no-drift chunk makes one batched drift check, got %d: %v", len(checks), st.callsSnapshot())
+	}
+	want := []ChangeCheck{{product("c1a"), 101}, {product("c1b"), 101}, {product("c2"), 102}}
+	if got := sortedChecks(checks[0]); got != fmt.Sprint(want) {
+		t.Fatalf("checks %s, want %v", got, want)
+	}
+	for _, c := range checks[0] {
+		if c.Resource.Id == "1" || c.Resource.Id == "2" {
+			t.Fatalf("a root begun before its fetch must not check itself: %v", checks[0])
+		}
+	}
+}
+
+func TestRebuildByIDs_NoRelations_MakesNoDriftCheck(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": nil, "2": nil}), "1", "2")
+
+	if calls := st.callsSnapshot(); countPrefix(calls, "AnyChangedSince") != 0 {
+		t.Fatalf("a chunk without children has nothing to check: %v", calls)
+	}
+}
+
+// Only roots with children enter the drift check; with one such root the
+// batched hit is that root's own, so it is not narrowed.
+func TestRebuildByIDs_DriftCheck_OnlyRootsWithChildrenAreChecked(t *testing.T) {
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"c2": true}}
+	st.driftBudget.Store(1)
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": nil, "2": {"c2"}}), "1", "2")
+
+	calls := st.callsSnapshot()
+	marks := callIndexes(calls, "MarkStale:product/2")
+	if len(marks) != 1 {
+		t.Fatalf("the changed root must be re-marked once: %v", calls)
+	}
+	if got := checksBelow(st, 102); len(got) != 1 || sortedChecks(got[0]) != fmt.Sprint([]ChangeCheck{{product("c2"), 102}}) {
+		t.Fatalf("one root with children: one batched check, no narrowing, got %v: %v", got, calls)
+	}
+	if len(callIndexes(calls, "MarkStale:product/1")) != 0 {
+		t.Fatalf("a root without children must not be re-marked: %v", calls)
+	}
+}
+
+// A hit narrows with one query per root, and only the root whose child
+// changed is re-scheduled, mark first.
+func TestRebuildByIDs_DriftHit_NarrowsAndReschedulesOnlyTheChangedRoot(t *testing.T) {
+	// Budget 2: the batched hit and root 1's narrow hit; root 1's re-build
+	// then sees no drift and settles.
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"c1": true}}
+	st.driftBudget.Store(2)
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": {"c1"}, "2": {"c2"}}), "1", "2")
+
+	calls := st.callsSnapshot()
+	marks := callIndexes(calls, "MarkStale:product/1")
+	if len(marks) != 1 {
+		t.Fatalf("the changed root must be re-marked once: %v", calls)
+	}
+	if len(callIndexes(calls, "MarkStale:product/2")) != 0 {
+		t.Fatalf("a root whose children did not change must not be re-marked: %v", calls)
+	}
+	checks := checksBelow(st, 102)
+	if len(checks) != 3 || len(checks[0]) != 2 {
+		t.Fatalf("a hit must narrow: the batched query, then one per root, got %v: %v", checks, calls)
+	}
+	narrowed := []string{sortedChecks(checks[1]), sortedChecks(checks[2])}
+	slices.Sort(narrowed)
+	want := []string{
+		fmt.Sprint([]ChangeCheck{{product("c1"), 101}}),
+		fmt.Sprint([]ChangeCheck{{product("c2"), 102}}),
+	}
+	if !slices.Equal(narrowed, want) {
+		t.Fatalf("each narrowed query carries one root's checks with its start, got %v want %v", narrowed, want)
+	}
+	begins := callIndexes(calls, "BeginBuild:product/1")
+	if len(begins) != 2 || begins[1] < marks[0] {
+		t.Fatalf("the re-mark must precede the root's re-build: %v", calls)
+	}
+	if len(callIndexes(calls, "BeginBuild:product/2")) != 1 {
+		t.Fatalf("the unchanged root must not be re-built: %v", calls)
+	}
+}
+
+// A failed drift query re-schedules: a redundant build is safe, a missed one
+// is not.
+func TestRebuildByIDs_DriftQueryError_ReschedulesTheRoot(t *testing.T) {
+	st := &rebuildRecordingStore{errChildren: map[string]bool{"c1": true}}
+	st.errBudget.Store(1)
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": {"c1"}}), "1")
+
+	calls := st.callsSnapshot()
+	marks := callIndexes(calls, "MarkStale:product/1")
+	begins := callIndexes(calls, "BeginBuild:product/1")
+	if len(marks) != 1 || len(begins) != 2 || begins[1] < marks[0] {
+		t.Fatalf("a failed drift query must re-mark and re-build the root: %v", calls)
+	}
+}
+
+// The narrowing query's error re-schedules its own root only.
+func TestRebuildByIDs_NarrowDriftQueryError_ReschedulesThatRoot(t *testing.T) {
+	// Budget 2: the batched query and root 1's narrow query fail.
+	st := &rebuildRecordingStore{errChildren: map[string]bool{"c1": true}}
+	st.errBudget.Store(2)
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": {"c1"}, "2": {"c2"}}), "1", "2")
+
+	calls := st.callsSnapshot()
+	marks := callIndexes(calls, "MarkStale:product/1")
+	if checks := checksBelow(st, 102); len(marks) != 1 || len(checks) != 3 {
+		t.Fatalf("a failed batched query narrows, and root 1's failed narrow re-marks it, got %v: %v", checks, calls)
+	}
+	if len(callIndexes(calls, "MarkStale:product/2")) != 0 {
+		t.Fatalf("root 2's narrow query succeeded without drift; it must not be re-marked: %v", calls)
 	}
 }
 

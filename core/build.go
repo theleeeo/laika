@@ -266,7 +266,9 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			fl.fail(ctx, id)
 			continue
 		}
-		fl.begin(id, begun.BuildIdx, begun.StaleSeq, expected)
+		// The root is not checked: BeginBuild precedes its fetch, so its
+		// children are measured from its own start.
+		fl.begin(id, begun.BuildIdx, begun.StaleSeq, begun.Start, expected)
 
 		// Same existence rule as the live path (buildOne): all selected plans
 		// run first, and only unanimity decides — a nil from one version must
@@ -465,7 +467,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 						fl.fail(ctx, id)
 						continue
 					}
-					fl.begin(id, begun.BuildIdx, begun.StaleSeq, expected)
+					fl.begin(id, begun.BuildIdx, begun.StaleSeq, begun.Start, expected)
 				}
 
 				occVersion, ok := fl.occ(id)
