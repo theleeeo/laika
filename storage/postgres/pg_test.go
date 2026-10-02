@@ -157,14 +157,16 @@ func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
 		t.Fatal(err)
 	}
-	buildIdx, staleSeq, err := st.BeginBuild(ctx, res)
+	begun, err := st.BeginBuild(ctx, res)
+	buildIdx, staleSeq := begun.BuildIdx, begun.StaleSeq
 	if err != nil {
 		t.Fatal(err)
 	}
 	if buildIdx != 1 || staleSeq != 1 {
 		t.Fatalf("got buildIdx=%d staleSeq=%d, want 1, 1", buildIdx, staleSeq)
 	}
-	buildIdx2, _, err := st.BeginBuild(ctx, res)
+	begun2, err := st.BeginBuild(ctx, res)
+	buildIdx2 := begun2.BuildIdx
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -83,9 +83,13 @@ func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ m
 	s.signalMarked()
 	return nil
 }
-func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource) (int64, int64, error) {
+func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
-	return 1, 3, nil
+	return BuildBegun{BuildIdx: 1, StaleSeq: 3}, nil
+}
+func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
+func (s *recordingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
+	return false, nil
 }
 func (s *recordingStore) ClearStale(_ context.Context, r model.Resource, seq int64) error {
 	s.record("ClearStale:%s/%s:%d", r.Type, r.Id, seq)

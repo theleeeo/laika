@@ -281,8 +281,8 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 // BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version)
 // and captures the current stale_seq for the race-safe ClearStale at the end
 // of the build.
-func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (int64, int64, error) {
-	var buildIdx, staleSeq int64
+func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (core.BuildBegun, error) {
+	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO resources (type, id, build_idx)
 		 VALUES ($1, $2, 1)
@@ -290,11 +290,22 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (int64,
 		 SET build_idx = resources.build_idx + 1
 		 RETURNING build_idx, stale_seq`,
 		resource.Type, resource.Id,
-	).Scan(&buildIdx, &staleSeq)
+	).Scan(&b.BuildIdx, &b.StaleSeq)
 	if err != nil {
-		return 0, 0, err
+		return core.BuildBegun{}, err
 	}
-	return buildIdx, staleSeq, nil
+	return b, nil
+}
+
+// NextChangeSeq takes a value of the Change Sequence.
+func (s *Store) NextChangeSeq(ctx context.Context) (int64, error) {
+	return 0, errors.New("NextChangeSeq: not implemented")
+}
+
+// AnyChangedSince reports whether any checked resource's change_seq exceeds
+// its check's Start.
+func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) (bool, error) {
+	return false, errors.New("AnyChangedSince: not implemented")
 }
 
 // ClearStale clears the stale mark only if no newer change arrived since the

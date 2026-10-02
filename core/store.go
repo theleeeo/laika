@@ -32,14 +32,43 @@ type Store interface {
 	// metadata is stored per resource (last mark wins) so a sweep-recovered
 	// build carries the same context an inline build would have.
 	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error
-	// BeginBuild bumps the Build Sequence and captures the current stale_seq.
-	BeginBuild(ctx context.Context, resource model.Resource) (buildIdx, staleSeq int64, err error)
+	// BeginBuild bumps the Build Sequence, captures the current stale_seq and
+	// takes the build's start from the Change Sequence. Callers invoke it
+	// before the build's fetches.
+	BeginBuild(ctx context.Context, resource model.Resource) (BuildBegun, error)
+	// NextChangeSeq takes a value of the Change Sequence: the start of a
+	// Rebuild plan walk, taken before the walk fetches its first page.
+	NextChangeSeq(ctx context.Context) (int64, error)
+	// AnyChangedSince is the ADR 0002 drift check: it reports whether any
+	// checked resource had a change accepted by RegisterChanges after the
+	// check's Start, i.e. its stored change_seq exceeds Start. A resource
+	// without a row has never changed.
+	AnyChangedSince(ctx context.Context, checks []ChangeCheck) (bool, error)
 	// ClearStale clears the stale mark only if staleSeq still matches.
 	ClearStale(ctx context.Context, resource model.Resource, staleSeq int64) error
 	// DeleteResourceIfSeq hard-deletes a tombstoned row guarded by stale_seq.
 	DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq int64) error
 	// ListStale returns up to limit resources whose stale mark predates before.
 	ListStale(ctx context.Context, before time.Time, limit int) ([]StaleResource, error)
+}
+
+// BuildBegun is what BeginBuild returns for one resource.
+type BuildBegun struct {
+	// BuildIdx is the bumped Build Sequence, sent as the ES external_gte
+	// version.
+	BuildIdx int64
+	// StaleSeq is the stale_seq the build's ClearStale is guarded by.
+	StaleSeq int64
+	// Start is a value of the Change Sequence taken before the build's
+	// fetches; the drift check compares against it.
+	Start int64
+}
+
+// ChangeCheck is one resource of a drift check, with the start of the build
+// that fetched it.
+type ChangeCheck struct {
+	Resource model.Resource
+	Start    int64
 }
 
 // StaleResource is one entry of the stale backlog.

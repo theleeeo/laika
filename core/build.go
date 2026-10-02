@@ -43,7 +43,8 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		}
 
 		res := model.Resource{Type: params.ResourceType, Id: id}
-		occVersion, staleSeq, err := idx.st.BeginBuild(ctx, res)
+		begun, err := idx.st.BeginBuild(ctx, res)
+		occVersion, staleSeq := begun.BuildIdx, begun.StaleSeq
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
@@ -255,13 +256,13 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			}
 		}
 
-		occVersion, staleSeq, err := idx.st.BeginBuild(ctx, root)
+		begun, err := idx.st.BeginBuild(ctx, root)
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			fl.fail(ctx, id)
 			continue
 		}
-		fl.begin(id, occVersion, staleSeq, expected)
+		fl.begin(id, begun.BuildIdx, begun.StaleSeq, expected)
 
 		// Same existence rule as the live path (buildOne): all selected plans
 		// run first, and only unanimity decides — a nil from one version must
@@ -301,7 +302,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 				Index:   IndexName(params.ResourceType, vd.version),
 				ID:      id,
 				Doc:     vd.doc.Doc,
-				Version: occVersion,
+				Version: begun.BuildIdx,
 			}, vd.doc.Relations); err != nil {
 				fl.salvage(ctx)
 				return err
@@ -454,13 +455,13 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 						}
 					}
 
-					occVersion, staleSeq, err := idx.st.BeginBuild(ctx, doc.Root)
+					begun, err := idx.st.BeginBuild(ctx, doc.Root)
 					if err != nil {
 						logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 						fl.fail(ctx, id)
 						continue
 					}
-					fl.begin(id, occVersion, staleSeq, expected)
+					fl.begin(id, begun.BuildIdx, begun.StaleSeq, expected)
 				}
 
 				occVersion, ok := fl.occ(id)

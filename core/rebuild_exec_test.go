@@ -168,12 +168,18 @@ func (s *rebuildRecordingStore) MarkStale(_ context.Context, rs []model.Resource
 	return nil
 }
 
-func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) (int64, int64, error) {
+func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.buildIdx++
-	return s.buildIdx, 42, nil
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42}, nil
+}
+
+func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
+
+func (s *rebuildRecordingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
+	return false, nil
 }
 
 func (s *rebuildRecordingStore) ClearStale(_ context.Context, r model.Resource, seq int64) error {

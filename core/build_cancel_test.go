@@ -60,8 +60,12 @@ func (s *cancellingStore) GetParentResources(context.Context, model.Resource) ([
 func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[string]string) error {
 	return nil
 }
-func (s *cancellingStore) BeginBuild(context.Context, model.Resource) (int64, int64, error) {
-	return 1, 0, nil
+func (s *cancellingStore) BeginBuild(context.Context, model.Resource) (BuildBegun, error) {
+	return BuildBegun{BuildIdx: 1}, nil
+}
+func (s *cancellingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
+func (s *cancellingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
+	return false, nil
 }
 func (s *cancellingStore) ClearStale(context.Context, model.Resource, int64) error { return nil }
 func (s *cancellingStore) DeleteResourceIfSeq(context.Context, model.Resource, int64) error {
