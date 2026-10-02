@@ -200,7 +200,7 @@ func (s *rebuildRecordingStore) has(prefix string) bool {
 	return false
 }
 
-func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string) error {
+func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, _ time.Duration) ([]Owned, error) {
 	var err error
 	if s.ctxAware && ctx.Err() != nil {
 		err = ctx.Err()
@@ -220,10 +220,10 @@ func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resour
 			s.record("MarkStale:%s/%s", r.Type, r.Id)
 		}
 	}
-	return err
+	return nil, err
 }
 
-func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
+func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource, _ int64) (BuildBegun, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -270,13 +270,19 @@ func (s *rebuildRecordingStore) ClearStale(_ context.Context, r model.Resource, 
 	return nil
 }
 
-func (s *rebuildRecordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq int64) error {
+func (s *rebuildRecordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq, _ int64) (FollowUp, error) {
 	s.record("DeleteResourceIfSeq:%s/%s:%d", r.Type, r.Id, seq)
-	return nil
+	return FollowUp{}, nil
 }
 
-func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int) ([]StaleResource, error) {
+func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
 	return nil, nil
+}
+
+func (s *rebuildRecordingStore) RenewOwners(context.Context, []Owned) error   { return nil }
+func (s *rebuildRecordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
+func (s *rebuildRecordingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
+	return FollowUp{}, nil
 }
 
 func (s *rebuildRecordingStore) AddChildResources(_ context.Context, parent model.Resource, _ []model.Resource) error {
@@ -1431,6 +1437,6 @@ func TestRebuild_CancelledBeforeDriftCheck_FailsTheRoot(t *testing.T) {
 	}
 }
 
-func (s *rebuildRecordingStore) RegisterChanges(context.Context, []Registration) (Registered, error) {
+func (s *rebuildRecordingStore) RegisterChanges(context.Context, []Registration, time.Duration) (Registered, error) {
 	panic("RegisterChanges: not implemented")
 }

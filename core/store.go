@@ -24,17 +24,36 @@ type Store interface {
 	// and the stale marks of the accepted items' Parents, commit together or
 	// not at all. See Registration for what is accepted. The items must name
 	// distinct resources; the caller validates that.
-	RegisterChanges(ctx context.Context, items []Registration) (Registered, error)
+	//
+	// Every row it marks — accepted items and Parents — is claimed in the
+	// same update when it has no owner or its owner's lease (lease, measured
+	// from owner_since) has expired; the outcome reports each claim's token.
+	RegisterChanges(ctx context.Context, items []Registration, lease time.Duration) (Registered, error)
 
 	// MarkStale durably records build intent for the given resources, along
 	// with the notification metadata the eventual build must run with. The
 	// metadata is stored per resource (last mark wins) so a sweep-recovered
 	// build carries the same context an inline build would have.
-	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error
+	//
+	// A lease above zero also claims each marked row that has no live owner,
+	// in the same update, and returns the claimed rows; only those may be
+	// submitted. A lease of zero marks without claiming and returns nil: the
+	// mark hands the work to the sweep and nothing is submitted.
+	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]Owned, error)
 	// BeginBuild bumps the Build Sequence, captures the current stale_seq and
 	// takes the build's start from the Change Sequence. Callers invoke it
-	// before the build's fetches.
-	BeginBuild(ctx context.Context, resource model.Resource) (BuildBegun, error)
+	// before the build's fetches. A non-zero token that is the row's owner
+	// token renews its lease (owner_since = now()); 0 is a build that owns
+	// nothing.
+	BeginBuild(ctx context.Context, resource model.Resource, token int64) (BuildBegun, error)
+	// RenewOwners renews the lease of every given ownership whose token is
+	// still the row's owner token; the others are left alone. A pool task
+	// calls it when it is dequeued.
+	RenewOwners(ctx context.Context, owned []Owned) error
+	// ReleaseOwners drops every given ownership whose token is still the
+	// row's owner token, leaving the stale mark: a failed or shed owned
+	// build, so the next change claims or the sweep rebuilds.
+	ReleaseOwners(ctx context.Context, owned []Owned) error
 	// NextChangeSeq takes a value of the Change Sequence: the start of a
 	// Rebuild plan walk, taken before the walk fetches its first page.
 	NextChangeSeq(ctx context.Context) (int64, error)
@@ -43,12 +62,25 @@ type Store interface {
 	// check's Start, i.e. its stored change_seq exceeds Start. A resource
 	// without a row has never changed.
 	AnyChangedSince(ctx context.Context, checks []ChangeCheck) (bool, error)
-	// ClearStale clears the stale mark only if staleSeq still matches.
+	// ClearStale finishes a build that owns nothing (a rebuild walk, a
+	// direct Build): it clears the stale mark, and any ownership with it,
+	// only if staleSeq still matches.
 	ClearStale(ctx context.Context, resource model.Resource, staleSeq int64) error
-	// DeleteResourceIfSeq hard-deletes a tombstoned row guarded by stale_seq.
-	DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq int64) error
-	// ListStale returns up to limit resources whose stale mark predates before.
-	ListStale(ctx context.Context, before time.Time, limit int) ([]StaleResource, error)
+	// FinishOwned finishes an owned build in one statement. If stale_seq
+	// still equals staleSeq it clears the mark and the ownership. If it moved
+	// and token is still the owner token, it re-claims the row for a
+	// follow-up and returns it. Otherwise it changes nothing and returns no
+	// follow-up.
+	FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (FollowUp, error)
+	// DeleteResourceIfSeq finishes an owned delete: it hard-deletes the
+	// tombstoned row, and its ownership with it, when stale_seq still equals
+	// staleSeq. When it moved and token is still the owner token, it
+	// re-claims the row and returns the follow-up, as FinishOwned does.
+	DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (FollowUp, error)
+	// ListStale returns up to limit resources whose stale mark predates
+	// before and that have no live owner under lease, and claims every row
+	// it returns in the same statement.
+	ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]StaleResource, error)
 }
 
 // BuildBegun is what BeginBuild returns for one resource.
@@ -70,11 +102,32 @@ type ChangeCheck struct {
 	Start    int64
 }
 
+// Owned is a resource whose ownership a statement claimed, with its owner
+// token: the row's owner_seq, which the claim set to the row's stale_seq.
+type Owned struct {
+	model.Resource
+	Token int64
+}
+
+// FollowUp is what finishing an owned build or delete hands on.
+type FollowUp struct {
+	// Token is the owner token re-claimed for the follow-up, the row's
+	// stale_seq at the re-claim; 0 means no follow-up is due. A follow-up
+	// delete is guarded by it (DeleteResourceIfSeq's staleSeq).
+	Token int64
+	// Metadata is the row's metadata: that of its last mark, in commit order.
+	Metadata map[string]string
+	// Deleted reports a tombstone: the follow-up is a delete, not a build.
+	Deleted bool
+}
+
 // StaleResource is one entry of the stale backlog.
 type StaleResource struct {
 	model.Resource
 	StaleSeq int64
-	Deleted  bool
+	// Token is the owner token ListStale claimed the row under.
+	Token   int64
+	Deleted bool
 	// Metadata is the notification metadata stored by the most recent
 	// MarkStale, replayed into the build that serves the mark.
 	Metadata map[string]string
@@ -111,6 +164,10 @@ type RegisteredItem struct {
 	// StaleSeq is the row's stale_seq after the mark, for accepted items; a
 	// delete is submitted with it (DeleteResourceIfSeq).
 	StaleSeq int64
+	// Token is the owner token the mark claimed, equal to StaleSeq; 0 when
+	// the row has a live owner, whose follow-up carries the change, so
+	// nothing is submitted for it.
+	Token int64
 }
 
 // MarkedParent is a Parent RegisterChanges marked stale, with the metadata
@@ -118,4 +175,7 @@ type RegisteredItem struct {
 type MarkedParent struct {
 	model.Resource
 	Metadata map[string]string
+	// Token is the owner token the mark claimed; 0 when the row has a live
+	// owner, so nothing is submitted for it.
+	Token int64
 }

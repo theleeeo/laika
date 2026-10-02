@@ -16,7 +16,7 @@ import (
 // the body of the StaleSweep Temporal activity; embedders without Temporal
 // can drive it from a ticker.
 func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, limit int) (int, error) {
-	entries, err := idx.st.ListStale(ctx, time.Now().Add(-threshold), limit)
+	entries, err := idx.st.ListStale(ctx, time.Now().Add(-threshold), limit, idx.ownerLease)
 	if err != nil {
 		return 0, fmt.Errorf("list stale: %w", err)
 	}
@@ -28,7 +28,7 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 	// the notification that set it, and the recovered build must replay it.
 	for _, e := range entries {
 		if e.Deleted {
-			idx.deleteOne(ctx, e.Resource, e.StaleSeq)
+			idx.deleteOne(ctx, e.Resource, e.StaleSeq, e.Token)
 			continue
 		}
 		if err := idx.Build(ctx, BuildArgs{ResourceType: e.Type, ResourceIds: []string{e.Id}, Metadata: e.Metadata}); err != nil {

@@ -14,6 +14,10 @@ type BuildArgs struct {
 	ResourceType string            `json:"resource_type"`
 	ResourceIds  []string          `json:"resource_ids,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	// OwnerTokens holds, per id, the owner token the build was claimed
+	// under (Store.MarkStale, RegisterChanges, ListStale). An id without one
+	// builds unowned: it claims nothing and finishes with ClearStale.
+	OwnerTokens map[string]int64 `json:"owner_tokens,omitempty"`
 }
 
 type RebuildArgs struct {
@@ -43,7 +47,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		}
 
 		res := model.Resource{Type: params.ResourceType, Id: id}
-		begun, err := idx.st.BeginBuild(ctx, res)
+		begun, err := idx.st.BeginBuild(ctx, res, 0)
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
@@ -260,7 +264,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			}
 		}
 
-		begun, err := idx.st.BeginBuild(ctx, root)
+		begun, err := idx.st.BeginBuild(ctx, root, 0)
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			fl.fail(ctx, id)
@@ -471,7 +475,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 						}
 					}
 
-					begun, err := idx.st.BeginBuild(ctx, doc.Root)
+					begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
 					if err != nil {
 						logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 						fl.fail(ctx, id)

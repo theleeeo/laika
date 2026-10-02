@@ -84,7 +84,7 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "ms", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	_, _, seq1, since1, _ := row(t, res)
@@ -93,7 +93,7 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 	}
 
 	time.Sleep(10 * time.Millisecond)
-	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	_, _, seq2, since2, _ := row(t, res)
@@ -113,7 +113,7 @@ func TestMarkStale_BatchWithDuplicates(t *testing.T) {
 
 	// One batch where dup appears TWICE: must not error (ON CONFLICT DO UPDATE
 	// cannot affect the same row twice in one statement without deduping).
-	if err := st.MarkStale(ctx, []model.Resource{dup, other, dup}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{dup, other, dup}, nil, 0); err != nil {
 		t.Fatalf("MarkStale with duplicate resources in one batch: %v", err)
 	}
 
@@ -136,14 +136,14 @@ func TestMarkStale_MetadataLastMarkWins(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "msm", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-1"}); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-1"}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-2"}); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, map[string]string{"fiber_operator_id": "op-2"}, 0); err != nil {
 		t.Fatal(err)
 	}
 
-	entries, err := st.ListStale(ctx, time.Now().Add(time.Minute), 100)
+	entries, err := st.ListStale(ctx, time.Now().Add(time.Minute), 100, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,10 +163,10 @@ func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "bb", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	begun, err := st.BeginBuild(ctx, res)
+	begun, err := st.BeginBuild(ctx, res, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 	if buildIdx != 1 || staleSeq != 1 {
 		t.Fatalf("got buildIdx=%d staleSeq=%d, want 1, 1", buildIdx, staleSeq)
 	}
-	begun2, err := st.BeginBuild(ctx, res)
+	begun2, err := st.BeginBuild(ctx, res, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "cs", Id: "1"}
 
-	if err := st.MarkStale(ctx, []model.Resource{res}, nil); err != nil { // seq=1
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil { // seq=1
 		t.Fatal(err)
 	}
 	if err := st.ClearStale(ctx, res, 1); err != nil {
@@ -201,8 +201,8 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	}
 
 	// Re-mark twice: clear with a stale seq must be a no-op.
-	_ = st.MarkStale(ctx, []model.Resource{res}, nil) // seq=2
-	_ = st.MarkStale(ctx, []model.Resource{res}, nil) // seq=3
+	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0) // seq=2
+	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0) // seq=3
 	if err := st.ClearStale(ctx, res, 2); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 	seq := register(t, st, core.Registration{Resource: res, Deleted: true}).Items[0].StaleSeq
 
 	// Wrong seq: row must survive.
-	if err := st.DeleteResourceIfSeq(ctx, res, seq+1); err != nil {
+	if _, err := st.DeleteResourceIfSeq(ctx, res, seq+1, 0); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -256,7 +256,7 @@ func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 	}
 
 	// Matching seq: row goes away.
-	if err := st.DeleteResourceIfSeq(ctx, res, seq); err != nil {
+	if _, err := st.DeleteResourceIfSeq(ctx, res, seq, 0); err != nil {
 		t.Fatal(err)
 	}
 	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n)
@@ -266,8 +266,8 @@ func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 
 	// Not-deleted rows are never hard-deleted even with matching seq.
 	res2 := model.Resource{Type: "dr", Id: "2"}
-	_ = st.MarkStale(ctx, []model.Resource{res2}, nil) // seq=1, deleted=false
-	if err := st.DeleteResourceIfSeq(ctx, res2, 1); err != nil {
+	_, _ = st.MarkStale(ctx, []model.Resource{res2}, nil, 0) // seq=1, deleted=false
+	if _, err := st.DeleteResourceIfSeq(ctx, res2, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res2.Type, res2.Id).Scan(&n)
@@ -284,7 +284,7 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	newRes := model.Resource{Type: "ls", Id: "new"}
 	delRes := model.Resource{Type: "ls", Id: "del"}
 
-	_ = st.MarkStale(ctx, []model.Resource{oldRes}, map[string]string{"fiber_operator_id": "op-1"})
+	_, _ = st.MarkStale(ctx, []model.Resource{oldRes}, map[string]string{"fiber_operator_id": "op-1"}, 0)
 	register(t, st, core.Registration{Resource: delRes, Deleted: true})
 	// Backdate the "old" and "del" marks.
 	for _, r := range []model.Resource{oldRes, delRes} {
@@ -294,9 +294,9 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_ = st.MarkStale(ctx, []model.Resource{newRes}, nil) // fresh mark, must be excluded by cutoff
+	_, _ = st.MarkStale(ctx, []model.Resource{newRes}, nil, 0) // fresh mark, must be excluded by cutoff
 
-	entries, err := st.ListStale(ctx, time.Now().Add(-time.Minute), 10)
+	entries, err := st.ListStale(ctx, time.Now().Add(-time.Minute), 10, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	}
 
 	// Limit applies.
-	limited, err := st.ListStale(ctx, time.Now().Add(-time.Minute), 1)
+	limited, err := st.ListStale(ctx, time.Now().Add(-time.Minute), 1, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,7 +350,7 @@ func TestCountStale_FiltersByTypeAndCutoff_ReportsOldest(t *testing.T) {
 	fresh := model.Resource{Type: "cs", Id: "fresh"}
 	otherType := model.Resource{Type: "cs-other", Id: "old"}
 
-	_ = st.MarkStale(ctx, []model.Resource{oldA, oldB, otherType}, nil)
+	_, _ = st.MarkStale(ctx, []model.Resource{oldA, oldB, otherType}, nil, 0)
 	register(t, st, core.Registration{Resource: tomb, Deleted: true})
 	backdate := func(r model.Resource, age string) {
 		if _, err := testPool.Exec(ctx,
@@ -363,7 +363,7 @@ func TestCountStale_FiltersByTypeAndCutoff_ReportsOldest(t *testing.T) {
 	backdate(oldB, "5 minutes")
 	backdate(tomb, "15 minutes") // tombstones are unfinished work: they count
 	backdate(otherType, "10 minutes")
-	_ = st.MarkStale(ctx, []model.Resource{fresh}, nil) // inside cutoff: excluded
+	_, _ = st.MarkStale(ctx, []model.Resource{fresh}, nil, 0) // inside cutoff: excluded
 
 	count, oldest, err := st.CountStale(ctx, "cs", time.Now().Add(-time.Minute))
 	if err != nil {
@@ -397,7 +397,7 @@ func TestCountStale_FiltersByTypeAndCutoff_ReportsOldest(t *testing.T) {
 // register runs RegisterChanges and fails the test on error.
 func register(t *testing.T, st *Store, items ...core.Registration) core.Registered {
 	t.Helper()
-	got, err := st.RegisterChanges(context.Background(), items)
+	got, err := st.RegisterChanges(context.Background(), items, time.Minute)
 	if err != nil {
 		t.Fatalf("RegisterChanges: %v", err)
 	}
@@ -477,7 +477,7 @@ func TestRegisterChanges_CommitsAcceptedItemsAndMarksParentsOnce(t *testing.T) {
 		{Resource: inParent, Version: 2, Metadata: meta("q")},
 		{Resource: child, Version: 3, Metadata: meta("child")},
 		{Resource: staleParent, Version: 4, Metadata: meta("rejected")}, // lower version: stale
-	})
+	}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -603,7 +603,7 @@ func TestRegisterChanges_StatementFailureCommitsNothing(t *testing.T) {
 	_, err := st.RegisterChanges(ctx, []core.Registration{
 		{Resource: item, Version: 2, Metadata: meta("x")},
 		{Resource: fresh, Version: 1},
-	})
+	}, time.Minute)
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) || pgErr.ConstraintName != "rc3_fail" {
 		t.Fatalf("want the injected constraint violation to fail the statement, got %v", err)
@@ -727,7 +727,7 @@ func TestRegisterChanges_StampsAcceptedRowsAboveAnEarlierStart(t *testing.T) {
 	seed(t, deletedRes, 2, 0, false)
 
 	fromNext := start(t, st)
-	begun, err := st.BeginBuild(ctx, r("builder"))
+	begun, err := st.BeginBuild(ctx, r("builder"), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +796,7 @@ func TestChangeSeq_UntouchedByStaleRejectionMarksAndBeginBuild(t *testing.T) {
 
 	// MarkStale, on an existing row and on a new one.
 	fresh := r("fresh-mark")
-	if err := st.MarkStale(ctx, []model.Resource{marked, fresh}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{marked, fresh}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	if seq := changeSeq(t, testPool, marked); seq != markedSeq {
@@ -809,7 +809,7 @@ func TestChangeSeq_UntouchedByStaleRejectionMarksAndBeginBuild(t *testing.T) {
 	// BeginBuild, on an existing row and on a new one.
 	freshBuild := r("fresh-build")
 	for _, res := range []model.Resource{built, freshBuild} {
-		if _, err := st.BeginBuild(ctx, res); err != nil {
+		if _, err := st.BeginBuild(ctx, res, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -868,12 +868,12 @@ func TestBeginBuild_TakesItsStartFromTheChangeSequence(t *testing.T) {
 	st := NewStore(testPool)
 	res, between := model.Resource{Type: "cq4", Id: "built"}, model.Resource{Type: "cq4", Id: "between"}
 
-	first, err := st.BeginBuild(ctx, res)
+	first, err := st.BeginBuild(ctx, res, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	register(t, st, core.Registration{Resource: between, Version: 1})
-	second, err := st.BeginBuild(ctx, res)
+	second, err := st.BeginBuild(ctx, res, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -941,7 +941,7 @@ func TestSchema_LeavesTheChangeSequenceAloneWhenEmptyOrAhead(t *testing.T) {
 	reapply("fresh sequence, empty table")
 
 	// Rows that never changed: change_seq 0 is below anything handed out.
-	if err := st.MarkStale(ctx, []model.Resource{{Type: "cq6", Id: "marked"}}, nil); err != nil {
+	if _, err := st.MarkStale(ctx, []model.Resource{{Type: "cq6", Id: "marked"}}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	reapply("fresh sequence, only unchanged rows")

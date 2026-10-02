@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/theleeeo/laika/core"
@@ -121,7 +122,7 @@ func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, ch
 // fresh Change Sequence value; a rejected item and a marked Parent keep
 // theirs. The value is drawn for every input row, so a rejected item leaves
 // a gap in the sequence, which the drift check doesn't mind.
-func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) (core.Registered, error) {
+func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, lease time.Duration) (core.Registered, error) {
 	if len(items) == 0 {
 		return core.Registered{}, nil
 	}
@@ -222,9 +223,11 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) 
 // "stale for too long" measures the oldest unserved change. The notification
 // metadata is stored alongside the mark (last mark wins) so a sweep-recovered
 // build runs with the same context an inline build would have.
-func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string) error {
+var _ core.Store = (*Store)(nil)
+
+func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
-		return nil
+		return nil, nil
 	}
 	types := make([]string, len(resources))
 	ids := make([]string, len(resources))
@@ -241,14 +244,14 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 		     metadata = EXCLUDED.metadata`,
 		types, ids, metadata,
 	)
-	return err
+	return nil, err
 }
 
 // BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version),
 // captures the current stale_seq for the race-safe ClearStale at the end of
 // the build, and takes the build's start from the Change Sequence in the same
 // statement. It leaves the row's change_seq alone: a build is not a change.
-func (s *Store) BeginBuild(ctx context.Context, resource model.Resource) (core.BuildBegun, error) {
+func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token int64) (core.BuildBegun, error) {
 	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
 		`INSERT INTO resources (type, id, build_idx)
@@ -312,18 +315,33 @@ func (s *Store) ClearStale(ctx context.Context, resource model.Resource, staleSe
 
 // DeleteResourceIfSeq hard-deletes a tombstoned row, guarded by stale_seq so a
 // concurrent re-create (which bumps the seq) wins over the in-flight delete.
-func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq int64) error {
+func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
 	_, err := s.pool.Exec(ctx,
 		`DELETE FROM resources WHERE type=$1 AND id=$2 AND stale_seq=$3 AND deleted`,
 		resource.Type, resource.Id, staleSeq,
 	)
-	return err
+	return core.FollowUp{}, err
+}
+
+// FinishOwned finishes an owned build; see core.Store.
+func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
+	return core.FollowUp{}, errors.New("FinishOwned: not implemented (L1.4 lane A)")
+}
+
+// RenewOwners renews the leases of the given ownerships; see core.Store.
+func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) error {
+	return errors.New("RenewOwners: not implemented (L1.4 lane A)")
+}
+
+// ReleaseOwners drops the given ownerships; see core.Store.
+func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
+	return errors.New("ReleaseOwners: not implemented (L1.4 lane A)")
 }
 
 // ListStale returns up to limit resources whose stale mark is older than
 // before, oldest first, including delete tombstones. Each entry carries the
 // metadata stored by its most recent MarkStale.
-func (s *Store) ListStale(ctx context.Context, before time.Time, limit int) ([]core.StaleResource, error) {
+func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]core.StaleResource, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT type, id, stale_seq, deleted, metadata FROM resources
 		 WHERE stale_since IS NOT NULL AND stale_since < $1

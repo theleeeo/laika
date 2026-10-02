@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/projection"
@@ -61,6 +62,13 @@ type Config struct {
 	// requests instead of one unbounded payload. Default 500.
 	RebuildChunkSize int
 
+	// OwnerLease is how long a claimed build owner holds its resource
+	// without renewing: a mark of a row whose owner renewed (claim, dequeue,
+	// BeginBuild) within it doesn't submit another inline build. Size it
+	// above an inline build's queue wait plus its run, or a change may claim
+	// and submit a duplicate build. Default 30s.
+	OwnerLease time.Duration
+
 	// SearchMiddlewares wrap the search path. They run outermost-first in
 	// registration order: []{A, B} executes A → B → the Indexer's own
 	// validate/normalize/backend call. A middleware may authorize the request,
@@ -101,6 +109,8 @@ type Indexer struct {
 
 	rebuildChunkSize int
 
+	ownerLease time.Duration
+
 	temporal  client.Client
 	taskQueue string
 
@@ -120,6 +130,7 @@ type Indexer struct {
 const (
 	defaultPoolSize         = 10
 	defaultRebuildChunkSize = 500
+	defaultOwnerLease       = 30 * time.Second
 )
 
 // New creates a new Indexer with the given configuration.
@@ -162,6 +173,11 @@ func New(cfg Config) (*Indexer, error) {
 	idx.rebuildChunkSize = cfg.RebuildChunkSize
 	if idx.rebuildChunkSize <= 0 {
 		idx.rebuildChunkSize = defaultRebuildChunkSize
+	}
+
+	idx.ownerLease = cfg.OwnerLease
+	if idx.ownerLease <= 0 {
+		idx.ownerLease = defaultOwnerLease
 	}
 
 	taskQueue := cfg.TaskQueue

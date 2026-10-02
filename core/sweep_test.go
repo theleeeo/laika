@@ -17,7 +17,7 @@ type staleListingStore struct {
 	entries []StaleResource
 }
 
-func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit int) ([]StaleResource, error) {
+func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit int, _ time.Duration) ([]StaleResource, error) {
 	s.record("ListStale")
 	if len(s.entries) > limit {
 		return s.entries[:limit], nil

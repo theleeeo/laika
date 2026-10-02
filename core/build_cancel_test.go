@@ -60,10 +60,10 @@ func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]
 func (s *cancellingStore) GetParentResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }
-func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[string]string) error {
-	return nil
+func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[string]string, time.Duration) ([]Owned, error) {
+	return nil, nil
 }
-func (s *cancellingStore) BeginBuild(context.Context, model.Resource) (BuildBegun, error) {
+func (s *cancellingStore) BeginBuild(context.Context, model.Resource, int64) (BuildBegun, error) {
 	return BuildBegun{BuildIdx: 1}, nil
 }
 func (s *cancellingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
@@ -71,11 +71,16 @@ func (s *cancellingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool,
 	return false, nil
 }
 func (s *cancellingStore) ClearStale(context.Context, model.Resource, int64) error { return nil }
-func (s *cancellingStore) DeleteResourceIfSeq(context.Context, model.Resource, int64) error {
-	return nil
+func (s *cancellingStore) DeleteResourceIfSeq(context.Context, model.Resource, int64, int64) (FollowUp, error) {
+	return FollowUp{}, nil
 }
-func (s *cancellingStore) ListStale(context.Context, time.Time, int) ([]StaleResource, error) {
+func (s *cancellingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
 	return nil, nil
+}
+func (s *cancellingStore) RenewOwners(context.Context, []Owned) error   { return nil }
+func (s *cancellingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
+func (s *cancellingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
+	return FollowUp{}, nil
 }
 
 // A cancelled ctx must abort the all-of-type rebuild loop with the ctx error
@@ -113,6 +118,6 @@ func TestRebuildAll_CancelledContext_AbortsDocLoop(t *testing.T) {
 	}
 }
 
-func (s *cancellingStore) RegisterChanges(context.Context, []Registration) (Registered, error) {
+func (s *cancellingStore) RegisterChanges(context.Context, []Registration, time.Duration) (Registered, error) {
 	panic("RegisterChanges: not implemented")
 }

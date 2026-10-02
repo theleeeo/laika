@@ -55,7 +55,7 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 		return []RegisterStatus{}, nil
 	}
 
-	reg, err := idx.st.RegisterChanges(ctx, items)
+	reg, err := idx.st.RegisterChanges(ctx, items, idx.ownerLease)
 	if err != nil {
 		return nil, fmt.Errorf("registering %d changes: %w", len(items), err)
 	}
@@ -88,7 +88,7 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 			continue
 		}
 		if !idx.submit(ctx, wait, func(taskCtx context.Context) {
-			idx.deleteOne(taskCtx, res, seq)
+			idx.deleteOne(taskCtx, res, seq, it.Token)
 		}) {
 			slog.Info(notSubmittedMsg(wait, "tombstone left for sweep"),
 				slog.String("type", res.Type), slog.String("id", res.Id))

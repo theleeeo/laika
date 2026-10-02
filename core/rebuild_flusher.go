@@ -208,7 +208,7 @@ func (f *rebuildFlusher) dropPending(id string) {
 }
 
 func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
-	if err := f.idx.st.MarkStale(ctx, []model.Resource{f.root(id)}, f.metadata); err != nil {
+	if _, err := f.idx.st.MarkStale(ctx, []model.Resource{f.root(id)}, f.metadata, 0); err != nil {
 		slog.Error("failed to mark rebuilt resource stale; sweep cannot recover it",
 			slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
 	}
@@ -388,7 +388,7 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 	for id := range f.state {
 		roots = append(roots, f.root(id))
 	}
-	if err := f.idx.st.MarkStale(sctx, roots, f.metadata); err != nil {
+	if _, err := f.idx.st.MarkStale(sctx, roots, f.metadata, 0); err != nil {
 		slog.Error("failed to mark unfinished rebuild resources stale; sweep cannot recover them",
 			slog.String("type", f.resourceType), slog.Int("count", len(roots)), slog.String("error", err.Error()))
 	}

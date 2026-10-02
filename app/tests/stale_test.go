@@ -129,7 +129,7 @@ func (t *TestSuite) Test_SweepStale_FinishesTombstone() {
 	// Simulate a shed inline delete: tombstone the row directly, no pool work.
 	_, err = t.st.RegisterChanges(t.T().Context(), []core.Registration{
 		{Resource: model.Resource{Type: "a", Id: "1"}, Deleted: true},
-	})
+	}, time.Minute)
 	t.Require().NoError(err)
 	t.Require().Equal(1, t.resourceRowCount("a", "1"), "tombstone must leave the row present until swept")
 

@@ -88,15 +88,15 @@ func (s *recordingStore) indexOf(prefix string) int {
 }
 
 // MarkStale fails on a done ctx, as a real store's query would.
-func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string) error {
+func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, _ time.Duration) ([]Owned, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	s.record("MarkStale:%d", len(rs))
 	s.signalMarked()
-	return nil
+	return nil, nil
 }
-func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
+func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, _ int64) (BuildBegun, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
 	return BuildBegun{BuildIdx: 1, StaleSeq: 3, Start: s.start}, nil
 }
@@ -115,12 +115,17 @@ func (s *recordingStore) ClearStale(_ context.Context, r model.Resource, seq int
 	s.record("ClearStale:%s/%s:%d", r.Type, r.Id, seq)
 	return nil
 }
-func (s *recordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq int64) error {
+func (s *recordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq, _ int64) (FollowUp, error) {
 	s.record("DeleteResourceIfSeq:%s/%s:%d", r.Type, r.Id, seq)
-	return nil
+	return FollowUp{}, nil
 }
-func (s *recordingStore) ListStale(context.Context, time.Time, int) ([]StaleResource, error) {
+func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
 	return nil, nil
+}
+func (s *recordingStore) RenewOwners(context.Context, []Owned) error   { return nil }
+func (s *recordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
+func (s *recordingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
+	return FollowUp{}, nil
 }
 func (s *recordingStore) AddChildResources(context.Context, model.Resource, []model.Resource) error {
 	return nil
@@ -136,7 +141,7 @@ func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource) err
 	s.record("RemoveResource:%s/%s", r.Type, r.Id)
 	return nil
 }
-func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration) (Registered, error) {
+func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration, _ time.Duration) (Registered, error) {
 	s.record("RegisterChanges:%d", len(items))
 	s.mu.Lock()
 	s.registrations = append(s.registrations, items)
