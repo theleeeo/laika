@@ -10,6 +10,12 @@ We chose this for three reasons:
 
 The Version field _is_ load-bearing — the drift check (see [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md)) compares observed Versions against the stored Version written from notifications. Notifications carry "what version of the resource you changed", not "what the resource now contains".
 
+> **Note (2026-10-02, runbook step L1.3):** the Version field is now
+> load-bearing only for stale rejection: a notification is dropped unless its
+> Version is above the resource's stored one (`0` is always accepted). The
+> drift check no longer reads it; it compares the Change Sequence — see the
+> note of the same date on [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md).
+
 **Future extension.** An optional root-data payload may be added so that, when an upstream chooses to include it, the indexer can write the root fields into the document immediately (giving fast field-level visibility) while the slower relation fanout continues in the background. This sits on top of the current model — when the payload is absent, behaviour is unchanged. Build Sequence and drift-check remain the consistency mechanism.
 
 **Implication for contributors:** do not add required data fields to `Notification`. If a future feature needs upstream-supplied data, it must be optional and the indexer must continue to produce correct documents when it is absent.

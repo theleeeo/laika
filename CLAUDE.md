@@ -70,7 +70,7 @@ Search path: `app/server/SearcherServer` → `core.Indexer.Search` → `SearchBa
 ### Key Interfaces (root module)
 
 - **`core.SearchBackend`** — implemented by `backend/elasticsearch`; decouples Indexer from ES
-- **`core.Store`** — implemented by `storage/postgres`; the relation graph plus stale-mark state (`RegisterChanges`, `MarkStale`, `BeginBuild`, `ClearStale`, `DeleteResourceIfSeq`, `ListStale`)
+- **`core.Store`** — implemented by `storage/postgres`; the relation graph plus stale-mark state (`RegisterChanges`, `MarkStale`, `BeginBuild`, `ClearStale`, `DeleteResourceIfSeq`, `ListStale`) and the drift check on the Change Sequence (`NextChangeSeq`, `AnyChangedSince`)
 - **`app/source.Provider`** — implemented by `app/source.GRPCProvider`; data fetcher used by DSL plans
 
 Both `Store` and `SearchBackend` have exactly one implementation each; the interfaces survive as test seams (unit tests mock them to avoid Docker), not as swap points.
@@ -97,7 +97,7 @@ Both `Store` and `SearchBackend` have exactly one implementation each; the inter
 - **Mark stale before you build**: every build-triggering path (ingest fanout via `RegisterChanges`, drift-check re-build, ADR 0006 parent cascade via `MarkStale`) marks in Postgres *before* submitting the inline build. The mark is the durability; the pool is only the accelerator. Reversing the order reintroduces silent loss on shed or crash. The mark also stores the notification's metadata (last mark wins), which the sweep replays into the recovering build. See [ADR 0008](docs/adr/0008-stale-mark-inline-builds-and-temporal-slow-lane.md).
 - **Seq-guarded clear**: a build captures `stale_seq` at `BeginBuild` and clears (`ClearStale`) only if it is unchanged; a newer Notification that moved the counter leaves the row stale for its own build or the sweep. Never null `stale_since` unconditionally.
 - **At-least-once via mark + sweep**: durability is the stale mark plus the Temporal `StaleSweep`, not a job-queue retry count. A resource whose Type was removed from config stays stale forever (logged by the sweep) — this is a known limitation.
-- **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).
+- **Distributed-safe**: multiple indexer instances run concurrently; no per-Resource serialization guarantee. The drift check compares the Change Sequence, never upstream Versions: each build takes a start from it before its fetches (`BeginBuild`, or `NextChangeSeq` once per Rebuild plan walk) and re-schedules if a resource it fetched has `resources.change_seq` above that start. See [ADR 0002](docs/adr/0002-distributed-safety-via-occ-and-drift-check-not-locks.md).
 - **Build Sequence drives OCC**: every ES write carries the Resource's Build Sequence (stored in `resources.build_idx`) sent as the `external_gte` version, so concurrent Builds and Rebuilds of the same Document land in counter order.
 - **Stale Version rejection**: a Notification with `Version > 0` enables drop-on-stale; `0` means always accept.
 - **Relation graph drives fanout**: affected Parent Resources are found by querying the Postgres Relation graph, not static config.

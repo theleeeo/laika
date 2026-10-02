@@ -7,13 +7,16 @@ A distributed search indexing engine that keeps Elasticsearch documents in sync 
 ### Versioning
 
 **Version**:
-The upstream service's notion of how current a resource is. Carried on a [[notification]] and on every observation of a related resource. Used for version-control style stale-rejection: a notification with an older Version than what is already stored is dropped. `0` means the upstream service does not track versions for this resource.
+The upstream service's notion of how current a resource is, carried on a [[notification]]. Monotonic per resource, and compared only with that resource's stored Version, for stale rejection: a notification whose Version is not above the stored one is dropped. `0` means the upstream service does not track versions for this resource. Versions of different resources, or from different producers, are never compared: the drift check reads the [[change sequence]], not Versions.
 
 **Schema Version**:
 The versioned shape of an indexed document — which fields are present, which relations are pulled, which index name it lives under (e.g. `a_search_v2`). A single resource type can have multiple Schema Versions in flight simultaneously, used for zero-downtime migrations between document shapes.
 
 **Build Sequence**:
 The indexer's own per-resource monotonic counter, bumped on every build of a given resource. Used as the value for Elasticsearch's `external_gte` versioning so that concurrent rebuilds of the same document land in the correct order. Has nothing to do with the upstream — it exists purely to serialise writes to a single ES document across distributed indexer instances.
+
+**Change Sequence**:
+A global Postgres sequence the indexer owns (`change_sequence`). Every change `RegisterChanges` accepts — upserts, version-`0` notifications and deletes alike — is stamped with its next value in `resources.change_seq`; a stale-rejected notification, a [[stale mark]] and `BeginBuild` leave the stamp alone. Each build takes a start from the same sequence before its fetches — from `BeginBuild`, or, in a [[rebuild]] walk, one per plan walk before its first page — and the drift check asks whether any resource the build fetched has a `change_seq` above that start; if so, the build re-schedules itself. Like the Build Sequence it has nothing to do with upstream Versions, so no upstream clock, unit or precision can make the check loop.
 
 ### The graph
 
@@ -59,7 +62,7 @@ A Temporal-scheduled recovery pass (`StaleSweep` workflow, schedule `laika-stale
 A resource row flagged `deleted = true` (with `version` reset to `0`) whose Elasticsearch documents and Relation edges are still being cleaned up. A delete-Notification marks the row rather than removing it, so a failed ES delete has something durable to retry; the hard delete of the row happens only after ES cleanup succeeds, guarded by the captured `stale_seq` so a concurrent re-create wins. The [[sweep]] retries lingering tombstones.
 
 **Rebuild**:
-The reset path: produce and write documents for one, many, or all Resources of a Type without honouring prior state. Used to populate a newly-added Schema Version, to recover from corruption, or to reset documents to a new shape. Always wins over any concurrent Build because it stamps a fresh Build Sequence.
+The reset path: produce and write documents for one, many, or all Resources of a Type without honouring prior state. Used to populate a newly-added Schema Version, to recover from corruption, or to reset documents to a new shape. Always wins over any concurrent Build because it stamps a fresh Build Sequence. A walk fetches each page before its roots' builds begin, so it re-schedules a root that changed after its page was fetched — or whose child did — rather than leave the page's older data in place.
 
 **Rebuild cursor**:
 The durable position of an all-of-type [[rebuild]] walk: a `{plan version, page token}` pair meaning every Resource listed by the pages before that token has settled — its [[document]]s written and its [[stale mark]] cleared — or is durably marked stale for the [[sweep]]. Carried in the `RunRebuild` activity's Temporal heartbeat details, so a retried attempt resumes there instead of walking again from the head. Only a walk with exactly one active [[plan]] has such a position — a single-version Type, or a version-targeted backfill — and it records one only at a page boundary it has fully consumed and flushed; a multi-plan walk has none and restarts from scratch. The page token must mean the same place when it is redeemed as when it was written, which is a property of the upstream listing, not something the indexer can enforce (ADR 0011).
