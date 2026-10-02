@@ -359,7 +359,7 @@ func TestBuild_DriftHit_ReschedulesTheRootMarkFirst(t *testing.T) {
 		t.Fatalf("a hit must re-mark once and re-build (checks=%d marks=%d begins=%d): %v",
 			len(check), len(mark), len(begins), calls)
 	}
-	if !(check[0] < mark[0] && mark[0] < begins[1]) {
+	if check[0] >= mark[0] || mark[0] >= begins[1] {
 		t.Fatalf("the re-mark must follow the hit and precede the second build: %v", calls)
 	}
 	checks := st.checksSnapshot()

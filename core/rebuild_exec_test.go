@@ -151,8 +151,10 @@ type rebuildRecordingStore struct {
 	// resource fail, so a re-build after a failed query settles.
 	errBudget   atomic.Int32
 	errChildren map[string]bool
-	// changeSeqErr fails every NextChangeSeq.
-	changeSeqErr error
+	// changeSeqErr fails every NextChangeSeq from the changeSeqErrFrom-th
+	// call on (1-based); 0 fails every call.
+	changeSeqErr     error
+	changeSeqErrFrom int64
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -203,12 +205,12 @@ func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) 
 
 func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
-	if s.changeSeqErr != nil {
-		return 0, s.changeSeqErr
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.changeSeqs++
+	if s.changeSeqErr != nil && s.changeSeqs >= s.changeSeqErrFrom {
+		return 0, s.changeSeqErr
+	}
 	return 1000 + s.changeSeqs, nil
 }
 
@@ -722,7 +724,7 @@ func TestRebuildAll_TakesOneWalkStartPerPlan_BeforeItsFirstFetch(t *testing.T) {
 	if len(starts) != 2 || len(exec1) != 1 || len(exec2) != 1 {
 		t.Fatalf("two plan walks take two walk starts, got %d: %v", len(starts), calls)
 	}
-	if !(starts[0] < exec1[0] && exec1[0] < starts[1] && starts[1] < exec2[0]) {
+	if starts[0] >= exec1[0] || exec1[0] >= starts[1] || starts[1] >= exec2[0] {
 		t.Fatalf("each walk start must precede that plan's first fetch: %v", calls)
 	}
 }
@@ -752,13 +754,14 @@ func TestRebuildAll_RootsCheckThemselvesFromTheWalkStart(t *testing.T) {
 // A root changed after the walk start is re-scheduled like a changed child:
 // marked first, then re-built. Here the changed root has no relations at all.
 func TestRebuildAll_ChangedRoot_IsRescheduled(t *testing.T) {
-	// Budget 2: the batched hit and root 2's narrow hit; root 2's live
-	// re-build checks children only and has none.
+	// Budget 2: the batched hit and root 2's narrow hit. Root 2's live
+	// re-build is served root 2's own document: it checks children only, has
+	// none, and so makes no drift query.
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"2": true}}
 	st.driftBudget.Store(2)
-	err := rebuildAllProducts(t, st, &staticExecuter{docs: []projection.BuildDoc{
-		productDocWith("1", "c1"), productDocWith("2"),
-	}})
+	exec := childDocs(map[string][]string{"1": {"c1"}, "2": nil})
+	exec.docs = []projection.BuildDoc{productDocWith("1", "c1"), productDocWith("2")}
+	err := rebuildAllProducts(t, st, exec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,6 +777,9 @@ func TestRebuildAll_ChangedRoot_IsRescheduled(t *testing.T) {
 	}
 	if checks := walkChecks(st); len(checks) != 3 {
 		t.Fatalf("a hit must narrow: the batched query, then one per root, got %v: %v", checks, calls)
+	}
+	if all, walk := st.checksSnapshot(), walkChecks(st); len(all) != len(walk) {
+		t.Fatalf("root 2's live re-build has no children and must make no drift query: %v", all)
 	}
 }
 
@@ -844,6 +850,32 @@ func TestRebuildAll_WalkStartError_AbortsBeforeAnyFetch(t *testing.T) {
 	}
 	if calls := st.callsSnapshot(); countPrefix(calls, "Execute:") != 0 || countPrefix(calls, "BeginBuild:") != 0 {
 		t.Fatalf("no plan may execute without a walk start: %v", calls)
+	}
+}
+
+// A later plan's failed walk start aborts the walk before that plan executes,
+// and salvage marks the roots an earlier plan began — still awaiting the
+// failed plan's documents — stale instead of clearing them.
+func TestRebuildAll_LaterWalkStartError_SalvagesBegunRoots(t *testing.T) {
+	st := &rebuildRecordingStore{changeSeqErr: errors.New("sequence unavailable"), changeSeqErrFrom: 2}
+	err := rebuildAllProducts(t, st,
+		recordingExecute(st, 1, productDocWith("1")),
+		recordingExecute(st, 2, productDocWith("1")))
+	if err == nil || !strings.Contains(err.Error(), "sequence unavailable") {
+		t.Fatalf("a failed walk start must fail the rebuild, got %v", err)
+	}
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "Execute:v1") != 1 || countPrefix(calls, "BeginBuild:product/1") != 1 {
+		t.Fatalf("plan 1 must execute and begin root 1: %v", calls)
+	}
+	if countPrefix(calls, "Execute:v2") != 0 {
+		t.Fatalf("plan 2 may not execute without a walk start: %v", calls)
+	}
+	if countPrefix(calls, "MarkStale:product/1") == 0 {
+		t.Fatalf("root 1 was begun but never settled; salvage must mark it stale: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/1") != 0 {
+		t.Fatalf("an unsettled root must not be cleared: %v", calls)
 	}
 }
 
