@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 
 	"github.com/theleeeo/laika/core"
@@ -216,45 +215,6 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration) 
 		return core.Registered{}, err
 	}
 	return out, nil
-}
-
-// AnyResourceVersionDrifted reports whether any of the given versioned
-// resources now has a version in the resources table that is strictly greater
-// than the observed version. Resources with ObservedVersion == 0 are skipped
-// (provider didn't supply a version). Resources absent from the table are
-// treated as not-drifted.
-func (s *Store) AnyResourceVersionDrifted(ctx context.Context, observed []model.VersionedResource) (bool, error) {
-	// Filter to those with a known observed version.
-	var types []string
-	var ids []string
-	var versions []int64
-	for _, r := range observed {
-		if r.Version <= 0 {
-			continue
-		}
-		types = append(types, r.Type)
-		ids = append(ids, r.Id)
-		versions = append(versions, r.Version)
-	}
-	if len(types) == 0 {
-		return false, nil
-	}
-
-	var found int
-	err := s.pool.QueryRow(ctx,
-		`SELECT 1
-		 FROM resources r, unnest($1::text[], $2::text[], $3::bigint[]) AS x(type, id, observed_version)
-		 WHERE r.type = x.type AND r.id = x.id AND r.version > x.observed_version
-		 LIMIT 1`,
-		types, ids, versions,
-	).Scan(&found)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
 }
 
 // MarkStale durably records build intent for the given resources: bump
