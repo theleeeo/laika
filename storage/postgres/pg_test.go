@@ -167,18 +167,18 @@ func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 		t.Fatal(err)
 	}
 	begun, err := st.BeginBuild(ctx, res)
-	buildIdx, staleSeq := begun.BuildIdx, begun.StaleSeq
 	if err != nil {
 		t.Fatal(err)
 	}
+	buildIdx, staleSeq := begun.BuildIdx, begun.StaleSeq
 	if buildIdx != 1 || staleSeq != 1 {
 		t.Fatalf("got buildIdx=%d staleSeq=%d, want 1, 1", buildIdx, staleSeq)
 	}
 	begun2, err := st.BeginBuild(ctx, res)
-	buildIdx2 := begun2.BuildIdx
 	if err != nil {
 		t.Fatal(err)
 	}
+	buildIdx2 := begun2.BuildIdx
 	if buildIdx2 != 2 {
 		t.Fatalf("build_idx must increment: got %d", buildIdx2)
 	}
