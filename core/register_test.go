@@ -19,7 +19,15 @@ import (
 type recordingStore struct {
 	mu    sync.Mutex
 	calls []string
-	drift atomic.Bool // one-shot: report drift on the first AnyResourceVersionDrifted
+	// drift is one-shot: report drift on the first AnyChangedSince (the
+	// flusher's AnyResourceVersionDrifted shares it). driftErr fails every
+	// AnyChangedSince.
+	drift    atomic.Bool
+	driftErr error
+	// start is every BeginBuild's BuildBegun.Start; checks records every
+	// AnyChangedSince batch.
+	start  int64
+	checks [][]ChangeCheck
 	// marked, when set, receives (non-blocking) after every MarkStale and
 	// RegisterChanges: the point past which a WaitForSlot registration may wait.
 	marked chan struct{}
@@ -65,6 +73,12 @@ func (s *recordingStore) callsSnapshot() []string {
 	return append([]string(nil), s.calls...)
 }
 
+func (s *recordingStore) checksSnapshot() [][]ChangeCheck {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]ChangeCheck(nil), s.checks...)
+}
+
 func (s *recordingStore) indexOf(prefix string) int {
 	for i, c := range s.callsSnapshot() {
 		if len(c) >= len(prefix) && c[:len(prefix)] == prefix {
@@ -85,11 +99,18 @@ func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ m
 }
 func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource) (BuildBegun, error) {
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
-	return BuildBegun{BuildIdx: 1, StaleSeq: 3}, nil
+	return BuildBegun{BuildIdx: 1, StaleSeq: 3, Start: s.start}, nil
 }
-func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
-func (s *recordingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
-	return false, nil
+func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
+	s.record("NextChangeSeq")
+	return 0, nil
+}
+func (s *recordingStore) AnyChangedSince(_ context.Context, checks []ChangeCheck) (bool, error) {
+	s.record("AnyChangedSince:%d", len(checks))
+	s.mu.Lock()
+	s.checks = append(s.checks, append([]ChangeCheck(nil), checks...))
+	s.mu.Unlock()
+	return s.drift.Swap(false), s.driftErr
 }
 func (s *recordingStore) ClearStale(_ context.Context, r model.Resource, seq int64) error {
 	s.record("ClearStale:%s/%s:%d", r.Type, r.Id, seq)
@@ -266,6 +287,152 @@ func TestBuildOne_Drift_RemarksStale_SoGuardedClearIsNoop(t *testing.T) {
 	marks, begins := st.count("MarkStale"), st.count("BeginBuild")
 	if marks < 1 || begins < 2 {
 		t.Fatalf("drift must re-mark and re-build (marks=%d begins=%d): %v", marks, begins, calls)
+	}
+}
+
+func productDocWith(id string, children ...string) projection.BuildDoc {
+	rels := make([]model.VersionedResource, len(children))
+	for i, c := range children {
+		rels[i] = model.VersionedResource{Resource: product(c), Version: 1}
+	}
+	return projection.BuildDoc{
+		Root:      product(id),
+		Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
+		Relations: rels,
+	}
+}
+
+// The drift check is one AnyChangedSince over every child the plans fetched,
+// across every plan, each measured from the build's start; the root is not
+// checked.
+func TestBuild_DriftCheck_ChecksEveryFetchedChildFromTheBuildStart(t *testing.T) {
+	st := &recordingStore{start: 77}
+	idx := newHotPathIndexer(st, 2, 4)
+	idx.plans = map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1", "c2")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c3")}}},
+	}}
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := st.checksSnapshot()
+	if len(checks) != 1 {
+		t.Fatalf("one drift check per build, got %d: %v", len(checks), st.callsSnapshot())
+	}
+	want := []ChangeCheck{{product("c1"), 77}, {product("c2"), 77}, {product("c3"), 77}}
+	if fmt.Sprint(checks[0]) != fmt.Sprint(want) {
+		t.Fatalf("checks %v, want %v", checks[0], want)
+	}
+}
+
+// A hit re-schedules the root mark-first: the drift's MarkStale lands before
+// the root's second BeginBuild, and the second build runs from its own start.
+func TestBuild_DriftHit_ReschedulesTheRootMarkFirst(t *testing.T) {
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"c1": true}}
+	st.driftBudget.Store(1)
+	idx := newHotPathIndexer(st, 2, 4)
+	idx.plans = map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+	}}
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := st.callsSnapshot()
+	var check, mark, begins []int
+	for i, c := range calls {
+		switch c {
+		case "AnyChangedSince:1":
+			check = append(check, i)
+		case "MarkStale:product/1":
+			mark = append(mark, i)
+		case "BeginBuild:product/1":
+			begins = append(begins, i)
+		}
+	}
+	if len(check) != 2 || len(mark) != 1 || len(begins) != 2 {
+		t.Fatalf("a hit must re-mark once and re-build (checks=%d marks=%d begins=%d): %v",
+			len(check), len(mark), len(begins), calls)
+	}
+	if !(check[0] < mark[0] && mark[0] < begins[1]) {
+		t.Fatalf("the re-mark must follow the hit and precede the second build: %v", calls)
+	}
+	checks := st.checksSnapshot()
+	if checks[0][0].Start != 101 || checks[1][0].Start != 102 {
+		t.Fatalf("each build checks from its own start, got %v", checks)
+	}
+}
+
+func TestBuild_DriftMiss_SchedulesNothing(t *testing.T) {
+	st := &recordingStore{}
+	idx := newHotPathIndexer(st, 2, 4)
+	idx.plans = map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+	}}
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if st.count("AnyChangedSince") != 1 || st.count("MarkStale") != 0 || st.count("BeginBuild") != 1 {
+		t.Fatalf("a miss is checked once and schedules nothing: %v", st.callsSnapshot())
+	}
+}
+
+func TestBuild_NoRelations_MakesNoDriftCheck(t *testing.T) {
+	st := &recordingStore{}
+	st.drift.Store(true)
+	idx := newHotPathIndexer(st, 2, 4)
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if st.count("AnyChangedSince") != 0 || st.count("MarkStale") != 0 {
+		t.Fatalf("a build without children has nothing to check: %v", st.callsSnapshot())
+	}
+}
+
+// A failed drift query fails the build: the stale mark survives for the sweep
+// and nothing is re-scheduled.
+func TestBuild_DriftQueryError_LeavesTheMarkAndSchedulesNothing(t *testing.T) {
+	st := &recordingStore{driftErr: errors.New("db down")}
+	idx := newHotPathIndexer(st, 2, 4)
+	idx.plans = map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+	}}
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := st.callsSnapshot()
+	if st.count("AnyChangedSince") != 1 {
+		t.Fatalf("the drift query must run: %v", calls)
+	}
+	if st.count("ClearStale") != 0 {
+		t.Fatalf("a failed drift check must not clear the mark: %v", calls)
+	}
+	if st.count("MarkStale") != 0 || st.count("BeginBuild") != 1 {
+		t.Fatalf("a failed drift check re-schedules nothing: %v", calls)
 	}
 }
 

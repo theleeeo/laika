@@ -44,7 +44,6 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 
 		res := model.Resource{Type: params.ResourceType, Id: id}
 		begun, err := idx.st.BeginBuild(ctx, res)
-		occVersion, staleSeq := begun.BuildIdx, begun.StaleSeq
 		if err != nil {
 			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
@@ -52,7 +51,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		}
 
 		// TODO: Build multiple documents in a batch.
-		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, occVersion); err != nil {
+		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, begun.BuildIdx, begun.Start); err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 			continue
@@ -60,7 +59,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 
 		// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
 		// including buildOne's own drift re-mark, which must survive this clear.
-		if err := idx.st.ClearStale(ctx, res, staleSeq); err != nil {
+		if err := idx.st.ClearStale(ctx, res, begun.StaleSeq); err != nil {
 			logger.Warn("clear stale failed; sweep may rebuild redundantly",
 				slog.String("id", id), slog.String("error", err.Error()))
 		}
@@ -98,7 +97,7 @@ func executeAllPlans(ctx context.Context, plans []projection.Plan, req projectio
 	return docs, missing, nil
 }
 
-func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion int64) error {
+func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) error {
 	if occVersion <= 0 {
 		return fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
 	}
@@ -181,15 +180,20 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return err
 	}
 
-	// Drift check.
-	//
-	// Compare the version we observed from the provider for each child against
-	// the version currently stored in the resources table (written by
-	// RegisterChange). If a child's stored version is higher than what we
-	// fetched, a concurrent update occurred while our edge was missing and the
-	// parent fanout could not reach us. Re-enqueue to converge.
+	// Drift check (ADR 0002). start is the Change Sequence value BeginBuild
+	// took before the fetches. A child whose change_seq exceeds it had a
+	// change accepted after the build started that the fetch may have missed
+	// — e.g. while our edge was missing, so fanout could not reach us.
+	// Re-schedule (mark first) to converge. The root is not checked: its
+	// BeginBuild precedes its own fetch, so a root change numbered below
+	// start is seen by the fetch, and one above it bumped stale_seq, so the
+	// guarded ClearStale leaves the mark for the follow-up build.
 	if len(allRelations) > 0 {
-		drift, err := idx.st.AnyResourceVersionDrifted(ctx, allRelations)
+		checks := make([]ChangeCheck, len(allRelations))
+		for i, r := range allRelations {
+			checks[i] = ChangeCheck{Resource: r.Resource, Start: start}
+		}
+		drift, err := idx.st.AnyChangedSince(ctx, checks)
 		if err != nil {
 			return fmt.Errorf("drift check for %s/%s: %w", resourceType, resourceID, err)
 		}

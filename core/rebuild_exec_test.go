@@ -137,11 +137,27 @@ type rebuildRecordingStore struct {
 	mu       sync.Mutex
 	calls    []string
 	buildIdx int64
-	// driftBudget bounds how many AnyResourceVersionDrifted calls report
-	// drift for driftChildren, so a drift-triggered re-build settles instead
-	// of looping forever.
+	// changeSeqs counts NextChangeSeq calls; checks records every
+	// AnyChangedSince batch.
+	changeSeqs int64
+	checks     [][]ChangeCheck
+	// driftBudget bounds how many AnyChangedSince (and, for the flusher,
+	// AnyResourceVersionDrifted) calls report drift for driftChildren, so a
+	// drift-triggered re-build settles instead of looping forever.
 	driftBudget   atomic.Int32
 	driftChildren map[string]bool
+}
+
+func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]ChangeCheck(nil), s.checks...)
+}
+
+func (s *rebuildRecordingStore) callsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
 }
 
 func (s *rebuildRecordingStore) record(format string, args ...any) {
@@ -173,12 +189,29 @@ func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.buildIdx++
-	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42}, nil
+	// Start = 100 + BuildIdx: distinct per build, so a test can tell whose
+	// start a check carries.
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42, Start: 100 + s.buildIdx}, nil
 }
 
-func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
+func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) {
+	s.record("NextChangeSeq")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.changeSeqs++
+	return 1000 + s.changeSeqs, nil
+}
 
-func (s *rebuildRecordingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
+func (s *rebuildRecordingStore) AnyChangedSince(_ context.Context, checks []ChangeCheck) (bool, error) {
+	s.record("AnyChangedSince:%d", len(checks))
+	s.mu.Lock()
+	s.checks = append(s.checks, append([]ChangeCheck(nil), checks...))
+	s.mu.Unlock()
+	for _, c := range checks {
+		if s.driftChildren[c.Resource.Id] && s.driftBudget.Add(-1) >= 0 {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
