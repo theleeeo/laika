@@ -126,9 +126,6 @@ func (s *recordingStore) AddChildResources(context.Context, model.Resource, []mo
 	return nil
 }
 func (s *recordingStore) AddRelations(context.Context, []Relation) error { return nil }
-func (s *recordingStore) AnyResourceVersionDrifted(context.Context, []model.VersionedResource) (bool, error) {
-	return s.drift.Swap(false), nil
-}
 func (s *recordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }

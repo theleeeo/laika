@@ -41,9 +41,12 @@ type Notification struct {
 	// rebuild processing and provider fetches.
 	Metadata map[string]string
 
-	// Version is a monotonically increasing version of the resource at the source.
-	// When non-zero, the indexer rejects notifications whose version is not
-	// strictly greater than the currently stored version. Zero means "no version
-	// control" — the notification is always accepted. Ignored for deletes.
+	// Version is the resource's version at the source, monotonic per
+	// resource. It serves stale rejection only and is compared only with the
+	// version stored for the same resource: a non-zero Version not strictly
+	// greater than the stored one is rejected as stale. Zero means the source
+	// does not track versions — the notification is always accepted. Ignored
+	// for deletes. Nothing else compares it; the drift check runs on Laika's
+	// own Change Sequence.
 	Version int64
 }

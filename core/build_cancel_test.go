@@ -18,9 +18,15 @@ type staticExecuter struct {
 	// instead of docs — e.g. to give one resource Parents without making
 	// every cascaded build cascade again.
 	byID map[string][]projection.BuildDoc
+	// onExecute, when set, runs as Execute is called — before any document
+	// is fetched — so a test can order fetches against store calls.
+	onExecute func()
 }
 
 func (e *staticExecuter) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+	if e.onExecute != nil {
+		e.onExecute()
+	}
 	docs := e.docs
 	if d, ok := e.byID[req.ResourceID]; ok {
 		docs = d
@@ -48,9 +54,6 @@ func (s *cancellingStore) AddChildResources(context.Context, model.Resource, []m
 	return nil
 }
 func (s *cancellingStore) AddRelations(context.Context, []Relation) error { return nil }
-func (s *cancellingStore) AnyResourceVersionDrifted(context.Context, []model.VersionedResource) (bool, error) {
-	return false, nil
-}
 func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }

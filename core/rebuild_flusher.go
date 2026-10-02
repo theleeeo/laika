@@ -63,15 +63,29 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 type pendingResource struct {
 	occVersion int64
 	staleSeq   int64
-	// start is the Change Sequence value the resource's drift check measures
-	// its children against: a value taken before any of its fetches. It is
-	// per resource, never flusher state — one chunk can settle resources
-	// begun at different starts.
-	start int64
+	drift      driftBase
 	// remaining counts the plan documents not yet flushed successfully; the
 	// resource completes — edges final, stale mark cleared — when it hits 0.
 	remaining int
 	failed    bool
+}
+
+// driftBase is where a begun resource's drift check measures from. It is per
+// resource, never flusher state: one chunk can settle resources begun at
+// different starts, and a plan walk's resources cross chunk and plan
+// boundaries.
+type driftBase struct {
+	// start is a Change Sequence value taken before any of the resource's
+	// fetches.
+	start int64
+	// checkRoot adds the resource itself to its check. A plan walk fetches a
+	// root's page before the root's BeginBuild: a root change accepted in
+	// between is missing from the page, yet the page is written under the
+	// newer Build Sequence and the change's stale mark is cleared. Checking
+	// the root against the walk start re-builds it. A root begun before its
+	// own fetch (rebuildByIDs) is covered by its start and checks its
+	// children only.
+	checkRoot bool
 }
 
 // pendingItem is one document awaiting a bulk flush, carrying the relations
@@ -117,11 +131,12 @@ func (f *rebuildFlusher) root(id string) model.Resource {
 	return model.Resource{Type: f.resourceType, Id: id}
 }
 
-// begin registers a resource after BeginBuild. start is the Change Sequence
-// value its drift check measures from; expected is the number of plan
+// begin registers a resource after BeginBuild: its Build Sequence and the
+// stale_seq its clear is guarded by come from begun, its drift check measures
+// from drift (begun.Start is not read). expected is the number of plan
 // documents that must flush before the resource completes.
-func (f *rebuildFlusher) begin(id string, occVersion, staleSeq, start int64, expected int) {
-	f.state[id] = &pendingResource{occVersion: occVersion, staleSeq: staleSeq, start: start, remaining: expected}
+func (f *rebuildFlusher) begin(id string, begun BuildBegun, drift driftBase, expected int) {
+	f.state[id] = &pendingResource{occVersion: begun.BuildIdx, staleSeq: begun.StaleSeq, drift: drift, remaining: expected}
 }
 
 // tracked reports whether the resource has been begun and not yet settled.
@@ -196,10 +211,10 @@ func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
 }
 
 // flush writes the pending chunk and settles every resource whose documents
-// have all landed: persist its edges, check its fetched children for changes
-// accepted after its start, clear its stale mark. Returns an error only for
-// request-level write failures, where nothing can be assumed written — the
-// caller aborts and salvages.
+// have all landed: persist its edges, check its fetched children (and, for a
+// plan walk's root, the root) for changes accepted after its start, clear its
+// stale mark. Returns an error only for request-level write failures, where
+// nothing can be assumed written — the caller aborts and salvages.
 func (f *rebuildFlusher) flush(ctx context.Context) error {
 	if len(f.pending) == 0 {
 		return nil
@@ -226,6 +241,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	// Per-document settlement: persist edges for landed documents, fail
 	// resources with rejected ones.
 	driftCheck := make(map[string][]ChangeCheck)
+	rootChecked := make(map[string]bool)
 	for _, it := range chunk {
 		p := f.state[it.ID]
 		if p == nil || p.failed {
@@ -248,9 +264,14 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 				f.fail(ctx, it.ID)
 				continue
 			}
-			for _, r := range plain {
-				driftCheck[it.ID] = append(driftCheck[it.ID], ChangeCheck{Resource: r, Start: p.start})
-			}
+		}
+		// The root once per chunk, its children per document.
+		if p.drift.checkRoot && !rootChecked[it.ID] {
+			rootChecked[it.ID] = true
+			driftCheck[it.ID] = append(driftCheck[it.ID], ChangeCheck{Resource: f.root(it.ID), Start: p.drift.start})
+		}
+		for _, r := range it.relations {
+			driftCheck[it.ID] = append(driftCheck[it.ID], ChangeCheck{Resource: r.Resource, Start: p.drift.start})
 		}
 		if p.remaining > 0 {
 			p.remaining--
@@ -281,15 +302,16 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 }
 
 // checkDrift is the ADR 0002 drift check for a flushed chunk, on the Change
-// Sequence. driftCheck maps each settled root to its checks: every child its
-// documents fetched, with the start of the build that fetched it. A root with
-// any resource checked whose change_seq exceeds the start of the build that
-// fetched it had a change accepted after that fetch began — possibly while
-// its edges were missing, so fanout could not reach it — and must re-build to
-// converge. One batched
-// query serves the common no-drift case; a hit narrows with one query per
-// root, and each changed root is re-marked and re-built via the mark-first
-// primitive.
+// Sequence. driftCheck maps each root with landed documents to its checks,
+// each carrying the root's start: every child its documents fetched and, for
+// a plan walk's root, the root itself. A root with a checked resource whose
+// change_seq exceeds that start had a change accepted after its fetch began —
+// a child's possibly while the root's edges were missing, so fanout could not
+// reach it — and must re-build to converge.
+//
+// One batched query serves the common no-drift case; a hit narrows with one
+// query per root, and each changed root is re-marked and re-built via the
+// mark-first primitive.
 func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][]ChangeCheck) {
 	if len(driftCheck) == 0 {
 		return

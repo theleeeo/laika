@@ -266,9 +266,9 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			fl.fail(ctx, id)
 			continue
 		}
-		// The root is not checked: BeginBuild precedes its fetch, so its
-		// children are measured from its own start.
-		fl.begin(id, begun.BuildIdx, begun.StaleSeq, begun.Start, expected)
+		// BeginBuild precedes this root's fetch, so its start covers the
+		// root: only its children are checked.
+		fl.begin(id, begun, driftBase{start: begun.Start}, expected)
 
 		// Same existence rule as the live path (buildOne): all selected plans
 		// run first, and only unanimity decides — a nil from one version must
@@ -408,6 +408,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			}
 		}
 
+		// The walk start: every root this walk begins, and every child its
+		// pages carry, is drift-checked from here. It must precede Execute —
+		// the pipeline may fetch pages as soon as it is called, ahead of the
+		// loop below and so ahead of the roots' BeginBuild.
+		walkStart, err := idx.st.NextChangeSeq(ctx)
+		if err != nil {
+			fl.salvage(ctx)
+			return fmt.Errorf("walk start for %s v%d: %w", params.ResourceType, plan.Version, err)
+		}
+
 		ch := plan.Execute(ctx, projection.BuildRequest{
 			ResourceType: params.ResourceType,
 			ResourceID:   "",
@@ -467,7 +477,12 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 						fl.fail(ctx, id)
 						continue
 					}
-					fl.begin(id, begun.BuildIdx, begun.StaleSeq, begun.Start, expected)
+					// Measured from the walk start, not begun.Start: the
+					// root's page was fetched before this BeginBuild, so the
+					// root checks itself too (driftBase.checkRoot). Begun
+					// only on first sighting, a root seen by several plans
+					// keeps the start of the walk that first fetched it.
+					fl.begin(id, begun, driftBase{start: walkStart, checkRoot: true}, expected)
 				}
 
 				occVersion, ok := fl.occ(id)

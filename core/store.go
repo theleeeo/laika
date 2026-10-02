@@ -15,7 +15,6 @@ type Relation struct {
 type Store interface {
 	AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error
 	AddRelations(ctx context.Context, relations []Relation) error
-	AnyResourceVersionDrifted(ctx context.Context, observed []model.VersionedResource) (bool, error)
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
 	GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error)
 	RemoveResource(ctx context.Context, resource model.Resource) error

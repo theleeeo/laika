@@ -151,6 +151,8 @@ type rebuildRecordingStore struct {
 	// resource fail, so a re-build after a failed query settles.
 	errBudget   atomic.Int32
 	errChildren map[string]bool
+	// changeSeqErr fails every NextChangeSeq.
+	changeSeqErr error
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -201,6 +203,9 @@ func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource) 
 
 func (s *rebuildRecordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
+	if s.changeSeqErr != nil {
+		return 0, s.changeSeqErr
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.changeSeqs++
@@ -245,15 +250,6 @@ func (s *rebuildRecordingStore) AddChildResources(_ context.Context, parent mode
 }
 
 func (s *rebuildRecordingStore) AddRelations(context.Context, []Relation) error { return nil }
-
-func (s *rebuildRecordingStore) AnyResourceVersionDrifted(_ context.Context, observed []model.VersionedResource) (bool, error) {
-	for _, r := range observed {
-		if s.driftChildren[r.Id] && s.driftBudget.Add(-1) >= 0 {
-			return true, nil
-		}
-	}
-	return false, nil
-}
 
 func (s *rebuildRecordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
@@ -669,6 +665,185 @@ func TestRebuildByIDs_NarrowDriftQueryError_ReschedulesThatRoot(t *testing.T) {
 	}
 	if len(callIndexes(calls, "MarkStale:product/2")) != 0 {
 		t.Fatalf("root 2's narrow query succeeded without drift; it must not be re-marked: %v", calls)
+	}
+}
+
+// walkChecks returns the recorded AnyChangedSince batches whose checks all
+// carry a walk start — with rebuildRecordingStore's starts (walks 1000+n,
+// builds 100+BuildIdx), the plan walk flusher's queries, told apart from a
+// drift re-schedule's live re-build whatever the interleaving.
+func walkChecks(st *rebuildRecordingStore) [][]ChangeCheck {
+	var out [][]ChangeCheck
+	for _, batch := range st.checksSnapshot() {
+		if !slices.ContainsFunc(batch, func(c ChangeCheck) bool { return c.Start <= 1000 }) {
+			out = append(out, batch)
+		}
+	}
+	return out
+}
+
+// rebuildAllProducts runs a plan walk of every product over the given plans'
+// executers (Versions 1, 2, …) in one chunk and waits for the re-builds it
+// schedules.
+func rebuildAllProducts(t *testing.T, st *rebuildRecordingStore, execs ...*staticExecuter) error {
+	t.Helper()
+	plans := make([]projection.Plan, len(execs))
+	for i, e := range execs {
+		plans[i] = projection.Plan{Version: i + 1, Executer: e}
+	}
+	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": plans}, 0)
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}})
+	if werr := idx.WaitForIdle(t.Context()); werr != nil {
+		t.Fatal(werr)
+	}
+	return err
+}
+
+// recordingExecute emits docs and records "Execute:v<version>" in the store's
+// call log when the walk starts the plan.
+func recordingExecute(st *rebuildRecordingStore, version int, docs ...projection.BuildDoc) *staticExecuter {
+	return &staticExecuter{docs: docs, onExecute: func() { st.record("Execute:v%d", version) }}
+}
+
+// Each plan walk takes its own start, before the executer is asked for the
+// first page: the aggregation pipeline may fetch as soon as Execute is called.
+func TestRebuildAll_TakesOneWalkStartPerPlan_BeforeItsFirstFetch(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	err := rebuildAllProducts(t, st,
+		recordingExecute(st, 1, productDocWith("1")),
+		recordingExecute(st, 2, productDocWith("1")))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := st.callsSnapshot()
+	starts := callIndexes(calls, "NextChangeSeq")
+	exec1, exec2 := callIndexes(calls, "Execute:v1"), callIndexes(calls, "Execute:v2")
+	if len(starts) != 2 || len(exec1) != 1 || len(exec2) != 1 {
+		t.Fatalf("two plan walks take two walk starts, got %d: %v", len(starts), calls)
+	}
+	if !(starts[0] < exec1[0] && exec1[0] < starts[1] && starts[1] < exec2[0]) {
+		t.Fatalf("each walk start must precede that plan's first fetch: %v", calls)
+	}
+}
+
+// A walk's roots check themselves against the walk start — a root without
+// relations too — because the walk fetched a root's page before its
+// BeginBuild. Their children are checked against it as well.
+func TestRebuildAll_RootsCheckThemselvesFromTheWalkStart(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	err := rebuildAllProducts(t, st, &staticExecuter{docs: []projection.BuildDoc{
+		productDocWith("1", "c1"), productDocWith("2"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := st.checksSnapshot()
+	if len(checks) != 1 {
+		t.Fatalf("a no-drift chunk makes one batched drift check, got %d: %v", len(checks), st.callsSnapshot())
+	}
+	want := []ChangeCheck{{product("1"), 1001}, {product("2"), 1001}, {product("c1"), 1001}}
+	if got := sortedChecks(checks[0]); got != fmt.Sprint(want) {
+		t.Fatalf("checks %s, want %v (the walk start, not BeginBuild's)", got, want)
+	}
+}
+
+// A root changed after the walk start is re-scheduled like a changed child:
+// marked first, then re-built. Here the changed root has no relations at all.
+func TestRebuildAll_ChangedRoot_IsRescheduled(t *testing.T) {
+	// Budget 2: the batched hit and root 2's narrow hit; root 2's live
+	// re-build checks children only and has none.
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"2": true}}
+	st.driftBudget.Store(2)
+	err := rebuildAllProducts(t, st, &staticExecuter{docs: []projection.BuildDoc{
+		productDocWith("1", "c1"), productDocWith("2"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := st.callsSnapshot()
+	marks := callIndexes(calls, "MarkStale:product/2")
+	begins := callIndexes(calls, "BeginBuild:product/2")
+	if len(marks) != 1 || len(begins) != 2 || begins[1] < marks[0] {
+		t.Fatalf("a changed root must be re-marked, then re-built: %v", calls)
+	}
+	if len(callIndexes(calls, "MarkStale:product/1")) != 0 {
+		t.Fatalf("an unchanged root must not be re-marked: %v", calls)
+	}
+	if checks := walkChecks(st); len(checks) != 3 {
+		t.Fatalf("a hit must narrow: the batched query, then one per root, got %v: %v", checks, calls)
+	}
+}
+
+// A resource is begun on its first sighting only, so a later plan's walk
+// start never replaces the start of the walk that first fetched it.
+func TestRebuildAll_ResourceSeenByTwoPlans_KeepsItsFirstWalkStart(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	err := rebuildAllProducts(t, st,
+		&staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}},
+		&staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := walkChecks(st)
+	if len(checks) == 0 {
+		t.Fatalf("root 1 must be checked: %v", st.checksSnapshot())
+	}
+	roots := 0
+	for _, batch := range checks {
+		for _, c := range batch {
+			if c.Start != 1001 {
+				t.Fatalf("every check of root 1 carries the first walk's start 1001: %v", checks)
+			}
+			if c.Resource.Id == "1" {
+				roots++
+			}
+		}
+	}
+	if roots != 1 {
+		t.Fatalf("a root checks itself once per chunk, not once per document: %v", checks)
+	}
+}
+
+// One chunk can settle roots begun by different walks; each is checked
+// against the start of the walk that first fetched it.
+func TestRebuildAll_ChunkSpanningTwoWalks_ChecksEachRootFromItsOwnWalkStart(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	err := rebuildAllProducts(t, st,
+		&staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}},
+		&staticExecuter{docs: []projection.BuildDoc{productDocWith("2", "c2"), productDocWith("1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	checks := st.checksSnapshot()
+	if len(checks) != 1 {
+		t.Fatalf("both walks' roots settle in one chunk, one batched check, got %d: %v", len(checks), st.callsSnapshot())
+	}
+	want := []ChangeCheck{{product("1"), 1001}, {product("2"), 1002}, {product("c1"), 1001}, {product("c2"), 1002}}
+	if got := sortedChecks(checks[0]); got != fmt.Sprint(want) {
+		t.Fatalf("checks %s, want %v", got, want)
+	}
+	calls := st.callsSnapshot()
+	for _, id := range []string{"1", "2"} {
+		if len(callIndexes(calls, "ClearStale:product/"+id+":42")) != 1 {
+			t.Fatalf("root %s received every document it expects and must complete: %v", id, calls)
+		}
+	}
+}
+
+// Without a walk start nothing can be checked, so the walk does not start.
+func TestRebuildAll_WalkStartError_AbortsBeforeAnyFetch(t *testing.T) {
+	st := &rebuildRecordingStore{changeSeqErr: errors.New("sequence unavailable")}
+	err := rebuildAllProducts(t, st, recordingExecute(st, 1, productDocWith("1")))
+	if err == nil || !strings.Contains(err.Error(), "sequence unavailable") {
+		t.Fatalf("a failed walk start must fail the rebuild, got %v", err)
+	}
+	if calls := st.callsSnapshot(); countPrefix(calls, "Execute:") != 0 || countPrefix(calls, "BeginBuild:") != 0 {
+		t.Fatalf("no plan may execute without a walk start: %v", calls)
 	}
 }
 
