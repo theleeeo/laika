@@ -126,6 +126,7 @@ func main() {
 		PoolSize:       cfg.Pool.Size,
 		QueueSize:      cfg.Pool.QueueSize,
 		QueueHighWater: cfg.Pool.QueueHighWater,
+		OwnerLease:     cfg.Pool.OwnerLease,
 	})
 	if err != nil {
 		log.Fatalf("construct indexer: %v", err)

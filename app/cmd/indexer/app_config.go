@@ -34,6 +34,7 @@ import (
 //	pool.size              → POOL_SIZE
 //	pool.queue_size        → POOL_QUEUE_SIZE
 //	pool.queue_high_water  → POOL_QUEUE_HIGH_WATER
+//	pool.owner_lease       → POOL_OWNER_LEASE
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -103,6 +104,13 @@ type poolConfig struct {
 	// 80% of QueueSize. Only WaitForSlot registrations pace on it, and the
 	// app's RPCs never wait (ADR 0008), so it has no effect here yet.
 	QueueHighWater int `mapstructure:"queue_high_water"`
+	// OwnerLease is how long an inline build's ownership of its resource
+	// holds without renewing (core.Config.OwnerLease): while it is live, a
+	// change to the resource on any instance submits no second build, and the
+	// owner runs one follow-up for it. 0 means core's default, 30s. Size it
+	// above a build's queue wait plus its run, or a change may claim and
+	// submit a duplicate build.
+	OwnerLease time.Duration `mapstructure:"owner_lease"`
 }
 
 // loadAppConfig reads the config file at configFilePath (if present) and
@@ -135,6 +143,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("pool.size", 10)
 	v.SetDefault("pool.queue_size", 100)
 	v.SetDefault("pool.queue_high_water", 0)
+	v.SetDefault("pool.owner_lease", "0s")
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {

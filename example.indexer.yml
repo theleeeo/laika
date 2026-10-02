@@ -19,6 +19,7 @@
 #   pool.size           -> POOL_SIZE
 #   pool.queue_size     -> POOL_QUEUE_SIZE
 #   pool.queue_high_water -> POOL_QUEUE_HIGH_WATER
+#   pool.owner_lease    -> POOL_OWNER_LEASE
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -73,8 +74,13 @@ sweep:
 # queue sheds new submissions to the sweep. queue_high_water is the queued-build
 # count at or above which the pool is under pressure; 0 means 80% of queue_size.
 # Only WaitForSlot registrations pace on it, and the app's RPCs never wait
-# (ADR 0008), so it has no effect here yet.
+# (ADR 0008), so it has no effect here yet. owner_lease is how long an inline
+# build owns its resource without renewing: while it is live, a change to the
+# resource on any instance submits no second build, and the owner runs one
+# follow-up for it; 0 means 30s. Size it above a build's queue wait plus its
+# run, or a change may claim and submit a duplicate build.
 pool:
   size: 10
   queue_size: 100
   queue_high_water: 0
+  owner_lease: "0s"

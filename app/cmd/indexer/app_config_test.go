@@ -225,3 +225,49 @@ pool:
 		t.Errorf("POOL_QUEUE_HIGH_WATER override = %d, want 120", cfg.Pool.QueueHighWater)
 	}
 }
+
+func TestLoadAppConfig_PoolOwnerLease(t *testing.T) {
+	t.Setenv("POOL_OWNER_LEASE", "")
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.Pool.OwnerLease != 0 {
+		t.Errorf("pool.owner_lease default = %v, want 0 (core's default)", cfg.Pool.OwnerLease)
+	}
+
+	t.Setenv("POOL_OWNER_LEASE", "45s")
+	cfg, err = loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig with env only: %v", err)
+	}
+	if cfg.Pool.OwnerLease != 45*time.Second {
+		t.Errorf("POOL_OWNER_LEASE without a file = %v, want 45s", cfg.Pool.OwnerLease)
+	}
+	t.Setenv("POOL_OWNER_LEASE", "")
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+pool:
+  owner_lease: "2m"
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig from file: %v", err)
+	}
+	if cfg.Pool.OwnerLease != 2*time.Minute {
+		t.Errorf("pool.owner_lease from file = %v, want 2m", cfg.Pool.OwnerLease)
+	}
+
+	t.Setenv("POOL_OWNER_LEASE", "90s")
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig with env: %v", err)
+	}
+	if cfg.Pool.OwnerLease != 90*time.Second {
+		t.Errorf("POOL_OWNER_LEASE override = %v, want 90s", cfg.Pool.OwnerLease)
+	}
+}
