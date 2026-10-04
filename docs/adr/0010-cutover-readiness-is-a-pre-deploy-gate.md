@@ -14,6 +14,8 @@ The decision: **readiness is checked by a read-only pre-deploy tool, `cutover-ch
 
 **The ordering invariant** (previously undocumented): **complete the rolling deploy of the version-adding config before starting the backfill.** An indexer instance still running the old config writes only the old versions' indices while bumping the shared Build Sequence. If it builds a resource *after* the backfill walk already visited it, the new index keeps the stale document at a lower `build_idx` — invisible to `diff-mapping`, unrepaired until the next organic change to that resource. If a backfill is discovered to have raced a rolling deploy, re-run it.
 
+> **Note (2026-10-04, runbook step L1.5):** the edge sets rely on the same order. A live build drops the edge sets of Schema Versions its config doesn't declare, guarded by the Build Sequence, so an old-config instance that builds a resource at a higher sequence than the new version's last writer drops that version's set while its index keeps the document. The backfill, run after the rollout completes, rewrites every document of the version and its set. See ADR 0002's L1.5 note.
+
 The migration runbook, in full:
 
 1. Add vN to `resources.yml` (readVersion unchanged) → `gen-mapping -apply`.

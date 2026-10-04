@@ -26,9 +26,23 @@
 >   drops the undeclared sets stamped at or below its sequence; a rebuild
 >   passes none. An instance on an older config during a rolling deploy
 >   therefore can't drop a version a newer build wrote: that set is stamped
->   above it. The undeclared versions are read without a lock before the
+>   above it. That guards against reordering only. An old-config build at a
+>   higher sequence than the build that wrote a new version's set does drop
+>   it, while that version's index keeps the document — and so does a build
+>   still running with the plans `SetPlans` replaced. The drop relies on
+>   [ADR 0010](0010-cutover-readiness-is-a-pre-deploy-gate.md)'s ordering: the
+>   backfill, run once the rolling deploy is complete, rewrites every new
+>   version's document and its set, and the old-config build left that
+>   document stale anyway. The undeclared versions are read without a lock before the
 >   guarded statements, so a set stored after that read isn't pruned — extra
->   fanout only, until the next live build.
+>   fanout only, until the next live build. The guard covers reordering, not
+>   mixed configs: an old-config build at a *higher* sequence than the
+>   new-config build that wrote a new version's set drops that set while the
+>   version's index keeps the newer build's document — as can a build that
+>   captured the plans before a `SetPlans` added the version. The drop
+>   therefore relies on ADR 0010's order: the rolling deploy completes before
+>   the new version's backfill, which rewrites every document of that version
+>   and its set.
 > - **One lock order.** Every writer of a resource's edges takes the
 >   resource's `edge_sets` rows in ascending `schema_version` order and holds
 >   them to commit (`ReplaceEdges`, `RemoveResource`), so two writers never
