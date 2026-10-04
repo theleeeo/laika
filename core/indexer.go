@@ -63,13 +63,17 @@ type Config struct {
 	RebuildChunkSize int
 
 	// OwnerLease is how long a claimed build owner holds its resource
-	// without renewing: a mark of a row whose owner renewed (claim, dequeue,
-	// BeginBuild) within it doesn't submit another inline build. Size it
-	// above an inline build's or delete's queue wait plus its run. A build
-	// that outlives it costs a duplicate build; a delete that outlives it can
-	// lose a recreated document while the delete is unversioned: the
-	// recreate claims and builds, the delete lands after the build's write,
-	// and the build's finish clears the mark (seam S9). Default 30s.
+	// without renewing: a mark of a row whose owner renewed (claim, a pool
+	// task's dequeue, the sweep reaching its entry, BeginBuild) within it
+	// doesn't submit another inline build. A holder whose renewal at dequeue
+	// or at its sweep entry finds the ownership lost — the lease lapsed and
+	// another owner claimed the row under a newer mark — does nothing for it. Size it above an
+	// inline build's or delete's queue wait plus its run. A build that
+	// outlives it costs a duplicate build; a delete that outlives it after
+	// its renewal can lose a recreated document while the delete is
+	// unversioned: the recreate claims and builds, the delete lands after the
+	// build's write, and the build's finish clears the mark (seam S9).
+	// Default 30s.
 	OwnerLease time.Duration
 
 	// SearchMiddlewares wrap the search path. They run outermost-first in

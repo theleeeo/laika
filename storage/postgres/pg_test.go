@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1526,30 +1528,83 @@ func TestRenewOwners_RenewsOnlyMatchingTokens(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	r := func(id string) model.Resource { return model.Resource{Type: "ro", Id: id} }
-	match, mismatch, omitted, unowned := r("match"), r("mismatch"), r("omitted"), r("unowned")
-	markUnclaimed(t, st, nil, match, mismatch, omitted, unowned)
+	match, mismatch, omitted, unowned, zero := r("match"), r("mismatch"), r("omitted"), r("unowned"), r("zero")
+	markUnclaimed(t, st, nil, match, mismatch, omitted, unowned, zero)
 	tokens := map[model.Resource]int64{}
 	expired := map[model.Resource]owner{}
-	for _, res := range []model.Resource{match, mismatch, omitted} {
+	for _, res := range []model.Resource{match, mismatch, omitted, zero} {
 		tokens[res] = own(t, testPool, res)
 		expired[res] = owner{seq: tokens[res], since: expireOwner(t, testPool, res)}
 	}
 
-	if err := st.RenewOwners(ctx, []core.Owned{
+	held, err := st.RenewOwners(ctx, []core.Owned{
 		{Resource: match, Token: tokens[match]},
 		{Resource: mismatch, Token: tokens[mismatch] + 1},
 		{Resource: unowned, Token: 1},
-	}); err != nil {
+		{Resource: r("absent"), Token: 1},
+		{Resource: zero, Token: 0},
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if want := []core.Owned{{Resource: match, Token: tokens[match]}}; !reflect.DeepEqual(held, want) {
+		t.Fatalf("RenewOwners must return exactly the ownerships still held: got %v want %v", held, want)
 	}
 	requireFreshOwner(t, testPool, match, tokens[match])
 	requireOwner(t, testPool, mismatch, expired[mismatch], "a token that does not match")
 	requireOwner(t, testPool, omitted, expired[omitted], "a row not given")
+	requireOwner(t, testPool, zero, expired[zero], "a token of 0")
 	requireOwner(t, testPool, unowned, owner{}, "no token matches an unowned row")
 
-	if err := st.RenewOwners(ctx, nil); err != nil {
-		t.Fatalf("empty input must be a no-op: %v", err)
+	if held, err := st.RenewOwners(ctx, nil); err != nil || len(held) != 0 {
+		t.Fatalf("empty input must be a no-op: %v %v", held, err)
 	}
+}
+
+// Several ownerships still held are all returned, each renewed; a renewal
+// after another owner claimed the row, or after a token-less ClearStale
+// dropped it, holds nothing.
+func TestRenewOwners_ReturnsEveryHeldOwnership_AndNoneOnceLost(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "rh", Id: id} }
+	a, b, taken, cleared := r("a"), r("b"), r("taken"), r("cleared")
+	markUnclaimed(t, st, nil, a, b, taken, cleared)
+	tokens := map[model.Resource]int64{}
+	for _, res := range []model.Resource{a, b, taken, cleared} {
+		tokens[res] = own(t, testPool, res)
+		expireOwner(t, testPool, res)
+	}
+	// taken: another owner claims the row under a newer mark.
+	markUnclaimed(t, st, nil, taken)
+	newTok := own(t, testPool, taken)
+	if newTok == tokens[taken] {
+		t.Fatalf("the new claim must have a new token, got %d twice", newTok)
+	}
+	// cleared: a build that owns nothing clears the mark and its ownership.
+	var seq int64
+	if err := testPool.QueryRow(ctx, `SELECT stale_seq FROM resources WHERE type=$1 AND id=$2`, cleared.Type, cleared.Id).Scan(&seq); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ClearStale(ctx, cleared, seq); err != nil {
+		t.Fatal(err)
+	}
+
+	held, err := st.RenewOwners(ctx, []core.Owned{
+		{Resource: a, Token: tokens[a]},
+		{Resource: taken, Token: tokens[taken]},
+		{Resource: b, Token: tokens[b]},
+		{Resource: cleared, Token: tokens[cleared]},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(held, func(i, j int) bool { return held[i].Id < held[j].Id })
+	if want := []core.Owned{{Resource: a, Token: tokens[a]}, {Resource: b, Token: tokens[b]}}; !reflect.DeepEqual(held, want) {
+		t.Fatalf("held: got %v want %v", held, want)
+	}
+	requireFreshOwner(t, testPool, a, tokens[a])
+	requireFreshOwner(t, testPool, b, tokens[b])
 }
 
 func TestReleaseOwners_DropsOnlyMatchingTokensAndKeepsTheMark(t *testing.T) {

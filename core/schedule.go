@@ -83,7 +83,7 @@ func (idx *Indexer) submitDelete(ctx context.Context, res model.Resource, staleS
 	if token == 0 {
 		return
 	}
-	if !idx.submitOwned(ctx, wait, []Owned{{Resource: res, Token: token}}, func(taskCtx context.Context) {
+	if !idx.submitOwned(ctx, wait, []Owned{{Resource: res, Token: token}}, func(taskCtx context.Context, _ []Owned) {
 		idx.deleteOne(taskCtx, res, staleSeq, token)
 	}) {
 		slog.Info(notSubmittedMsg(wait, "tombstone left for sweep"),
@@ -107,9 +107,14 @@ func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu F
 	idx.submitBuild(ctx, res, fu.Metadata, fu.Token, false)
 }
 
-// buildTask is the pool task of an inline build.
-func (idx *Indexer) buildTask(args BuildArgs) func(context.Context) {
-	return func(taskCtx context.Context) {
+// buildTask is the pool task of an owned inline build. It builds only the ids
+// whose ownership the task still holds at dequeue (see submitOwned).
+func (idx *Indexer) buildTask(args BuildArgs) func(context.Context, []Owned) {
+	return func(taskCtx context.Context, held []Owned) {
+		args := heldOnly(args, held)
+		if len(args.ResourceIds) == 0 {
+			return
+		}
 		if err := idx.Build(taskCtx, args); err != nil {
 			slog.Warn("inline build failed; resources remain stale for sweep",
 				slog.String("type", args.ResourceType),
@@ -119,15 +124,39 @@ func (idx *Indexer) buildTask(args BuildArgs) func(context.Context) {
 	}
 }
 
+// heldOnly narrows an owned build's args to the ids of held, the ownerships
+// it still holds; the others are dropped from ResourceIds and OwnerTokens.
+func heldOnly(args BuildArgs, held []Owned) BuildArgs {
+	keep := make(map[Owned]bool, len(held))
+	for _, o := range held {
+		keep[o] = true
+	}
+	out := args
+	out.ResourceIds = make([]string, 0, len(held))
+	out.OwnerTokens = make(map[string]int64, len(held))
+	for _, id := range args.ResourceIds {
+		token := args.OwnerTokens[id]
+		if keep[Owned{Resource: model.Resource{Type: args.ResourceType, Id: id}, Token: token}] {
+			out.ResourceIds = append(out.ResourceIds, id)
+			out.OwnerTokens[id] = token
+		}
+	}
+	return out
+}
+
 // submitOwned hands task, which works on the claimed owned, to the pool (see
-// submit). The task renews their leases when a worker dequeues it, so the
-// lease runs from the dequeue rather than from the claim; a submission the
-// pool refuses releases them, so the next change claims or the sweep
-// rebuilds.
-func (idx *Indexer) submitOwned(ctx context.Context, wait bool, owned []Owned, task func(context.Context)) bool {
+// submit). When a worker dequeues it, the task renews their leases, so the
+// lease runs from the dequeue rather than from the claim, and runs only for
+// the ownerships still held, which it is given: one lost while queued is
+// covered by its new owner or a clean row. If none is held, or the renewal
+// fails, the task does nothing and its marks stay (see renewOwners). A
+// submission the pool refuses releases them, so the next change claims or
+// the sweep rebuilds.
+func (idx *Indexer) submitOwned(ctx context.Context, wait bool, owned []Owned, task func(context.Context, []Owned)) bool {
 	if idx.submit(ctx, wait, func(taskCtx context.Context) {
-		idx.renewOwners(taskCtx, owned)
-		task(taskCtx)
+		if held := idx.renewOwners(taskCtx, owned); len(held) > 0 {
+			task(taskCtx, held)
+		}
 	}) {
 		return true
 	}
@@ -150,16 +179,38 @@ func (idx *Indexer) submit(ctx context.Context, wait bool, task func(context.Con
 // for the lease to expire, and the lease is the backstop.
 const ownerReleaseTimeout = 5 * time.Second
 
-// renewOwners renews the leases of owned. A failure is logged: a lease that
-// expires early costs at most a duplicate build.
-func (idx *Indexer) renewOwners(ctx context.Context, owned []Owned) {
+// renewOwners renews the leases of owned and returns the ownerships still
+// held; its caller works only on those. An ownership it lost — after the
+// lease lapsed, another owner claimed the row under a newer mark, or a clear
+// or hard delete dropped it — is logged at Info and not worked on: the new
+// owner or a clean row covers it. A failed renewal is logged and holds
+// nothing, so work whose ownership is unknown is never done: its ownership
+// is released, as a failed owned build's is, and its mark stays for the
+// next change or the sweep.
+func (idx *Indexer) renewOwners(ctx context.Context, owned []Owned) []Owned {
 	if len(owned) == 0 {
-		return
+		return nil
 	}
-	if err := idx.st.RenewOwners(ctx, owned); err != nil {
-		slog.Warn("renewing build ownership failed; a lease may expire early",
+	held, err := idx.st.RenewOwners(ctx, owned)
+	if err != nil {
+		slog.Warn("renewing build ownership failed; its work is skipped and left stale",
 			slog.Int("count", len(owned)), slog.String("error", err.Error()))
+		idx.releaseOwners(ctx, owned)
+		return nil
 	}
+	if len(held) < len(owned) {
+		kept := make(map[Owned]bool, len(held))
+		for _, o := range held {
+			kept[o] = true
+		}
+		for _, o := range owned {
+			if !kept[o] {
+				slog.Info("build ownership lost before its work ran; skipped, its new owner or a clean row covers it",
+					slog.String("type", o.Type), slog.String("id", o.Id), slog.Int64("token", o.Token))
+			}
+		}
+	}
+	return held
 }
 
 // releaseOwners drops the ownership of owned, best effort, on a context

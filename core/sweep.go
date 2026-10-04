@@ -11,8 +11,10 @@ import (
 // stale mark is older than threshold and that no live owner is building,
 // synchronously. ListStale claims every entry it returns, so each is an owned
 // build or delete: it finishes like an inline one, and a follow-up it hands on
-// goes to the pool. It returns the number of stale entries it attempted.
-// Per-resource failures are logged, not returned: the mark or tombstone
+// goes to the pool. An entry whose ownership was lost by the time the pass
+// reaches it is skipped: its new owner or a clean row covers it. It returns
+// the number of stale entries it listed. Per-resource failures, a failed
+// renewal among them, are logged, not returned: the mark or tombstone
 // survives, its ownership is released, and the next sweep retries it.
 //
 // This is the safety net behind the inline build pool (ADR 0008). It runs as
@@ -30,10 +32,14 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 	// Builds run one entry at a time: each stale mark carries the metadata of
 	// the notification that set it, and the recovered build must replay it.
 	// ListStale claimed the whole batch at once, so each entry renews its
-	// lease when the pass reaches it: a later entry's claim must not lapse
-	// while the ones before it run.
+	// lease when the pass reaches it, and is served only if its ownership is
+	// still held: a later entry's claim may have lapsed while the ones before
+	// it ran, and a change since claimed the row — serving it then could
+	// delete a recreated document or race its new owner's build.
 	for _, e := range entries {
-		idx.renewOwners(ctx, []Owned{{Resource: e.Resource, Token: e.Token}})
+		if len(idx.renewOwners(ctx, []Owned{{Resource: e.Resource, Token: e.Token}})) == 0 {
+			continue
+		}
 		if e.Deleted {
 			idx.deleteOne(ctx, e.Resource, e.StaleSeq, e.Token)
 			continue

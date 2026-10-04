@@ -364,6 +364,199 @@ func TestOwner_Sweep_BuildsAndDeletesUnderTheListedTokens(t *testing.T) {
 	}
 }
 
+// newCaptureIndexer is newRecordingIndexer with a captureBackend, so a test
+// sees every ES write and delete.
+func newCaptureIndexer(st Store, poolSize, queueSize int) (*Indexer, *recordingExecuter, *captureBackend) {
+	ex := &recordingExecuter{}
+	be := &captureBackend{}
+	return mustNew(Config{
+		Resources: testResources(),
+		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+		ES:        be,
+		Store:     st,
+		PoolSize:  poolSize,
+		QueueSize: queueSize,
+	}), ex, be
+}
+
+// esOpsOn is every ES upsert and delete captureBackend saw for product id.
+func esOpsOn(be *captureBackend, id string) []string {
+	be.mu.Lock()
+	defer be.mu.Unlock()
+	var out []string
+	for _, k := range be.upserts {
+		if strings.HasSuffix(k, "/"+id) {
+			out = append(out, "upsert "+k)
+		}
+	}
+	for _, k := range be.deletes {
+		if strings.HasSuffix(k, "/"+id) {
+			out = append(out, "delete "+k)
+		}
+	}
+	return out
+}
+
+// steal hands res to another owner, as a change registered by another
+// instance after the holder's lease lapsed does: a new mark (deleted sets
+// the tombstone) that claims the row. It returns the new owner token.
+func steal(st *recordingStore, res model.Resource, deleted bool) int64 {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	r := st.markLocked(res, map[string]string{"m": "stolen"}, &deleted)
+	r.owner = r.staleSeq
+	return r.owner
+}
+
+// stealOnRenew makes the first RenewOwners naming res hand it to another
+// owner just before the renew; the returned func reports the new token.
+func stealOnRenew(st *recordingStore, res model.Resource, deleted bool) func() int64 {
+	var once sync.Once
+	var mu sync.Mutex
+	var tok int64
+	st.onRenew = func(owned []Owned) {
+		for _, o := range owned {
+			if o.Resource == res {
+				once.Do(func() {
+					t := steal(st, res, deleted)
+					mu.Lock()
+					tok = t
+					mu.Unlock()
+				})
+			}
+		}
+	}
+	return func() int64 {
+		mu.Lock()
+		defer mu.Unlock()
+		return tok
+	}
+}
+
+// A sweep entry whose ownership another owner took between ListStale and the
+// pass reaching it — its lease lapsed and a change claimed the row — is
+// skipped: a lost tombstone deletes nothing, a lost build entry builds
+// nothing. The new owner keeps the row and its mark, and the entries after
+// it are still served.
+func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
+	t.Run("lost tombstone", func(t *testing.T) {
+		gone := product("gone")
+		st := &staleListingStore{entries: []StaleResource{
+			{Resource: gone, StaleSeq: 9, Token: 10, Deleted: true},
+			{Resource: product("1"), StaleSeq: 4, Token: 5},
+		}}
+		// A recreate claims the tombstone's row.
+		stolen := stealOnRenew(&st.recordingStore, gone, false)
+		idx, _, be := newCaptureIndexer(st, 2, 4)
+
+		if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+			t.Fatal(err)
+		}
+		waitIdle(t, idx)
+
+		if tok := stolen(); tok == 0 {
+			t.Fatalf("setup: the sweep must renew the tombstone before serving it: %v", st.callsSnapshot())
+		}
+		if ops := esOpsOn(be, "gone"); len(ops) != 0 {
+			t.Errorf("a lost tombstone must not touch ES: %v", ops)
+		}
+		for _, p := range []string{"RemoveResource:product/gone", "DeleteResourceIfSeq:product/gone:"} {
+			if n := st.count(p); n != 0 {
+				t.Errorf("a lost tombstone must not call %s: %v", p, st.callsSnapshot())
+			}
+		}
+		if r, ok := st.row(gone); !ok || r.owner != stolen() || !r.stale {
+			t.Errorf("the new owner (%d) must keep the row and its mark: %+v (exists %v)", stolen(), r, ok)
+		}
+		for _, want := range []string{"BeginBuild:product/1:5", "FinishOwned:product/1:4:5"} {
+			if st.indexOf(want) == -1 {
+				t.Errorf("the entry after the lost one must still be served, missing %s: %v", want, st.callsSnapshot())
+			}
+		}
+	})
+
+	t.Run("lost build entry", func(t *testing.T) {
+		lost := product("1")
+		st := &staleListingStore{entries: []StaleResource{
+			{Resource: lost, StaleSeq: 4, Token: 5},
+			{Resource: product("gone"), StaleSeq: 9, Token: 10, Deleted: true},
+			{Resource: product("2"), StaleSeq: 6, Token: 7},
+		}}
+		stolen := stealOnRenew(&st.recordingStore, lost, false)
+		idx, ex, be := newCaptureIndexer(st, 2, 4)
+
+		if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+			t.Fatal(err)
+		}
+		waitIdle(t, idx)
+
+		if tok := stolen(); tok == 0 {
+			t.Fatalf("setup: the sweep must renew the build entry before serving it: %v", st.callsSnapshot())
+		}
+		if n := st.count("BeginBuild:product/1:"); n != 0 {
+			t.Errorf("a lost build entry must not begin a build: %v", st.callsSnapshot())
+		}
+		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
+			t.Errorf("a lost build entry must not run its plan: %v", reqs)
+		}
+		if ops := esOpsOn(be, "1"); len(ops) != 0 {
+			t.Errorf("a lost build entry must not write to ES: %v", ops)
+		}
+		if r, _ := st.row(lost); r.owner != stolen() || !r.stale {
+			t.Errorf("the new owner (%d) must keep the row and its mark: %+v", stolen(), r)
+		}
+		for _, want := range []string{"DeleteResourceIfSeq:product/gone:9:10", "BeginBuild:product/2:7", "FinishOwned:product/2:6:7"} {
+			if st.indexOf(want) == -1 {
+				t.Errorf("the entries after the lost one must still be served, missing %s: %v", want, st.callsSnapshot())
+			}
+		}
+	})
+}
+
+// A sweep entry whose renew fails is not served — the sweep can't tell it
+// still owns the row — and its mark or tombstone stays for the next pass. Its
+// ownership is released, as a failed owned build's is, so the next change or
+// sweep needn't wait for the lease.
+func TestOwner_Sweep_RenewError_SkipsTheEntryAndKeepsItsMark(t *testing.T) {
+	st := &staleListingStore{entries: []StaleResource{
+		{Resource: product("1"), StaleSeq: 4, Token: 5},
+		{Resource: product("gone"), StaleSeq: 9, Token: 10, Deleted: true},
+	}}
+	st.renewErr = errors.New("db down")
+	idx, ex, be := newCaptureIndexer(st, 2, 4)
+
+	if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, idx)
+
+	if st.count("RenewOwnersFailed:") == 0 {
+		t.Fatalf("setup: the sweep must try to renew: %v", st.callsSnapshot())
+	}
+	for _, p := range []string{"BeginBuild:", "FinishOwned:", "ClearStale:", "RemoveResource:", "DeleteResourceIfSeq:"} {
+		if n := st.count(p); n != 0 {
+			t.Errorf("an entry whose renew failed must not be served, got %s: %v", p, st.callsSnapshot())
+		}
+	}
+	if reqs := ex.requestsFor("1"); len(reqs) != 0 {
+		t.Errorf("an entry whose renew failed must not run its plan: %v", reqs)
+	}
+	if ops := append(esOpsOn(be, "1"), esOpsOn(be, "gone")...); len(ops) != 0 {
+		t.Errorf("an entry whose renew failed must not touch ES: %v", ops)
+	}
+	if r, _ := st.row(product("1")); !r.stale || r.owner != 0 {
+		t.Errorf("the build entry's mark must stay and its ownership be released: %+v", r)
+	}
+	if r, ok := st.row(product("gone")); !ok || !r.stale || !r.deleted || r.owner != 0 {
+		t.Errorf("the tombstone must stay and its ownership be released: %+v (exists %v)", r, ok)
+	}
+	for _, want := range []string{"ReleaseOwners:product/1:5", "ReleaseOwners:product/gone:10"} {
+		if st.indexOf(want) == -1 {
+			t.Errorf("missing %s: %v", want, st.callsSnapshot())
+		}
+	}
+}
+
 // The ADR 0006 cascade submits only the Parents its MarkStale claimed: p1
 // already has a live owner, so only p2 is built, under its token.
 func TestOwner_Cascade_SubmitsOnlyWhatMarkStaleClaimed(t *testing.T) {
@@ -607,6 +800,173 @@ func TestOwner_PoolTask_RenewsAtStart(t *testing.T) {
 		renew, del := st.indexOf("RenewOwners:product/1:1"), st.indexOf("DeleteResourceIfSeq:product/1:1:1")
 		if renew == -1 || del == -1 || renew > del {
 			t.Fatalf("the delete task must renew its ownership before finishing: %v", st.callsSnapshot())
+		}
+	})
+}
+
+// occupyWorker holds a pool of size one busy until the returned func runs (or
+// cleanup), leaving its queue free: what is submitted meanwhile queues, and is
+// dequeued only after the release.
+func occupyWorker(t *testing.T, idx *Indexer) func() {
+	t.Helper()
+	hold := make(chan struct{})
+	release := closer(t, hold)
+	started := make(chan struct{})
+	if !idx.pool.trySubmit(func(context.Context) { close(started); <-hold }) {
+		t.Fatal("failed to occupy the worker")
+	}
+	<-started
+	return release
+}
+
+// A queued owned task whose ownership another owner took before a worker
+// dequeued it does nothing for it: a build task skips the lost ids and still
+// builds the ones it holds, a delete task deletes nothing. The new owner
+// keeps the row and its mark.
+func TestOwner_PoolTask_SkipsWhatItLostBeforeDequeue(t *testing.T) {
+	t.Run("build", func(t *testing.T) {
+		st := &recordingStore{}
+		idx, ex, be := newCaptureIndexer(st, 1, 4)
+		release := occupyWorker(t, idx)
+
+		owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, nil, time.Minute)
+		if err != nil || len(owned) != 2 {
+			t.Fatalf("claiming: %v %v", owned, err)
+		}
+		tokens := map[string]int64{owned[0].Id: owned[0].Token, owned[1].Id: owned[1].Token}
+		idx.submitOwnedBuilds(t.Context(), owned, nil) // one task: both ids are products
+		if n := st.count("ReleaseOwners"); n != 0 {
+			t.Fatalf("setup: the build must queue, not shed: %v", st.callsSnapshot())
+		}
+		stolen := steal(st, product("1"), false)
+		release()
+		waitIdle(t, idx)
+
+		if st.indexOf(fmt.Sprintf("RenewOwners:product/1:%d", tokens["1"])) == -1 {
+			t.Fatalf("setup: the task must renew at dequeue: %v", st.callsSnapshot())
+		}
+		if n := st.count("BeginBuild:product/1:"); n != 0 {
+			t.Errorf("the lost id must not begin a build: %v", st.callsSnapshot())
+		}
+		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
+			t.Errorf("the lost id must not run its plan: %v", reqs)
+		}
+		if ops := esOpsOn(be, "1"); len(ops) != 0 {
+			t.Errorf("the lost id must not be written to ES: %v", ops)
+		}
+		if r, _ := st.row(product("1")); r.owner != stolen || !r.stale {
+			t.Errorf("the new owner (%d) must keep the lost id's row and its mark: %+v", stolen, r)
+		}
+		tok2 := tokens["2"]
+		for _, want := range []string{fmt.Sprintf("BeginBuild:product/2:%d", tok2), fmt.Sprintf("FinishOwned:product/2:%d:%d", tok2, tok2)} {
+			if st.indexOf(want) == -1 {
+				t.Errorf("the id the task still holds must be built, missing %s: %v", want, st.callsSnapshot())
+			}
+		}
+		if r, _ := st.row(product("2")); r.stale || r.owner != 0 {
+			t.Errorf("the held id's build must clear its mark and ownership: %+v", r)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		R := product("R")
+		st := &recordingStore{}
+		idx, _, be := newCaptureIndexer(st, 1, 4)
+		release := occupyWorker(t, idx)
+
+		mustRegister(t, idx, notify("R", ChangeDeleted, nil))
+		if n := st.count("ReleaseOwners"); n != 0 {
+			t.Fatalf("setup: the delete must queue, not shed: %v", st.callsSnapshot())
+		}
+		stolen := steal(st, R, false) // a recreate claims the row
+		release()
+		waitIdle(t, idx)
+
+		if st.count("RenewOwners:product/R:") == 0 {
+			t.Fatalf("setup: the task must renew at dequeue: %v", st.callsSnapshot())
+		}
+		if ops := esOpsOn(be, "R"); len(ops) != 0 {
+			t.Errorf("a lost delete must not touch ES: %v", ops)
+		}
+		for _, p := range []string{"RemoveResource:product/R", "DeleteResourceIfSeq:product/R:"} {
+			if n := st.count(p); n != 0 {
+				t.Errorf("a lost delete must not call %s: %v", p, st.callsSnapshot())
+			}
+		}
+		if r, ok := st.row(R); !ok || r.owner != stolen || !r.stale {
+			t.Errorf("the new owner (%d) must keep the row and its mark: %+v (exists %v)", stolen, r, ok)
+		}
+	})
+}
+
+// A queued owned task whose renew at dequeue fails does no work — it can't
+// tell it still owns the row — and finishes nothing: the mark or tombstone
+// stays for the next change or the sweep, and its ownership is released.
+func TestOwner_PoolTask_RenewError_SkipsTheWorkAndKeepsTheMark(t *testing.T) {
+	failRenew := func(st *recordingStore) {
+		st.mu.Lock()
+		st.renewErr = errors.New("db down")
+		st.mu.Unlock()
+	}
+
+	t.Run("build", func(t *testing.T) {
+		st := &recordingStore{}
+		idx, ex, be := newCaptureIndexer(st, 1, 4)
+		release := occupyWorker(t, idx)
+
+		mustRegister(t, idx, notify("1", ChangeUpdated, nil))
+		failRenew(st)
+		release()
+		waitIdle(t, idx)
+
+		if st.count("RenewOwnersFailed:product/1:") == 0 {
+			t.Fatalf("setup: the task must try to renew at dequeue: %v", st.callsSnapshot())
+		}
+		for _, p := range []string{"BeginBuild:", "FinishOwned:", "ClearStale:"} {
+			if n := st.count(p); n != 0 {
+				t.Errorf("a task whose renew failed must not build or finish, got %s: %v", p, st.callsSnapshot())
+			}
+		}
+		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
+			t.Errorf("a task whose renew failed must not run its plan: %v", reqs)
+		}
+		if ops := esOpsOn(be, "1"); len(ops) != 0 {
+			t.Errorf("a task whose renew failed must not write to ES: %v", ops)
+		}
+		if r, _ := st.row(product("1")); !r.stale || r.owner != 0 {
+			t.Errorf("the mark must stay and the ownership be released: %+v", r)
+		}
+		if st.indexOf("ReleaseOwners:product/1:1") == -1 {
+			t.Errorf("the ownership must be released: %v", st.callsSnapshot())
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		st := &recordingStore{}
+		idx, _, be := newCaptureIndexer(st, 1, 4)
+		release := occupyWorker(t, idx)
+
+		mustRegister(t, idx, notify("R", ChangeDeleted, nil))
+		failRenew(st)
+		release()
+		waitIdle(t, idx)
+
+		if st.count("RenewOwnersFailed:product/R:") == 0 {
+			t.Fatalf("setup: the task must try to renew at dequeue: %v", st.callsSnapshot())
+		}
+		if ops := esOpsOn(be, "R"); len(ops) != 0 {
+			t.Errorf("a delete whose renew failed must not touch ES: %v", ops)
+		}
+		for _, p := range []string{"RemoveResource:", "DeleteResourceIfSeq:"} {
+			if n := st.count(p); n != 0 {
+				t.Errorf("a delete whose renew failed must not call %s: %v", p, st.callsSnapshot())
+			}
+		}
+		if r, ok := st.row(product("R")); !ok || !r.stale || !r.deleted || r.owner != 0 {
+			t.Errorf("the tombstone must stay and its ownership be released: %+v (exists %v)", r, ok)
+		}
+		if st.indexOf("ReleaseOwners:product/R:1") == -1 {
+			t.Errorf("the ownership must be released: %v", st.callsSnapshot())
 		}
 	})
 }

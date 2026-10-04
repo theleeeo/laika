@@ -14,7 +14,9 @@ import (
 // staleListingStore returns a canned stale backlog on top of recordingStore.
 // Listing an entry puts its row in recordingStore's state as the real
 // statement leaves it: marked under the entry's StaleSeq and claimed under its
-// Token (0 = unowned), with its metadata and tombstone.
+// Token, with its metadata and tombstone. The real statement claims every row
+// it returns, so an entry given without a Token is claimed as a real claim
+// does, under its StaleSeq.
 type staleListingStore struct {
 	recordingStore
 	entries []StaleResource
@@ -22,7 +24,7 @@ type staleListingStore struct {
 
 func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit int, _ time.Duration) ([]StaleResource, error) {
 	s.record("ListStale")
-	entries := s.entries
+	entries := append([]StaleResource(nil), s.entries...)
 	if len(entries) > limit {
 		entries = entries[:limit]
 	}
@@ -31,7 +33,11 @@ func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit
 	if s.rows == nil {
 		s.rows = make(map[model.Resource]*memRow)
 	}
-	for _, e := range entries {
+	for i, e := range entries {
+		if e.Token == 0 {
+			e.Token = e.StaleSeq
+			entries[i] = e
+		}
 		s.rows[e.Resource] = &memRow{staleSeq: e.StaleSeq, stale: true, owner: e.Token, metadata: e.Metadata, deleted: e.Deleted}
 		s.seq = max(s.seq, e.StaleSeq, e.Token)
 	}

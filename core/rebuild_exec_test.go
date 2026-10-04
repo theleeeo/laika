@@ -295,7 +295,9 @@ func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.
 	return nil, nil
 }
 
-func (s *rebuildRecordingStore) RenewOwners(context.Context, []Owned) error   { return nil }
+func (s *rebuildRecordingStore) RenewOwners(_ context.Context, owned []Owned) ([]Owned, error) {
+	return owned, nil
+}
 func (s *rebuildRecordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
 func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource, _, _ int64) (FollowUp, error) {
 	s.record("FinishOwned:%s/%s", r.Type, r.Id)

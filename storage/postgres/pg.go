@@ -345,19 +345,35 @@ func ownedArrays(owned []core.Owned) (types, ids []string, tokens []int64) {
 }
 
 // RenewOwners renews the lease of every given ownership whose token is still
-// the row's owner token.
-func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) error {
+// the row's owner token and returns those: the ownerships still held.
+func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Owned, error) {
 	if len(owned) == 0 {
-		return nil
+		return nil, nil
 	}
 	types, ids, tokens := ownedArrays(owned)
-	_, err := s.pool.Exec(ctx,
+	rows, err := s.pool.Query(ctx,
 		`UPDATE resources r SET owner_since = now()
 		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token)
-		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token`,
+		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token
+		 RETURNING r.type, r.id, r.owner_seq`,
 		types, ids, tokens,
 	)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var held []core.Owned
+	for rows.Next() {
+		var o core.Owned
+		if err := rows.Scan(&o.Type, &o.Id, &o.Token); err != nil {
+			return nil, err
+		}
+		held = append(held, o)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return held, nil
 }
 
 // ReleaseOwners drops every given ownership whose token is still the row's

@@ -47,9 +47,13 @@ type Store interface {
 	// nothing.
 	BeginBuild(ctx context.Context, resource model.Resource, token int64) (BuildBegun, error)
 	// RenewOwners renews the lease of every given ownership whose token is
-	// still the row's owner token; the others are left alone. A pool task
-	// calls it when it is dequeued.
-	RenewOwners(ctx context.Context, owned []Owned) error
+	// still the row's owner token, leaves the others alone, and returns the
+	// renewed ones: the ownerships still held. One it didn't renew is lost —
+	// another owner claimed the row under a newer mark, or a token-less clear
+	// (ClearStale) or a hard delete dropped it — and its holder does nothing
+	// for it. A pool task calls it when it is dequeued, the sweep before
+	// serving each entry.
+	RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error)
 	// ReleaseOwners drops every given ownership whose token is still the
 	// row's owner token, leaving the stale mark: a failed or shed owned
 	// build, so the next change claims or the sweep rebuilds.
@@ -88,7 +92,8 @@ type BuildBegun struct {
 	// BuildIdx is the bumped Build Sequence, sent as the ES external_gte
 	// version.
 	BuildIdx int64
-	// StaleSeq is the stale_seq the build's ClearStale is guarded by.
+	// StaleSeq is the stale_seq the build's finish — FinishOwned, or
+	// ClearStale for a build that owns nothing — is guarded by.
 	StaleSeq int64
 	// Start is a value of the Change Sequence taken before the build's
 	// fetches; the drift check compares against it.

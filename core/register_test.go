@@ -58,6 +58,13 @@ type recordingStore struct {
 	// and before it returns: a test can register a change while a delete (or
 	// a build's edge wipe) is in flight.
 	onRemove func(model.Resource)
+	// onRenew, when set, runs at the start of every RenewOwners, outside the
+	// lock, with the ownerships it was given: a test can hand a row to
+	// another owner just before its holder renews it. renewErr fails every
+	// RenewOwners as a done ctx does: it records RenewOwnersFailed per entry
+	// and returns the error.
+	onRenew  func([]Owned)
+	renewErr error
 
 	rows     map[model.Resource]*memRow
 	seq      int64 // the last stale_seq handed out
@@ -310,19 +317,34 @@ func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duratio
 
 // RenewOwners and ReleaseOwners fail on a done ctx, as a real store's query
 // would, and then record RenewOwnersFailed / ReleaseOwnersFailed per entry
-// instead — so a release made on a detached ctx is observable.
-func (s *recordingStore) RenewOwners(ctx context.Context, owned []Owned) error {
+// instead — so a release made on a detached ctx is observable. RenewOwners
+// returns the given ownerships whose token is still the row's owner token;
+// renewErr fails it as a done ctx does.
+func (s *recordingStore) RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error) {
+	if s.onRenew != nil {
+		s.onRenew(owned)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	err := ctx.Err()
+	if err == nil {
+		err = s.renewErr
+	}
+	var held []Owned
 	for _, o := range owned {
 		if err != nil {
 			s.recordLocked("RenewOwnersFailed:%s/%s:%d", o.Type, o.Id, o.Token)
-		} else {
-			s.recordLocked("RenewOwners:%s/%s:%d", o.Type, o.Id, o.Token)
+			continue
+		}
+		s.recordLocked("RenewOwners:%s/%s:%d", o.Type, o.Id, o.Token)
+		if row, ok := s.rows[o.Resource]; ok && o.Token != 0 && row.owner == o.Token {
+			held = append(held, o)
 		}
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return held, nil
 }
 func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error {
 	s.mu.Lock()
