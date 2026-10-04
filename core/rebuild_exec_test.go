@@ -70,6 +70,9 @@ type captureBackend struct {
 	upserts        []string        // "index/id"
 	rejectIDs      map[string]bool // BulkUpsert reports every document of these IDs as rejected
 	rejectDocs     map[string]bool // BulkUpsert reports these "index/id" documents as rejected
+	// extraFailures are appended to every BulkUpsert response as they are —
+	// e.g. a failure whose Index names no document of the chunk.
+	extraFailures []BulkFailure
 	upsertConflict map[string]bool // Upsert returns ErrVersionConflict for "index/id"
 	// bulkErr fails the whole BulkUpsert request (no per-item failures) —
 	// the case where nothing can be assumed written.
@@ -107,7 +110,7 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 			failures = append(failures, BulkFailure{Index: it.Index, ID: it.ID, Status: 400, Reason: "test rejection"})
 		}
 	}
-	return failures, nil
+	return append(failures, b.extraFailures...), nil
 }
 
 func (b *captureBackend) Delete(_ context.Context, index, docID string) error {
@@ -513,6 +516,54 @@ func TestRebuildByIDs_RejectedSiblingDocument_StillReplacesTheLandedSet_AndFails
 	if st.has("ClearStale:product/1") {
 		t.Fatal("a resource with a rejected document must not clear its stale mark")
 	}
+}
+
+// A bulk failure whose Index/ID names no document of the chunk cannot be
+// tied to one document, so it rejects every document of its id: none of the
+// resource's edge sets is replaced and the resource fails. Another resource
+// of the same flush completes.
+func TestRebuildByIDs_FailureNamingNoChunkDocument_RejectsEveryDocumentOfItsID(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{extraFailures: []BulkFailure{{Index: "not_in_the_chunk", ID: "1", Status: 400, Reason: "test rejection"}}}
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: childDocs(map[string][]string{"1": {"c1a"}, "2": {"c2a"}})},
+		{Version: 2, Executer: childDocs(map[string][]string{"1": {"c1b"}, "2": {"c2b"}})},
+	}}
+	idx := newRebuildIndexer(st, es, plans, 0)
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2"}}})
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("a resource whose documents were all rejected must fail the rebuild, got %v", err)
+	}
+
+	if got := st.replacedFor(product("1")); len(got) != 0 {
+		t.Fatalf("no document of product/1 can be taken as landed, so none of its sets may be replaced: %+v", got)
+	}
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "MarkStale:product/1") == 0 {
+		t.Fatalf("a resource whose documents were rejected must be durably marked stale: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/1:") != 0 {
+		t.Fatalf("a resource whose documents were rejected must not clear its stale mark: %v", calls)
+	}
+	assertReplaces(t, st, product("2"), 2, []EdgeSet{versionSet(1, "c2a"), versionSet(2, "c2b")})
+	if countPrefix(calls, "ClearStale:product/2:") != 1 {
+		t.Fatalf("product/2's documents landed and it must complete: %v", calls)
+	}
+}
+
+// The same resource and version twice in one chunk — a listing that repeats a
+// resource — sends one edge set for that version, the later document's: the
+// bulk write applies its items in order, so the later document is the one
+// Elasticsearch holds.
+func TestRebuildAll_SameVersionTwiceInOneChunk_SendsTheLaterDocumentsSet(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	err := rebuildAllProducts(t, st, &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "early"), productDocWith("1", "late")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1, "late")})
 }
 
 // A failed edge replace fails its resource — marked stale, not cleared — and
