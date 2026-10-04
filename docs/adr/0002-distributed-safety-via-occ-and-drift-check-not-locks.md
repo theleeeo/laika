@@ -106,6 +106,11 @@
 > as drift. A producer whose versions are in the wrong unit no longer loops;
 > its changes are rejected as stale instead.
 
+> **Note (2026-10-04, runbook step L1.6):** the observed versions the old
+> check compared are gone: a Plan's `BuildDoc.Relations` and the provider's
+> `RelatedResource` carry identities only (`RelatedResource` field 2 is
+> reserved). Nothing in the build path holds a Child's version.
+
 > _Amended by [ADR 0008](0008-stale-mark-inline-builds-and-temporal-slow-lane.md): the at-least-once re-enqueue leg is now the stale mark + sweep instead of River retries; Build Sequence OCC and the drift check are unchanged._
 
 Multiple indexer instances run concurrently and there is no per-resource lock. Safety against racing rebuilds of the same Parent comes from three independent mechanisms:

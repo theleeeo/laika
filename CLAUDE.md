@@ -81,7 +81,7 @@ Both `Store` and `SearchBackend` have exactly one implementation each; the inter
 |---------|------|
 | `core/` | Orchestration: `Indexer`, inline worker pool, Temporal `StaleSweep`/`RebuildWalk` workflows, `SearchBackend`/`Store` interfaces, `IndexName`/`AliasName` |
 | `core/resource/` | Resource/Schema-Version DSL types and validation |
-| `model/` | Primitive types (`Resource`, `VersionedResource`) |
+| `model/` | Primitive types (`Resource`) |
 | `projection/` | `Plan` type and `BuildDoc` — the aggregation result flowing through Plans |
 | `storage/postgres/` | `Store` implementation: relation graph + stale-mark state (root-module package) |
 | `backend/elasticsearch/` | `SearchBackend` implementation; mapping generation (root-module package) |
