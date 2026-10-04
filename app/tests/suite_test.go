@@ -41,6 +41,7 @@ type FakeProvider struct {
 
 	fetchResourceCount int
 	listResourcesCount int
+	fetchCounts        map[string]int // "type|id" -> FetchResource calls
 
 	// pageSize bounds how many resources one ListResources call returns.
 	// 0 — the default, restored by Clear — serves everything in a single page,
@@ -88,6 +89,15 @@ func (f *FakeProvider) ResetCallCounts() {
 	defer f.mu.Unlock()
 	f.fetchResourceCount = 0
 	f.listResourcesCount = 0
+	f.fetchCounts = nil
+}
+
+// FetchCount returns the number of FetchResource calls for one resource since
+// the last Clear or ResetCallCounts.
+func (f *FakeProvider) FetchCount(resourceType, id string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fetchCounts[resourceType+"|"+id]
 }
 
 type fetchGate struct {
@@ -171,6 +181,7 @@ func (f *FakeProvider) Clear() {
 	f.errs = nil
 	f.fetchResourceCount = 0
 	f.listResourcesCount = 0
+	f.fetchCounts = nil
 	f.pageSize = 0
 }
 
@@ -272,6 +283,10 @@ func (f *FakeProvider) FetchResource(_ context.Context, params source.FetchResou
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchResourceCount++
+	if f.fetchCounts == nil {
+		f.fetchCounts = map[string]int{}
+	}
+	f.fetchCounts[params.ResourceType+"|"+params.ResourceID]++
 	if err := f.errs[params.ResourceType+"|"+params.ResourceID]; err != nil {
 		return source.FetchResourceResult{}, err
 	}
@@ -638,13 +653,17 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 // backend, for tests that need an indexer tuned differently from the suite's
 // own (a smaller RebuildChunkSize, say). It shares the suite's Postgres and
 // Elasticsearch state, and builds its plans from the given resource config the
-// same way SetupSuite does. Only the tuning knobs the caller sets are honoured;
-// the wiring is the suite's. The Temporal client is omitted — an indexer built
-// here must not reach the durable slow lane.
+// same way SetupSuite does. Only the tuning knobs the caller sets are honoured,
+// plus cfg.ES: a caller may pass its own search backend (a wrapper over the
+// suite's, say), and a nil one gets the suite's. The rest of the wiring is the
+// suite's. The Temporal client is omitted — an indexer built here must not
+// reach the durable slow lane.
 func (t *TestSuite) newIndexer(resources resource.Configs, cfg core.Config) *core.Indexer {
 	cfg.Plans = dsl.BuildPlansFromConfig(t.fakeProvider, resources)
 	cfg.Resources = resources
-	cfg.ES = elasticsearch.New(t.esClient, true)
+	if cfg.ES == nil {
+		cfg.ES = elasticsearch.New(t.esClient, true)
+	}
 	cfg.Store = t.st
 	if cfg.PoolSize == 0 {
 		cfg.PoolSize = 10
