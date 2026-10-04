@@ -15,8 +15,14 @@
 >   a row with a live owner is marked and nothing else. `MarkStale` with a
 >   lease of 0 marks without claiming: the rebuild flusher's `fail` and
 >   `salvage` hand their roots to the sweep.
-> - **The lease is renewed** when a pool task is dequeued and by `BeginBuild`
->   when the token matches, so it covers queue wait as well as the run.
+> - **The lease is renewed** when a pool task is dequeued, when the sweep
+>   reaches an entry, and by `BeginBuild` when the token matches, so it covers
+>   queue wait as well as the run. The renewal at dequeue or at a sweep entry
+>   (`RenewOwners`) returns the ownerships still held, and only those are
+>   worked on: one lost meanwhile — its lease lapsed and another owner claimed
+>   the row under a newer mark, or a clear or hard delete dropped it — is
+>   skipped, since its new owner or a clean row covers it. A failed renewal
+>   skips the work too and releases the ownership; the mark stays.
 > - **The owner's finish re-claims for at most one follow-up.** An owned build
 >   finishes with `FinishOwned` instead of `ClearStale`: with `stale_seq`
 >   unchanged it clears the mark and the ownership; with `stale_seq` moved and
@@ -36,11 +42,13 @@
 > on it. A wrong answer is a duplicate build, which the Build Sequence OCC
 > orders, or a delayed one, which the mark and the sweep recover — with one
 > exception until runbook step L2.1 makes the Elasticsearch delete versioned. A
-> delete whose lease lapses lets a recreate claim and build; the delete's
-> unversioned Elasticsearch delete can land after that build's upsert, and the
-> build's finish clears the mark, so the recreated document is lost. Any inline
-> delete racing an inline build had this before ownership; ownership narrows
-> it to an expired lease (seam S9 in laika-dev's `docs/open-questions.md`).
+> delete whose lease lapses during its run, after its renewal, lets a recreate
+> claim and build; the delete's unversioned Elasticsearch delete can land after
+> that build's upsert, and the build's finish clears the mark, so the recreated
+> document is lost. Any inline delete racing an inline build had this before
+> ownership; ownership narrows it to a lease lapsing mid-run, or to an owner
+> token the recreated row repeats (seams S9 and S8 in laika-dev's
+> `docs/open-questions.md`).
 >
 > *The race-safe clear* below changes accordingly: a newer change that moved
 > `stale_seq` mid-build is served by the owner's follow-up, not by "the newer
@@ -175,7 +183,8 @@ the `laika-indexer` task queue. There is one implementation of the safety net.
 - **`StaleSweep`** — driven by a Temporal Schedule (id `laika-stale-sweep`,
   default interval 1m, overlap policy *skip*). Its single activity, `SweepStale`,
   calls `ListStale` for resources where `stale_since < now() - threshold`
-  (tombstones included), runs up to `BatchSize` of them through the existing
+  (tombstones included) and no live Build owner holds the row (see the L1.4
+  note above), runs up to `BatchSize` of them through the existing
   build/delete path per pass, and returns the count; the workflow keeps
   executing passes until one returns fewer than `BatchSize`, capped at 100
   passes per run so a pathological backlog can't run the workflow forever.
