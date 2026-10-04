@@ -54,6 +54,9 @@ func (s *cancellingStore) AddChildResources(context.Context, model.Resource, []m
 	return nil
 }
 func (s *cancellingStore) AddRelations(context.Context, []Relation) error { return nil }
+func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
+	return nil
+}
 func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }

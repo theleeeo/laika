@@ -366,6 +366,9 @@ func (s *recordingStore) AddChildResources(context.Context, model.Resource, []mo
 	return nil
 }
 func (s *recordingStore) AddRelations(context.Context, []Relation) error { return nil }
+func (s *recordingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
+	return nil
+}
 func (s *recordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }

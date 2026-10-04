@@ -97,6 +97,10 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) err
 	return err
 }
 
+func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
+	return errors.New("ReplaceEdges: not implemented")
+}
+
 func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
 	var relations []core.Relation
 	for _, child := range childs {

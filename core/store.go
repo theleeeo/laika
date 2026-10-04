@@ -18,6 +18,22 @@ type Store interface {
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
 	GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error)
 	RemoveResource(ctx context.Context, resource model.Resource) error
+	// ReplaceEdges stores the edges one build of resource discovered, per
+	// Schema Version, at the build's Build Sequence buildSeq, in one
+	// transaction. Each set replaces its version's stored edge set only when
+	// buildSeq is not below the sequence that set is stamped with, and then
+	// stamps it with buildSeq; a set stamped higher is left unchanged. So each
+	// version's edges follow the Build Sequence like its document does
+	// (ADR 0002): they come from the build Elasticsearch keeps. A set with no
+	// Children replaces the stored one with no edges. The order of sets does
+	// not matter.
+	//
+	// Versions not in sets are untouched, unless declared is non-nil: then
+	// the stored sets of versions outside declared that are stamped at or
+	// below buildSeq are dropped with their edges. The live build, which runs
+	// every configured plan, passes the config's versions; a rebuild passes
+	// nil.
+	ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error
 
 	// RegisterChanges records a batch of changes in one atomic statement:
 	// each accepted item's version (or tombstone), stale mark and metadata,
@@ -85,6 +101,13 @@ type Store interface {
 	// before and that have no live owner under lease, and claims every row
 	// it returns in the same statement.
 	ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]StaleResource, error)
+}
+
+// EdgeSet is the edges one Schema Version's plan discovered for a resource:
+// its Children.
+type EdgeSet struct {
+	SchemaVersion int
+	Children      []model.Resource
 }
 
 // BuildBegun is what BeginBuild returns for one resource.

@@ -310,6 +310,9 @@ func (s *rebuildRecordingStore) AddChildResources(_ context.Context, parent mode
 }
 
 func (s *rebuildRecordingStore) AddRelations(context.Context, []Relation) error { return nil }
+func (s *rebuildRecordingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
+	return nil
+}
 
 func (s *rebuildRecordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
