@@ -1252,7 +1252,8 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.setResourceConfig(RelatedResourceConfig)
 
-	// Initial graph: c/1 -> a/1, c/1 -> b/1.
+	// Initial graph: c/1 -> a/1, c/1 -> b/1, and a/1 and b/1 are each other's
+	// Parents (a/1 -> b/1, b/1 -> a/1).
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av1"})
 	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "bv1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "cv1"})
