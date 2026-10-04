@@ -145,9 +145,11 @@ func (t *TestSuite) awaitBuild(errCh <-chan error, what string) {
 // FetchRelated(b) after snapshotting {b/d}. The source moves a/1's children to
 // {b/c}. B2 begins (s2 > s1), fetches a/1 and {b/c}, writes its document at
 // s2 and its edges {b/c}, and returns. Released, B1 writes its document at s1
-// — losing ES OCC to B2's — and today wipes P's edges and writes {b/d}: the
-// document is B2's but the edges are B1's. A change registered to b/c (no
-// source data, so ADR 0006 cannot reach P) must then still mark P.
+// — losing ES OCC to B2's — and its edge write at s1 must lose too: P's edges
+// stay {b/c}, those of the document the index holds. A build path that wiped
+// P's edges and wrote its own regardless of Build Sequence would leave B2's
+// document with B1's edges {b/d}. A change registered to b/c (no source
+// data, so ADR 0006 cannot reach P) must then still mark P.
 func (t *TestSuite) Test_Edges_OlderBuildLoses_EdgesFollowNewerBuild() {
 	t.setResourceConfig(DefaultResourceConfig)
 	ctx := t.T().Context()
@@ -305,10 +307,11 @@ func (t *TestSuite) Test_Edges_LiveBuildVsTargetedRebuild_PerVersionEdgesFollowD
 
 // Test_Edges_ExplicitIDFullRebuild_KeepsEdgesWhileFetching: P = a/1 is built
 // with child b/c, so its edges are {b/c}. An explicit-id full rebuild of a/1
-// (no Versions) is held at its FetchResource of a/1 — today it has already
-// wiped P's edges before BeginBuild. While it is held, a change registered to
-// b/c (no source data, so ADR 0006 cannot reach P) must mark P through the
-// edge P already had.
+// (no Versions) is held at its FetchResource of a/1, with P's edges still
+// {b/c}. While it is held, a change registered to b/c (no source data, so ADR
+// 0006 cannot reach P) must mark P through the edge P already had. A build
+// path that wiped P's edges before its fetch would leave P edge-less here,
+// and the change would mark nothing.
 func (t *TestSuite) Test_Edges_ExplicitIDFullRebuild_KeepsEdgesWhileFetching() {
 	t.setResourceConfig(DefaultResourceConfig)
 	ctx := t.T().Context()
