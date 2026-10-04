@@ -38,7 +38,7 @@ func twoVersionResources() resource.Configs {
 	return cfgs
 }
 
-func productDoc(id string, rels ...model.VersionedResource) projection.BuildDoc {
+func productDoc(id string, rels ...model.Resource) projection.BuildDoc {
 	return projection.BuildDoc{
 		Root:      model.Resource{Type: "product", Id: id},
 		Doc:       map[string]any{"fields": map[string]any{"title": "t-" + id}},
@@ -734,7 +734,7 @@ func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"cX": true}}
 	st.driftBudget.Store(2)
 	es := &captureBackend{}
-	child := model.VersionedResource{Resource: model.Resource{Type: "product", Id: "cX"}, Version: 5}
+	child := model.Resource{Type: "product", Id: "cX"}
 	plans := map[string][]projection.Plan{"product": {
 		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", child), productDoc("2")}}},
 	}}

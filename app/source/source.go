@@ -53,9 +53,8 @@ type FetchRelatedResult struct {
 
 // RelatedResource is a single related resource returned by FetchRelated.
 type RelatedResource struct {
-	ID      string
-	Data    map[string]any
-	Version int64 // 0 means provider does not supply version for this resource.
+	ID   string
+	Data map[string]any
 }
 
 type ListResourcesParams struct {

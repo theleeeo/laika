@@ -568,8 +568,8 @@ func TestBuildOne_Drift_RemarksStale_SoGuardedClearIsNoop(t *testing.T) {
 	doc := projection.BuildDoc{
 		Root: model.Resource{Type: "product", Id: "1"},
 		Doc:  map[string]any{"fields": map[string]any{"title": "t"}},
-		Relations: []model.VersionedResource{
-			{Resource: model.Resource{Type: "product", Id: "child"}, Version: 1},
+		Relations: []model.Resource{
+			{Type: "product", Id: "child"},
 		},
 	}
 	idx.plans = map[string][]projection.Plan{
@@ -596,9 +596,9 @@ func TestBuildOne_Drift_RemarksStale_SoGuardedClearIsNoop(t *testing.T) {
 }
 
 func productDocWith(id string, children ...string) projection.BuildDoc {
-	rels := make([]model.VersionedResource, len(children))
+	rels := make([]model.Resource, len(children))
 	for i, c := range children {
-		rels[i] = model.VersionedResource{Resource: product(c), Version: 1}
+		rels[i] = product(c)
 	}
 	return projection.BuildDoc{
 		Root:      product(id),

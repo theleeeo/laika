@@ -218,7 +218,7 @@ func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 				Root:      model.Resource{Type: "product", Id: "2"},
 				Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
 				Parents:   []model.Resource{{Type: "product", Id: "parent"}},
-				Relations: []model.VersionedResource{{Resource: model.Resource{Type: "product", Id: "child"}, Version: 1}},
+				Relations: []model.Resource{{Type: "product", Id: "child"}},
 			}}}
 		},
 		// The rebuild flusher's drift re-schedule. In production the flusher

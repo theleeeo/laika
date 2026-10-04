@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/theleeeo/laika/app/source"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/model"
 )
@@ -77,14 +76,14 @@ func relatedGate(token string) map[string]string {
 	return map[string]string{"test_related_gate": token, "test_related_gate_resource": "a"}
 }
 
-// Test_DriftCheck_ChildVersionAboveObserved_BuildsParentOnce: a/1 is
-// registered at version 10^15 and built. c/1 is then registered and built
-// once, ungated; its FetchRelated(a) serves a/1 with observed version 1, far
-// below the stored one. a/1's change_seq predates c/1's start, so the build
-// re-schedules nothing. The old check (stored Notification version above the
-// observed FetchRelated version) re-scheduled c/1 on every build forever;
-// WaitForIdle is bounded so that loop would fail instead of hang.
-func (t *TestSuite) Test_DriftCheck_ChildVersionAboveObserved_BuildsParentOnce() {
+// Test_DriftCheck_HighChildVersion_BuildsParentOnce: a/1 is registered at
+// version 10^15 and built. c/1 is then registered and built once, ungated;
+// its FetchRelated(a) serves a/1. a/1's change_seq predates c/1's start, so
+// the build re-schedules nothing, however far a/1's Notification version is
+// from anything the build holds. The old check (stored Notification version
+// above the version FetchRelated observed) re-scheduled c/1 on every build
+// forever; WaitForIdle is bounded so such a loop would fail instead of hang.
+func (t *TestSuite) Test_DriftCheck_HighChildVersion_BuildsParentOnce() {
 	t.setResourceConfig(RelatedResourceConfig)
 	const bigVersion = int64(1_000_000_000_000_000)
 
@@ -96,9 +95,7 @@ func (t *TestSuite) Test_DriftCheck_ChildVersionAboveObserved_BuildsParentOnce()
 	t.Require().Equal(bigVersion, t.resourceVersion("a", "1"))
 
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "cv1"})
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{
-		{ID: "1", Data: map[string]any{"id": "1", "f1": "av1"}, Version: 1},
-	})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av1"}})
 	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
 		ResourceType: "c", ResourceID: "1", Kind: core.ChangeCreated, Version: 1,
 	}))
@@ -117,9 +114,9 @@ func (t *TestSuite) Test_DriftCheck_ChildVersionAboveObserved_BuildsParentOnce()
 // after snapshotting a/1 at av1. c/1 has no edges yet, so a/1's registration
 // (av2, accepted, change_seq above c/1's start) cannot fan out to it. Released,
 // the build writes av1, finds a/1 above its start and re-schedules once; the
-// second build fetches av2 and finds nothing newer. The relation is served
-// unversioned (observed version 0), which the old version check skipped — no
-// re-schedule, av1 would have stayed.
+// second build fetches av2 and finds nothing newer. The old check compared
+// a relation's observed version and skipped one the provider served without
+// it — no re-schedule, av1 would have stayed.
 func (t *TestSuite) Test_DriftCheck_ChildRegisteredDuringParentFirstBuild_ReschedulesOnce() {
 	t.setResourceConfig(RelatedResourceConfig)
 

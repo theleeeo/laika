@@ -66,9 +66,8 @@ func (p *GRPCProvider) FetchRelated(ctx context.Context, params FetchRelatedPara
 	result := make([]RelatedResource, len(resp.RelatedResources))
 	for i, s := range resp.RelatedResources {
 		result[i] = RelatedResource{
-			ID:      s.ResourceId,
-			Data:    s.Data.AsMap(),
-			Version: s.Version,
+			ID:   s.ResourceId,
+			Data: s.Data.AsMap(),
 		}
 	}
 	return FetchRelatedResult{Related: result}, nil

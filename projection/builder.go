@@ -32,7 +32,7 @@ type BuildDoc struct {
 	// Relations are the forward edges discovered during the build — the
 	// children this document references. Core persists them in the Relation
 	// graph.
-	Relations []model.VersionedResource
+	Relations []model.Resource
 
 	// Parents are the reverse edges derived from the root's own data — the
 	// Parents that should also be built so they include this resource. The Plan

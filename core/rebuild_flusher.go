@@ -96,7 +96,7 @@ type driftBase struct {
 type pendingItem struct {
 	BulkItem
 	version   int
-	relations []model.VersionedResource
+	relations []model.Resource
 }
 
 // rebuildFlusher streams a rebuild's documents to the backend in bounded bulk
@@ -161,7 +161,7 @@ func (f *rebuildFlusher) occ(id string) (int64, bool) {
 
 // add queues one plan document of Schema Version version. Flushes when the
 // chunk bound is reached.
-func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.VersionedResource) error {
+func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.Resource) error {
 	p := f.state[item.ID]
 	if p == nil || p.failed {
 		return nil
@@ -299,7 +299,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 		sets := make([]EdgeSet, 0, len(docs))
 		at := make(map[int]int, len(docs))
 		for _, it := range docs {
-			set := EdgeSet{SchemaVersion: it.version, Children: relationResources(it.relations)}
+			set := EdgeSet{SchemaVersion: it.version, Children: it.relations}
 			// A version listed twice in one chunk: its later document is the
 			// one the bulk write left in place.
 			if i, ok := at[it.version]; ok {
@@ -341,7 +341,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: f.root(id), Start: p.drift.start})
 			}
 			for _, r := range it.relations {
-				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: r.Resource, Start: p.drift.start})
+				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: r, Start: p.drift.start})
 			}
 			if p.remaining > 0 {
 				p.remaining--

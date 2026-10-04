@@ -50,8 +50,10 @@ message RootResource {
 message FetchRelatedResponse { repeated RelatedResource related_resources = 1; }
 
 message RelatedResource {
+  reserved 2;
+  reserved "version";
+
   google.protobuf.Struct data = 1;
-  int64 version = 2;
   string resource_id = 3;
 }
 

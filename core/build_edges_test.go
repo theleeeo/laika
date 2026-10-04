@@ -22,18 +22,11 @@ func (b *captureBackend) upsertsSnapshot() []string {
 // newEdgeBuildIndexer is a two-version product type whose v1 plan finds the
 // children v1 and whose v2 plan finds the children v2.
 func newEdgeBuildIndexer(st Store, es SearchBackend, v1, v2 []model.Resource) *Indexer {
-	versioned := func(rs []model.Resource) []model.VersionedResource {
-		out := make([]model.VersionedResource, len(rs))
-		for i, r := range rs {
-			out[i] = model.VersionedResource{Resource: r, Version: 1}
-		}
-		return out
-	}
 	return mustNew(Config{
 		Resources: twoVersionResources(),
 		Plans: map[string][]projection.Plan{"product": {
-			{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", versioned(v1)...)}}},
-			{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", versioned(v2)...)}}},
+			{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", v1...)}}},
+			{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", v2...)}}},
 		}},
 		ES:    es,
 		Store: st,

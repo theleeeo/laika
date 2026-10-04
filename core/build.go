@@ -173,7 +173,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return fmt.Errorf("plans for %s/%s disagree on existence: version(s) %v returned no data; leaving stale for retry", resourceType, resourceID, missing)
 	}
 
-	var allRelations []model.VersionedResource
+	var allRelations []model.Resource
 	var parents []model.Resource
 	seenParents := make(map[model.Resource]bool)
 	for _, vd := range docs {
@@ -209,7 +209,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// dropped.
 	sets := make([]EdgeSet, len(docs))
 	for i, vd := range docs {
-		sets[i] = EdgeSet{SchemaVersion: vd.version, Children: relationResources(vd.doc.Relations)}
+		sets[i] = EdgeSet{SchemaVersion: vd.version, Children: vd.doc.Relations}
 	}
 	declared := make([]int, len(plans))
 	for i, p := range plans {
@@ -241,7 +241,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	if len(allRelations) > 0 {
 		checks := make([]ChangeCheck, len(allRelations))
 		for i, r := range allRelations {
-			checks[i] = ChangeCheck{Resource: r.Resource, Start: start}
+			checks[i] = ChangeCheck{Resource: r, Start: start}
 		}
 		drift, err := idx.st.AnyChangedSince(ctx, checks)
 		if err != nil {
@@ -259,16 +259,6 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	}
 
 	return nil
-}
-
-// relationResources is the resources of relations, without their versions:
-// an edge set's Children.
-func relationResources(relations []model.VersionedResource) []model.Resource {
-	out := make([]model.Resource, len(relations))
-	for i, r := range relations {
-		out[i] = r.Resource
-	}
-	return out
 }
 
 func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebuildResume) error {

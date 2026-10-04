@@ -226,7 +226,8 @@ func (f *FakeProvider) DeleteResource(resourceType, resourceID string) {
 	delete(f.resources, resourceType+"|"+resourceID)
 }
 
-// TODO: Remove
+// SetRelated stores the related resources FetchRelated serves for
+// resourceType keyed by keyValues; each item's "id" is its resource ID.
 func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, related []map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -238,25 +239,6 @@ func (f *FakeProvider) SetRelated(resourceType string, keyValues []string, relat
 	for i, d := range related {
 		id, _ := d["id"].(string)
 		rr[i] = source.RelatedResource{ID: id, Data: d}
-	}
-	f.relations[key] = rr
-}
-
-// SetRelatedVersioned stores related resources with per-item version data.
-func (f *FakeProvider) SetRelatedVersioned(resourceType string, keyValues []string, related []source.RelatedResource) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := resourceType
-	for _, v := range keyValues {
-		key += "|" + v
-	}
-	rr := make([]source.RelatedResource, len(related))
-	for i, d := range related {
-		cloned := make(map[string]any, len(d.Data))
-		for k, v := range d.Data {
-			cloned[k] = v
-		}
-		rr[i] = source.RelatedResource{ID: d.ID, Data: cloned, Version: d.Version}
 	}
 	f.relations[key] = rr
 }
@@ -326,7 +308,7 @@ func (f *FakeProvider) FetchRelated(_ context.Context, params source.FetchRelate
 			for k, v := range d.Data {
 				cloned[k] = v
 			}
-			snapshot[i] = source.RelatedResource{ID: d.ID, Data: cloned, Version: d.Version}
+			snapshot[i] = source.RelatedResource{ID: d.ID, Data: cloned}
 		}
 	}
 	var gate *fetchGate

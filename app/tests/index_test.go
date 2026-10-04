@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/theleeeo/laika/app/source"
 	"github.com/theleeeo/laika/core"
 )
 
@@ -1126,9 +1125,6 @@ func (t *TestSuite) Test_ConcurrentRequests_SameResource_BlockedOlderCannotOverw
 // The child updates are modelled in the source (resource and relation data,
 // not Notification metadata), so every Build fetches what the source holds at
 // that moment — the mechanism that actually drives convergence in production.
-// The relation versions are still served but not read by the drift check,
-// which compares Change Sequence values, never observed versions.
-//
 // Field values are single letter/digit runs ("av2", not "a_v2") on purpose. The
 // searchable surfaces are n-grammed with token_chars letter+digit and min_gram
 // 2, so "_" splits the text and a one-character component like the "a" in
@@ -1145,8 +1141,8 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av1"})
 	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "bv1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "cbase"})
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av1"}, Version: 1}})
-	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "bv1"}, Version: 1}})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av1"}})
+	t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "bv1"}})
 
 	for _, n := range []core.Notification{
 		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
@@ -1169,7 +1165,7 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	go func() {
 		defer wg.Done()
 		t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av2"})
-		t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av2"}, Version: 2}})
+		t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av2"}})
 		<-start
 		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
 			ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 2,
@@ -1180,7 +1176,7 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 	go func() {
 		defer wg.Done()
 		t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "bv2"})
-		t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "bv2"}, Version: 2}})
+		t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "bv2"}})
 		<-start
 		errCh <- t.idx.RegisterChange(t.T().Context(), core.Notification{
 			ResourceType: "b", ResourceID: "1", Kind: core.ChangeUpdated, Version: 2,
@@ -1196,7 +1192,7 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 
 	// A final update to a. This is the value c must ultimately reflect for a.
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av3"})
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av3"}, Version: 3}})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av3"}})
 	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
 		ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 3,
 	}))
@@ -1257,10 +1253,8 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av1"})
 	t.fakeProvider.SetResource("b", "1", map[string]any{"id": "1", "f1": "bv1"})
 	t.fakeProvider.SetResource("c", "1", map[string]any{"id": "1", "f1": "cv1"})
-	// The relation versions are served but not read by the drift check, which
-	// compares Change Sequence values.
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av1"}, Version: 1}})
-	t.fakeProvider.SetRelatedVersioned("b", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "bv1"}, Version: 1}})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av1"}})
+	t.fakeProvider.SetRelated("b", []string{"1"}, []map[string]any{{"id": "1", "f1": "bv1"}})
 
 	for _, n := range []core.Notification{
 		{ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1},
@@ -1295,7 +1289,7 @@ func (t *TestSuite) Test_RaceCondition_ChildUpdatedDuringParentBuild() {
 	// version 2 in the source and notify. The accepted change stamps a/1's
 	// change_seq above the start c's build took at BeginBuild.
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "f1": "av2"})
-	t.fakeProvider.SetRelatedVersioned("a", []string{"1"}, []source.RelatedResource{{ID: "1", Data: map[string]any{"id": "1", "f1": "av2"}, Version: 2}})
+	t.fakeProvider.SetRelated("a", []string{"1"}, []map[string]any{{"id": "1", "f1": "av2"}})
 
 	t.Require().NoError(t.idx.RegisterChange(t.T().Context(), core.Notification{
 		ResourceType: "a",

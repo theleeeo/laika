@@ -99,10 +99,7 @@ func relationBuilder(rel resource.RelationConfig) func(projection.BuildDoc, *fet
 			if r.ID == "" {
 				continue
 			}
-			parentDoc.Relations = append(parentDoc.Relations, model.VersionedResource{
-				Resource: model.Resource{Type: fr.ResourceType, Id: r.ID},
-				Version:  r.Version,
-			})
+			parentDoc.Relations = append(parentDoc.Relations, model.Resource{Type: fr.ResourceType, Id: r.ID})
 		}
 
 		// Update the resolved map so downstream relations can reference this data.
