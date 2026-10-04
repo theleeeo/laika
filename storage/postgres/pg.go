@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/theleeeo/laika/core"
@@ -44,10 +47,23 @@ func (s *Store) AddRelations(ctx context.Context, relations []core.Relation) err
 	return nil
 }
 
+func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
+	var relations []core.Relation
+	for _, child := range childs {
+		relations = append(relations, core.Relation{
+			Parent: parent,
+			Child:  child,
+		})
+	}
+	return s.AddRelations(ctx, relations)
+}
+
+// GetParentResources returns the Parents of childResource: every resource
+// with an edge to it in any Schema Version's set, each once.
 func (s *Store) GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error) {
 	rows, err := s.pool.Query(
 		ctx,
-		`SELECT resource, resource_id FROM relations WHERE related_resource=$1 AND related_resource_id=$2`,
+		`SELECT DISTINCT resource, resource_id FROM relations WHERE related_resource=$1 AND related_resource_id=$2`,
 		childResource.Type, childResource.Id,
 	)
 	if err != nil {
@@ -63,13 +79,15 @@ func (s *Store) GetParentResources(ctx context.Context, childResource model.Reso
 		}
 		parents = append(parents, model.Resource{Type: parentResource, Id: parentResourceId})
 	}
-	return parents, nil
+	return parents, rows.Err()
 }
 
+// GetChildResources returns the Children of parentResource: the union of
+// its stored edge sets across Schema Versions, each Child once.
 func (s *Store) GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error) {
 	rows, err := s.pool.Query(
 		ctx,
-		`SELECT related_resource, related_resource_id FROM relations WHERE resource=$1 AND resource_id=$2`,
+		`SELECT DISTINCT related_resource, related_resource_id FROM relations WHERE resource=$1 AND resource_id=$2`,
 		parentResource.Type, parentResource.Id,
 	)
 	if err != nil {
@@ -85,31 +103,154 @@ func (s *Store) GetChildResources(ctx context.Context, parentResource model.Reso
 		}
 		children = append(children, model.Resource{Type: childResource, Id: childResourceId})
 	}
-	return children, nil
+	return children, rows.Err()
 }
 
+// RemoveResource removes every stored edge set of resource, with its edges,
+// in one transaction. It first locks the sets in ascending schema_version
+// order, as ReplaceEdges does, so the two never deadlock, and then removes
+// exactly the versions it locked: a version a concurrent replace stores
+// after the lock statement's snapshot is left to that replace, as if it ran
+// after this removal. (The removal itself is unguarded; ordering it against
+// a build is L2.1's.)
 func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) error {
-	_, err := s.pool.Exec(
-		ctx,
-		`DELETE FROM relations WHERE resource=$1 AND resource_id=$2`,
-		resource.Type, resource.Id,
-	)
-	return err
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT schema_version FROM edge_sets WHERE type=$1 AND id=$2
+			 ORDER BY schema_version FOR UPDATE`,
+			resource.Type, resource.Id,
+		)
+		if err != nil {
+			return err
+		}
+		locked, err := pgx.CollectRows(rows, pgx.RowTo[int32])
+		if err != nil || len(locked) == 0 {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM relations WHERE resource=$1 AND resource_id=$2 AND schema_version = ANY($3::int[])`,
+			resource.Type, resource.Id, locked,
+		); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx,
+			`DELETE FROM edge_sets WHERE type=$1 AND id=$2 AND schema_version = ANY($3::int[])`,
+			resource.Type, resource.Id, locked,
+		)
+		return err
+	})
 }
 
+// ReplaceEdges stores a build's edge sets per Schema Version, guarded by the
+// Build Sequence (see core.Store), in one transaction of two phases.
+//
+// Phase one takes the edge_sets row of every version the call touches, one
+// statement per version, in ascending version order: a version in sets
+// with a guarded upsert that accepts buildSeq when the stored stamp is not
+// above it, and — when declared is non-nil — a stored version outside both
+// declared and sets with a delete guarded the same way. A returned row is
+// an accepted or dropped version. Phase two rewrites the relations of
+// those versions in statements of their own: under READ COMMITTED a guard
+// that waited for a concurrent replace's row lock re-checks against the row
+// that replace committed, but a later clause of the same statement would
+// read the pre-lock snapshot and miss the edges it inserted. Each phase-two
+// statement starts after every lock is held, so it sees them.
+//
+// It cannot deadlock against another ReplaceEdges, whatever declared each
+// carries, or against RemoveResource: each takes a resource's edge_sets
+// rows in ascending schema_version order and holds them to commit, and
+// touches a version's relations only while holding that version's row. So
+// a call only ever waits for a row above every row it holds, and no cycle
+// of waits can form. The undeclared versions are read without a lock
+// before phase one; one stored after that read is left alone, as if it
+// were stored after this call.
 func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
-	return errors.New("ReplaceEdges: not implemented")
-}
-
-func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
-	var relations []core.Relation
-	for _, child := range childs {
-		relations = append(relations, core.Relation{
-			Parent: parent,
-			Child:  child,
-		})
+	children := make(map[int][]model.Resource, len(sets))
+	for _, set := range sets {
+		if _, dup := children[set.SchemaVersion]; dup {
+			return fmt.Errorf("replace edges of %s/%s: schema version %d named twice", resource.Type, resource.Id, set.SchemaVersion)
+		}
+		children[set.SchemaVersion] = set.Children
 	}
-	return s.AddRelations(ctx, relations)
+	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		versions := slices.Collect(maps.Keys(children))
+		if declared != nil {
+			rows, err := tx.Query(ctx,
+				`SELECT schema_version FROM edge_sets
+				 WHERE type=$1 AND id=$2 AND NOT schema_version = ANY($3::int[])`,
+				resource.Type, resource.Id, declared,
+			)
+			if err != nil {
+				return err
+			}
+			undeclared, err := pgx.CollectRows(rows, pgx.RowTo[int32])
+			if err != nil {
+				return err
+			}
+			for _, v := range undeclared {
+				if _, inSets := children[int(v)]; !inSets {
+					versions = append(versions, int(v))
+				}
+			}
+		}
+		slices.Sort(versions)
+
+		var cleared, addVersions []int
+		var addTypes, addIds []string
+		for _, v := range versions {
+			kids, inSets := children[v]
+			guarded := `DELETE FROM edge_sets
+			            WHERE type=$1 AND id=$2 AND schema_version=$3 AND build_seq <= $4
+			            RETURNING true`
+			if inSets {
+				guarded = `INSERT INTO edge_sets AS e (type, id, schema_version, build_seq)
+				           VALUES ($1, $2, $3, $4)
+				           ON CONFLICT (type, id, schema_version) DO UPDATE
+				           SET build_seq = EXCLUDED.build_seq
+				           WHERE e.build_seq <= EXCLUDED.build_seq
+				           RETURNING true`
+			}
+			var ok bool
+			err := tx.QueryRow(ctx, guarded, resource.Type, resource.Id, v, buildSeq).Scan(&ok)
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue // stamped above buildSeq: left unchanged
+			}
+			if err != nil {
+				return err
+			}
+			cleared = append(cleared, v)
+			for _, c := range kids {
+				addVersions = append(addVersions, v)
+				addTypes = append(addTypes, c.Type)
+				addIds = append(addIds, c.Id)
+			}
+		}
+		if len(cleared) == 0 {
+			return nil
+		}
+
+		if _, err := tx.Exec(ctx,
+			`DELETE FROM relations r
+			 WHERE r.resource=$1 AND r.resource_id=$2 AND r.schema_version = ANY($3::int[])
+			   AND NOT EXISTS (
+			       SELECT 1 FROM unnest($4::int[], $5::text[], $6::text[]) AS x(v, t, i)
+			       WHERE x.v = r.schema_version AND x.t = r.related_resource AND x.i = r.related_resource_id
+			   )`,
+			resource.Type, resource.Id, cleared, addVersions, addTypes, addIds,
+		); err != nil {
+			return err
+		}
+		if len(addVersions) == 0 {
+			return nil
+		}
+		_, err := tx.Exec(ctx,
+			`INSERT INTO relations (resource, resource_id, schema_version, related_resource, related_resource_id)
+			 SELECT $1, $2, v, t, i FROM unnest($3::int[], $4::text[], $5::text[]) AS x(v, t, i)
+			 ON CONFLICT DO NOTHING`,
+			resource.Type, resource.Id, addVersions, addTypes, addIds,
+		)
+		return err
+	})
 }
 
 // RegisterChanges records a batch of changes in one statement, so each

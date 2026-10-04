@@ -25,15 +25,33 @@ CREATE TABLE IF NOT EXISTS resources (
 CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
     WHERE stale_since IS NOT NULL;
 
+-- The edges of the Relation graph, Parent (resource) to Child (related), one
+-- set per Schema Version: each version's plan finds its own Children, and a
+-- version's set is replaced only by a build at or above its edge_sets stamp.
+-- Fanout reads the union across versions.
 CREATE TABLE IF NOT EXISTS relations (
 	resource VARCHAR NOT NULL,
 	resource_id VARCHAR NOT NULL,
+	schema_version INTEGER NOT NULL,        -- the Schema Version whose plan found the edge
 	related_resource VARCHAR NOT NULL,
 	related_resource_id VARCHAR NOT NULL,
-	UNIQUE (resource, resource_id, related_resource, related_resource_id)
+	UNIQUE (resource, resource_id, schema_version, related_resource, related_resource_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resource ON relations (resource, resource_id);
 CREATE INDEX IF NOT EXISTS idx_related_resource ON relations (related_resource, related_resource_id);
+
+-- One row per stored edge set: a resource's edges of one Schema Version, as
+-- the build stamped in build_seq wrote them. A version's relations rows
+-- exist only with its row here; an empty set is a row with no relations.
+-- Writers of a resource's edges lock its rows here in ascending
+-- schema_version order (ReplaceEdges, RemoveResource).
+CREATE TABLE IF NOT EXISTS edge_sets (
+    type VARCHAR NOT NULL,
+    id VARCHAR NOT NULL,
+    schema_version INTEGER NOT NULL,
+    build_seq BIGINT NOT NULL,              -- Build Sequence of the build that wrote the set
+    PRIMARY KEY (type, id, schema_version)
+);
 
 -- Keep the Change Sequence ahead of every stamp. A sequence behind the stamps
 -- — recreated, RESTARTed, or left behind by a restore of the table alone —

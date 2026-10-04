@@ -404,12 +404,13 @@ func seed(t *testing.T, res model.Resource, version, staleSeq int64, deleted boo
 	}
 }
 
-// relate writes parent -> child relations directly.
+// relate writes parent -> child relations of Schema Version 1 directly,
+// without an edge set: RegisterChanges reads relations only.
 func relate(t *testing.T, pairs ...[2]model.Resource) {
 	t.Helper()
 	for _, p := range pairs {
 		if _, err := testPool.Exec(context.Background(),
-			`INSERT INTO relations (resource, resource_id, related_resource, related_resource_id) VALUES ($1, $2, $3, $4)`,
+			`INSERT INTO relations (resource, resource_id, schema_version, related_resource, related_resource_id) VALUES ($1, $2, 1, $3, $4)`,
 			p[0].Type, p[0].Id, p[1].Type, p[1].Id); err != nil {
 			t.Fatalf("relate: %v", err)
 		}
@@ -1086,16 +1087,22 @@ type gate struct {
 // lockRow opens a gate on res's row. The test's cleanup releases it too.
 func lockRow(t *testing.T, pool *pgxpool.Pool, res model.Resource) *gate {
 	t.Helper()
+	return openGate(t, pool, `SELECT pg_backend_pid() FROM resources WHERE type=$1 AND id=$2 FOR UPDATE`, res.Type, res.Id)
+}
+
+// openGate opens a gate whose lock query selects pg_backend_pid() from the
+// one row it locks FOR UPDATE. The test's cleanup releases it too.
+func openGate(t *testing.T, pool *pgxpool.Pool, lock string, args ...any) *gate {
+	t.Helper()
 	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin gate: %v", err)
 	}
 	g := &gate{tx: tx}
-	if err := tx.QueryRow(ctx,
-		`SELECT pg_backend_pid() FROM resources WHERE type=$1 AND id=$2 FOR UPDATE`, res.Type, res.Id).Scan(&g.pid); err != nil {
+	if err := tx.QueryRow(ctx, lock, args...).Scan(&g.pid); err != nil {
 		_ = tx.Rollback(ctx)
-		t.Fatalf("gate lock on %s/%s: %v", res.Type, res.Id, err)
+		t.Fatalf("gate lock %v: %v", args, err)
 	}
 	var once sync.Once
 	g.release = func() {
