@@ -139,7 +139,9 @@ timeout or shutdown as success (the row stays stale for the sweep). This covers:
   resource unmarked, so that change is not swept — it recovers only when the
   next Notification for the same resource arrives and marks it.
 - **The drift-check re-build** — the [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md)
-  convergence signal for a concurrent Child update during the edge-less window.
+  convergence signal for a concurrent Child update during the edge-less window
+  _(since runbook step L1.5 no build leaves a Parent without edges, and the
+  signal covers a Child update racing the edge write: ADR 0002's L1.5 note)_.
 - **The [ADR 0006](./0006-reverse-relation-discovery-bootstraps-parent-edges.md)
   parent cascade** — the reverse-relation bootstrap for brand-new Parents.
 
@@ -231,8 +233,9 @@ and gets swept. That is the whole of the crash-recovery design.
 - **At-least-once now spans mark → sweep, not River retries.** This amends the
   re-enqueue leg of [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md):
   the other two legs — Build Sequence OCC ordering and the wipe-and-replace edge
-  rebuild — and the drift check itself are unchanged. "A Build runs at least
-  once for a given change" is now guaranteed by the durable mark and the sweep
+  rebuild — and the drift check itself are unchanged. _(Since runbook step L1.5
+  the edge leg is a per-version replace guarded by the Build Sequence, with no
+  wipe: ADR 0002's L1.5 note.)_ "A Build runs at least once for a given change" is now guaranteed by the durable mark and the sweep
   rather than by a job queue's retry count.
 - **River is removed entirely** — the worker client wiring, the River tables and
   migrations, and the dependency.

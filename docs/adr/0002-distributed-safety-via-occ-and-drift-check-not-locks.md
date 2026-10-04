@@ -1,5 +1,60 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-04, runbook step L1.5):** leg 2 is a **per-version replace
+> guarded by the Build Sequence**, with no wipe. Edges are stored per Schema
+> Version: each `relations` row carries the `schema_version` whose plan found
+> it, and an `edge_sets` row (`type, id, schema_version, build_seq`) stamps
+> each version's set with the Build Sequence of the build that wrote it.
+> `Store.ReplaceEdges` replaces, in one transaction, each given version's set
+> when the build's sequence is not below its stamp, and leaves a set stamped
+> higher unchanged. So each version's edges follow the Build Sequence like its
+> document does (leg 1): they come from the build whose document
+> Elasticsearch keeps. Fanout — the `RegisterChanges` Parents read,
+> `GetParentResources`, `GetChildResources` — reads the union across
+> versions, each resource once.
+>
+> - **No build path wipes.** The live build (`buildOne`) replaces each
+>   version's set at its Build Sequence after its Elasticsearch writes, also
+>   for a version whose write lost OCC: the stamp orders the two builds' sets
+>   as Elasticsearch ordered their documents. A rebuild flush replaces the set
+>   of each (resource, version) document it landed, so a version-targeted
+>   rebuild replaces exactly its versions' sets and leaves the others alone.
+>   A delete (`RemoveResource`) removes every set it locks, not yet guarded by
+>   the Build Sequence (runbook step L2.1).
+> - **Only the live build declares.** It runs every configured plan, so it
+>   passes the configured versions as `declared`, and the same transaction
+>   drops the undeclared sets stamped at or below its sequence; a rebuild
+>   passes none. An instance on an older config during a rolling deploy
+>   therefore can't drop a version a newer build wrote: that set is stamped
+>   above it. The undeclared versions are read without a lock before the
+>   guarded statements, so a set stored after that read isn't pruned — extra
+>   fanout only, until the next live build.
+> - **One lock order.** Every writer of a resource's edges takes the
+>   resource's `edge_sets` rows in ascending `schema_version` order and holds
+>   them to commit (`ReplaceEdges`, `RemoveResource`), so two writers never
+>   wait on each other in a cycle. A new writer takes them the same way. The
+>   row locks last one short transaction, never a fetch: the rejection below
+>   of a lock held across Plan execution stands.
+>
+> This supersedes two claims below. Leg 2's "a rebuild starts by removing the
+> Parent's outgoing Relation rows" and the closing "do not 'optimise' away the
+> edge wipe at the start of Build": there is no wipe to keep, and what a
+> change to Build must preserve is that edges are written only through the
+> guarded replace. And leg 3's "edge-less window": no build leaves a resource
+> without edges while it builds, so a change to a Child in both the old and
+> the new set reaches the Parent by fanout. The drift check still covers a
+> Child new to the Parent's edges, whose registration can read the edges
+> before the build commits them (seam S6 in laika-dev's
+> `docs/open-questions.md`).
+>
+> Why: the wipe and the re-add were separate commits, so a slower build that
+> wiped and re-added after a newer one left its own edges beside the newer
+> build's document, and a change to a Child only the newer build found
+> reached no Parent; the drift check, which compares only each build's own
+> Children, didn't catch it. One stamp per resource couldn't order a
+> version-targeted rebuild, which runs only some versions' plans, against a
+> live build; one per version can.
+
 > **Note (2026-10-02, runbook step L1.3):** leg 3 compares the **Change
 > Sequence**, not upstream versions. Every change `RegisterChanges` accepts —
 > upserts, version-0 notifications and deletes — is stamped with the next value

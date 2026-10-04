@@ -13,7 +13,7 @@ The upstream service's notion of how current a resource is, carried on a [[notif
 The versioned shape of an indexed document — which fields are present, which relations are pulled, which index name it lives under (e.g. `a_search_v2`). A single resource type can have multiple Schema Versions in flight simultaneously, used for zero-downtime migrations between document shapes.
 
 **Build Sequence**:
-The indexer's own per-resource monotonic counter, bumped on every build of a given resource. Used as the value for Elasticsearch's `external_gte` versioning so that concurrent rebuilds of the same document land in the correct order. Has nothing to do with the upstream — it exists purely to serialise writes to a single ES document across distributed indexer instances.
+The indexer's own per-resource monotonic counter, bumped on every build of a given resource. Used as the value for Elasticsearch's `external_gte` versioning so that concurrent rebuilds of the same document land in the correct order. Has nothing to do with the upstream — it exists purely to serialise writes to a single ES document, and to the resource's [[edge set]]s, across distributed indexer instances.
 
 **Change Sequence**:
 A global Postgres sequence the indexer owns (`change_sequence`). Every change `RegisterChanges` accepts — upserts, version-`0` notifications and deletes alike — is stamped with its next value in `resources.change_seq`; a stale-rejected notification, a [[stale mark]] and `BeginBuild` leave the stamp alone. Each build takes a start from the same sequence before its fetches — from `BeginBuild`, or, in a [[rebuild]] walk, one per plan walk before its first page — and the drift check asks whether any resource the build fetched has a `change_seq` above that start; if so, the build re-schedules itself. Like the Build Sequence it has nothing to do with upstream Versions, so no upstream clock, unit or precision can make the check loop.
@@ -24,7 +24,10 @@ A global Postgres sequence the indexer owns (`change_sequence`). Every change `R
 A single item from an upstream service, identified by Type and ID. The atomic unit the indexer reasons about.
 
 **Relation**:
-A directed link from one Resource to another: a Parent contains a Child in its indexed document. The word is used consistently — in the YAML config (`relations:`), in the Store's persisted edges, and in prose.
+A directed link from one Resource to another: a Parent contains a Child in its indexed document. The word is used consistently — in the YAML config (`relations:`), in the Store's persisted edges, and in prose. Each [[schema version]]'s Plan finds its own Children, so the Store keeps a Parent's edges per Schema Version, one [[edge set]] each; fanout reads their union, each Parent once.
+
+**Edge set**:
+One Resource's edges of one [[schema version]] — the Children that version's Plan found — stamped with the [[build sequence]] of the build that wrote it (`edge_sets.build_seq`). Replaced only by a build at or above that stamp (`Store.ReplaceEdges`), so a version's edges come from the build whose [[document]] Elasticsearch keeps for that version; no build removes them first. A [[build]], which runs every configured Plan, also drops the sets of Schema Versions the config no longer declares, when stamped at or below it; a [[rebuild]] replaces only the sets of the versions whose documents it wrote. A delete removes them all (`RemoveResource`).
 
 **Parent / Child**:
 The two endpoints of a Relation. The Parent is the Resource whose document includes data from the Child. A single Resource is a Parent in some Relations and a Child in others — these are roles, not types.
