@@ -77,10 +77,13 @@ func (s *Store) GetChildResources(ctx context.Context, parentResource model.Reso
 // order, as ReplaceEdges does, so the two never deadlock, and then removes
 // exactly the versions it locked: a version a concurrent replace stores
 // after the lock statement's snapshot is left to that replace, as if it ran
-// after this removal. (The removal itself is unguarded; ordering it against
+// after this removal. The transaction is pinned to READ COMMITTED, whatever
+// the server default: a lock that waited for a concurrent replace then locks
+// the row that replace committed, where REPEATABLE READ would fail it with a
+// serialization error. (The removal itself is unguarded; ordering it against
 // a build is L2.1's.)
 func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) error {
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT schema_version FROM edge_sets WHERE type=$1 AND id=$2
 			 ORDER BY schema_version FOR UPDATE`,
@@ -120,16 +123,27 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) err
 // that waited for a concurrent replace's row lock re-checks against the row
 // that replace committed, but a later clause of the same statement would
 // read the pre-lock snapshot and miss the edges it inserted. Each phase-two
-// statement starts after every lock is held, so it sees them.
+// statement starts after every lock is held, so it sees them. The
+// transaction is pinned to READ COMMITTED, whatever the server default: under
+// REPEATABLE READ that waiting guard would fail with a serialization error
+// instead of re-checking.
 //
 // It cannot deadlock against another ReplaceEdges, whatever declared each
 // carries, or against RemoveResource: each takes a resource's edge_sets
 // rows in ascending schema_version order and holds them to commit, and
 // touches a version's relations only while holding that version's row. So
 // a call only ever waits for a row above every row it holds, and no cycle
-// of waits can form. The undeclared versions are read without a lock
-// before phase one; one stored after that read is left alone, as if it
-// were stored after this call.
+// of waits can form.
+//
+// The undeclared versions are read without a lock before phase one, so the
+// call drops only versions stored before that read. The outcome is decided
+// per version, not as if the whole of a concurrent replace ran after this
+// call: say this call (sequence 20, declared {1}, sets {1}) reads no
+// undeclared version, and then a replace at 10 with no declared list stores
+// versions 1 and 2 and commits. This call overwrites version 1 and leaves
+// version 2, stamped 10 and undeclared. That is harmless: the leftover set
+// only adds edges — extra fanout to this resource — until the next live
+// build, which declares its versions, prunes it.
 func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
 	children := make(map[int][]model.Resource, len(sets))
 	for _, set := range sets {
@@ -138,7 +152,7 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 		}
 		children[set.SchemaVersion] = set.Children
 	}
-	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		versions := slices.Collect(maps.Keys(children))
 		if declared != nil {
 			rows, err := tx.Query(ctx,

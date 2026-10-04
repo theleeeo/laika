@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/model"
@@ -346,6 +347,31 @@ func TestReplaceEdges_DifferentDeclaredSetsDoNotDeadlock(t *testing.T) {
 	requireSets(t, p, map[int]stored{3: stamped(11, c("y"))})
 }
 
+// A child repeated within one set is stored once for its version, and the
+// same child in two versions once per version; GetChildResources reads it
+// once. A replace of the set keeps it once.
+func TestReplaceEdges_ARepeatedChildIsStoredOncePerVersion(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	c := func(id string) model.Resource { return model.Resource{Type: "re13c", Id: id} }
+	p := model.Resource{Type: "re13", Id: "p"}
+
+	replace(t, st, p, 5, nil, edgeSet(1, c("a"), c("b"), c("a")), edgeSet(2, c("a"), c("a")))
+	requireSets(t, p, map[int]stored{1: stamped(5, c("a"), c("b")), 2: stamped(5, c("a"))})
+
+	children, err := st.GetChildResources(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortResources(children)
+	if want := []model.Resource{c("a"), c("b")}; !reflect.DeepEqual(children, want) {
+		t.Errorf("children of p: got %v, want %v, each once", children, want)
+	}
+
+	replace(t, st, p, 6, nil, edgeSet(1, c("a"), c("a")))
+	requireSets(t, p, map[int]stored{1: stamped(6, c("a")), 2: stamped(5, c("a"))})
+}
+
 // A delete removes every version while a build replaces two of them: both
 // lock the sets in ascending version order, so neither waits for a set the
 // other holds while holding one it needs.
@@ -365,4 +391,65 @@ func TestRemoveResource_DoesNotDeadlockWithAReplace(t *testing.T) {
 	queueBehind(t, lockEdgeSet(t, p, 1), rep, rm)
 
 	requireSets(t, p, map[int]stored{})
+}
+
+// The same race with the gate on version 2. The replace takes version 1 and
+// queues on 2; the remove then queues on version 1 behind it. A replace that
+// took its versions in another order — 2 before 1 — would get 2 once the gate
+// commits and wait for 1, held by the remove, which waits for it on 2: a
+// deadlock.
+func TestRemoveResource_DoesNotDeadlockWithAReplaceHoldingTheLowerVersion(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	c := func(id string) model.Resource { return model.Resource{Type: "re14c", Id: id} }
+	p := model.Resource{Type: "re14", Id: "p"}
+	replace(t, st, p, 1, nil, edgeSet(1, c("a")), edgeSet(2, c("b")))
+
+	rep := func() error {
+		return st.ReplaceEdges(ctx, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
+	}
+	rm := func() error { return st.RemoveResource(ctx, p) }
+	queueBehind(t, lockEdgeSet(t, p, 2), rep, rm)
+
+	requireSets(t, p, map[int]stored{})
+}
+
+// repeatableReadStore is a Store on a pool whose sessions default to
+// REPEATABLE READ, as a server configured so would hand out.
+func repeatableReadStore(t *testing.T) *Store {
+	t.Helper()
+	cfg := testPool.Config().Copy()
+	cfg.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("pgxpool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return NewStore(pool)
+}
+
+// ReplaceEdges and RemoveResource re-check a row a concurrent replace
+// committed while they waited for it, which needs READ COMMITTED: they pin it,
+// so a server defaulting to REPEATABLE READ does not turn the wait into a
+// serialization failure.
+func TestReplaceEdgesAndRemoveResource_WaitUnderARepeatableReadDefault(t *testing.T) {
+	ctx := context.Background()
+	st := repeatableReadStore(t)
+	c := func(id string) model.Resource { return model.Resource{Type: "re15c", Id: id} }
+	repAt := func(p model.Resource, seq int64, child string) func() error {
+		return func() error { return st.ReplaceEdges(ctx, p, seq, []core.EdgeSet{edgeSet(1, c(child))}, nil) }
+	}
+
+	t.Run("replace behind a replace", func(t *testing.T) {
+		p := model.Resource{Type: "re15", Id: "replace"}
+		replace(t, st, p, 1, nil, edgeSet(1, c("old")))
+		queueBehind(t, lockEdgeSet(t, p, 1), repAt(p, 10, "lo"), repAt(p, 20, "hi"))
+		requireSets(t, p, map[int]stored{1: stamped(20, c("hi"))})
+	})
+	t.Run("remove behind a replace", func(t *testing.T) {
+		p := model.Resource{Type: "re15", Id: "remove"}
+		replace(t, st, p, 1, nil, edgeSet(1, c("old")))
+		queueBehind(t, lockEdgeSet(t, p, 1), repAt(p, 10, "lo"), func() error { return st.RemoveResource(ctx, p) })
+		requireSets(t, p, map[int]stored{})
+	})
 }
