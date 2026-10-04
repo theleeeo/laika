@@ -1,5 +1,57 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-04, runbook step L1.4):** inline builds are owned per
+> resource. The `resources` row records a **Build owner** next to the stale
+> mark: `owner_seq`, the owner token, and `owner_since`, when the owner last
+> claimed or renewed, with a lease (`Config.OwnerLease`, default 30s; the
+> app's `pool.owner_lease`). Every instance sees it, so a resource whose owner
+> is live has one inline build queued or running, plus at most one follow-up.
+>
+> - **A mark claims.** A statement that marks a row for a submit —
+>   `Store.RegisterChanges` for its items and Parents, `scheduleBuild`'s
+>   `MarkStale` — claims the row in the same update when it has no owner or
+>   the owner's lease has expired, setting `owner_seq` to the row's new
+>   `stale_seq` and `owner_since` to `now()`. Only claimed rows are submitted;
+>   a row with a live owner is marked and nothing else. `MarkStale` with a
+>   lease of 0 marks without claiming: the rebuild flusher's `fail` and
+>   `salvage` hand their roots to the sweep.
+> - **The lease is renewed** when a pool task is dequeued and by `BeginBuild`
+>   when the token matches, so it covers queue wait as well as the run.
+> - **The owner's finish re-claims for at most one follow-up.** An owned build
+>   finishes with `FinishOwned` instead of `ClearStale`: with `stale_seq`
+>   unchanged it clears the mark and the ownership; with `stale_seq` moved and
+>   the token still the owner's, it re-claims the row and the finishing task
+>   submits one follow-up. The follow-up runs with the row's metadata — the
+>   last mark's, in commit order — and is a delete when the row is a
+>   tombstone. An owned delete finishes the same way through
+>   `DeleteResourceIfSeq`, so a recreate registered during it is built as its
+>   follow-up. A failed, shed or cancelled owned build or delete releases its
+>   ownership (`ReleaseOwners`) and keeps the mark.
+> - **The sweep claims what it lists.** `ListStale` skips rows with a live
+>   owner and claims the rest in the same statement; a sweep build finishes
+>   like any owner. Rebuild walks and a direct `idx.Build` own nothing and
+>   finish with `ClearStale`, which clears any ownership with the mark.
+>
+> Ownership is not a lock: nothing waits on it, and correctness does not rest
+> on it. A wrong answer is a duplicate build, which the Build Sequence OCC
+> orders, or a delayed one, which the mark and the sweep recover — with one
+> exception until runbook step L2.1 makes the Elasticsearch delete versioned. A
+> delete whose lease lapses lets a recreate claim and build; the delete's
+> unversioned Elasticsearch delete can land after that build's upsert, and the
+> build's finish clears the mark, so the recreated document is lost. Any inline
+> delete racing an inline build had this before ownership; ownership narrows
+> it to an expired lease (seam S9 in laika-dev's `docs/open-questions.md`).
+>
+> *The race-safe clear* below changes accordingly: a newer change that moved
+> `stale_seq` mid-build is served by the owner's follow-up, not by "the newer
+> change's own inline build", which is not submitted while the owner is live —
+> or, failing the follow-up, by the sweep. A build that owns nothing still
+> clears with `ClearStale` as described there.
+>
+> Rejected: a per-instance in-memory registry of the builds in flight. It
+> can't see builds on other instances, and it keeps the follow-up's metadata
+> in submit order rather than in the commit order the row records.
+
 > **Decision (2026-09-30, after runbook step L1.2):** push producers are never
 > throttled. The RPCs (`NotifyChange`, `NotifyChangeBatch`, in the app and the
 > harness) register without `WaitForSlot`, so a load spike sheds to the sweep

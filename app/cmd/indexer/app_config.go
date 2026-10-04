@@ -108,8 +108,8 @@ type poolConfig struct {
 	// holds without renewing (core.Config.OwnerLease): while it is live, a
 	// change to the resource on any instance submits no second build, and the
 	// owner runs one follow-up for it. 0 means core's default, 30s. Size it
-	// above a build's queue wait plus its run, or a change may claim and
-	// submit a duplicate build.
+	// above a build's or delete's queue wait plus its run; core.Config's
+	// OwnerLease says what a shorter one costs.
 	OwnerLease time.Duration `mapstructure:"owner_lease"`
 }
 

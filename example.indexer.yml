@@ -77,8 +77,9 @@ sweep:
 # (ADR 0008), so it has no effect here yet. owner_lease is how long an inline
 # build owns its resource without renewing: while it is live, a change to the
 # resource on any instance submits no second build, and the owner runs one
-# follow-up for it; 0 means 30s. Size it above a build's queue wait plus its
-# run, or a change may claim and submit a duplicate build.
+# follow-up for it; 0 means 30s. Size it above a build's or delete's queue wait
+# plus its run: a build that outlives it costs a duplicate build, and a delete
+# that outlives it can lose the document of a resource recreated meanwhile.
 pool:
   size: 10
   queue_size: 100
