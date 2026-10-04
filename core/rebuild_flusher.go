@@ -11,17 +11,14 @@ import (
 )
 
 // plansForRebuild resolves the plans a rebuild executes. An empty Versions
-// selects every plan — a full rebuild. Otherwise only the selected versions'
-// plans run, and full is false: the caller must then merge relation edges
-// instead of wiping them, because the non-targeted versions' plans do not run
-// and wiping would drop the edges only they discover.
-func (idx *Indexer) plansForRebuild(params RebuildArgs) (plans []projection.Plan, full bool, err error) {
+// selects every plan; otherwise only the selected versions' plans run.
+func (idx *Indexer) plansForRebuild(params RebuildArgs) ([]projection.Plan, error) {
 	all := idx.plans[params.ResourceType]
 	if len(all) == 0 {
-		return nil, false, fmt.Errorf("no plans for resource type %q", params.ResourceType)
+		return nil, fmt.Errorf("no plans for resource type %q", params.ResourceType)
 	}
 	if len(params.Versions) == 0 {
-		return all, true, nil
+		return all, nil
 	}
 
 	want := make(map[int]bool, len(params.Versions))
@@ -36,9 +33,9 @@ func (idx *Indexer) plansForRebuild(params RebuildArgs) (plans []projection.Plan
 		}
 	}
 	for v := range want {
-		return nil, false, fmt.Errorf("resource %q has no plan for version %d", params.ResourceType, v)
+		return nil, fmt.Errorf("resource %q has no plan for version %d", params.ResourceType, v)
 	}
-	return selected, len(selected) == len(all), nil
+	return selected, nil
 }
 
 // executePlan runs the plan for a single resource ID and returns its first
@@ -62,14 +59,15 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 // rebuild's cancellation (salvage, a failed drift re-mark's retry).
 const detachedMarkTimeout = 30 * time.Second
 
-// pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped
-// and, on a full rebuild, edges wiped) but not yet fully flushed.
+// pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped)
+// but not yet fully flushed.
 type pendingResource struct {
 	occVersion int64
 	staleSeq   int64
 	drift      driftBase
 	// remaining counts the plan documents not yet flushed successfully; the
-	// resource completes — edges final, stale mark cleared — when it hits 0.
+	// resource completes — every expected document and its version's edge
+	// set stored, stale mark cleared — when it hits 0.
 	remaining int
 	failed    bool
 }
@@ -92,19 +90,23 @@ type driftBase struct {
 	checkRoot bool
 }
 
-// pendingItem is one document awaiting a bulk flush, carrying the relations
-// its plan discovered so they are persisted only after the document landed.
+// pendingItem is one document awaiting a bulk flush: its Schema Version and
+// the relations its plan discovered, stored as that version's edge set only
+// after the document landed.
 type pendingItem struct {
 	BulkItem
+	version   int
 	relations []model.VersionedResource
 }
 
 // rebuildFlusher streams a rebuild's documents to the backend in bounded bulk
-// chunks and defers each resource's bookkeeping — edge persistence, the
-// ADR 0002 drift check on the Change Sequence, the seq-guarded stale clear —
-// until every document of that resource has flushed. A resource whose
-// document is rejected is durably marked stale instead of cleared, so the
-// sweep recovers it, and the rebuild reports the failure instead of success.
+// chunks. Each flush stores, per resource, the edge sets of the versions whose
+// documents landed in it, at the resource's Build Sequence. The rest of a
+// resource's bookkeeping — the ADR 0002 drift check on the Change Sequence,
+// the seq-guarded stale clear — waits until every document of that resource
+// has flushed. A resource whose document is rejected is durably marked stale
+// instead of cleared, so the sweep recovers it, and the rebuild reports the
+// failure instead of success.
 type rebuildFlusher struct {
 	idx          *Indexer
 	resourceType string
@@ -157,13 +159,14 @@ func (f *rebuildFlusher) occ(id string) (int64, bool) {
 	return p.occVersion, true
 }
 
-// add queues one plan document. Flushes when the chunk bound is reached.
-func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, relations []model.VersionedResource) error {
+// add queues one plan document of Schema Version version. Flushes when the
+// chunk bound is reached.
+func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.VersionedResource) error {
 	p := f.state[item.ID]
 	if p == nil || p.failed {
 		return nil
 	}
-	f.pending = append(f.pending, pendingItem{BulkItem: item, relations: relations})
+	f.pending = append(f.pending, pendingItem{BulkItem: item, version: version, relations: relations})
 	if len(f.pending) >= f.chunkSize {
 		return f.flush(ctx)
 	}
@@ -207,6 +210,9 @@ func (f *rebuildFlusher) dropPending(id string) {
 	f.pending = kept
 }
 
+// docKey identifies one document of a bulk chunk.
+func docKey(index, id string) string { return index + "/" + id }
+
 func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
 	if _, err := f.idx.st.MarkStale(ctx, []model.Resource{f.root(id)}, f.metadata, 0); err != nil {
 		slog.Error("failed to mark rebuilt resource stale; sweep cannot recover it",
@@ -214,11 +220,12 @@ func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
 	}
 }
 
-// flush writes the pending chunk and settles every resource whose documents
-// have all landed: persist its edges, check its fetched children (and, for a
-// plan walk's root, the root) for changes accepted after its start, clear its
-// stale mark. Returns an error only for request-level write failures, where
-// nothing can be assumed written — the caller aborts and salvages.
+// flush writes the pending chunk, stores each resource's edge sets for the
+// versions whose documents landed, and settles every resource whose documents
+// have all landed: check its fetched children (and, for a plan walk's root,
+// the root) for changes accepted after its start, clear its stale mark.
+// Returns an error only for request-level write failures, where nothing can
+// be assumed written — the caller aborts and salvages.
 func (f *rebuildFlusher) flush(ctx context.Context) error {
 	if len(f.pending) == 0 {
 		return nil
@@ -227,58 +234,115 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	f.pending = nil
 
 	items := make([]BulkItem, len(chunk))
+	inChunk := make(map[string]bool, len(chunk))
 	for i, it := range chunk {
 		items[i] = it.BulkItem
+		inChunk[docKey(it.Index, it.ID)] = true
 	}
 	failures, err := f.idx.es.BulkUpsert(ctx, items)
 	if err != nil {
 		return fmt.Errorf("bulk upsert: %w", err)
 	}
-	rejected := make(map[string]bool, len(failures))
+	// Rejection is per document: a resource's other versions' documents may
+	// have landed. A failure naming no document of the chunk is taken as a
+	// rejection of every document of its id.
+	rejectedDoc := make(map[string]bool, len(failures))
+	rejectedID := make(map[string]bool)
 	for _, bf := range failures {
-		rejected[bf.ID] = true
+		key := docKey(bf.Index, bf.ID)
+		rejectedDoc[key] = true
+		if !inChunk[key] {
+			rejectedID[bf.ID] = true
+		}
 		slog.Warn("rebuild document rejected; resource stays stale for sweep",
 			slog.String("index", bf.Index), slog.String("id", bf.ID),
 			slog.Int("status", bf.Status), slog.String("reason", bf.Reason))
 	}
 
-	// Per-document settlement: persist edges for landed documents, fail
-	// resources with rejected ones.
-	driftCheck := make(map[string][]ChangeCheck)
-	rootChecked := make(map[string]bool)
+	// Group the landed documents per resource, in order of first appearance,
+	// and note the resources with a rejected document.
+	var order []string
+	landed := make(map[string][]pendingItem)
+	hasRejected := make(map[string]bool)
 	for _, it := range chunk {
 		p := f.state[it.ID]
 		if p == nil || p.failed {
 			continue
 		}
-		if rejected[it.ID] {
-			f.fail(ctx, it.ID)
+		if _, seen := landed[it.ID]; !seen && !hasRejected[it.ID] {
+			order = append(order, it.ID)
+		}
+		if rejectedDoc[docKey(it.Index, it.ID)] || rejectedID[it.ID] {
+			hasRejected[it.ID] = true
 			continue
 		}
-		if len(it.relations) > 0 {
-			// AddChildResources merges (insert-if-absent), which both the
-			// full rebuild (edges wiped at begin) and the targeted rebuild
-			// (edges of non-targeted versions preserved) rely on.
-			plain := make([]model.Resource, len(it.relations))
-			for i, r := range it.relations {
-				plain[i] = r.Resource
-			}
-			if err := f.idx.st.AddChildResources(ctx, f.root(it.ID), plain); err != nil {
-				slog.Warn("failed to persist relations", slog.String("id", it.ID), slog.String("error", err.Error()))
-				f.fail(ctx, it.ID)
+		landed[it.ID] = append(landed[it.ID], it)
+	}
+
+	// Store the edge set of every landed document's version at the
+	// resource's Build Sequence — an empty set too, which replaces the stored
+	// one with no edges — also for a resource with a rejected sibling
+	// document: what landed is what Elasticsearch now holds (ruling R2).
+	// Versions without a landed document keep their stored sets.
+	for _, id := range order {
+		docs := landed[id]
+		if len(docs) == 0 {
+			continue
+		}
+		sets := make([]EdgeSet, 0, len(docs))
+		at := make(map[int]int, len(docs))
+		for _, it := range docs {
+			set := EdgeSet{SchemaVersion: it.version, Children: relationResources(it.relations)}
+			// A version listed twice in one chunk: its later document is the
+			// one the bulk write left in place.
+			if i, ok := at[it.version]; ok {
+				sets[i] = set
 				continue
 			}
+			at[it.version] = len(sets)
+			sets = append(sets, set)
 		}
-		// The root once per chunk, its children per document.
-		if p.drift.checkRoot && !rootChecked[it.ID] {
-			rootChecked[it.ID] = true
-			driftCheck[it.ID] = append(driftCheck[it.ID], ChangeCheck{Resource: f.root(it.ID), Start: p.drift.start})
+		if err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil); err != nil {
+			// Marked on a context detached from cancellation: the replace may
+			// have failed because the walk's context ended, and this flush's
+			// checkpoint steps over the resource, so the mark is its only
+			// recovery.
+			slog.Warn("failed to replace edges; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
+			mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
+			f.fail(mctx, id)
+			cancel()
 		}
-		for _, r := range it.relations {
-			driftCheck[it.ID] = append(driftCheck[it.ID], ChangeCheck{Resource: r.Resource, Start: p.drift.start})
+	}
+
+	// Resources with a rejected document are failed after their landed
+	// documents' sets are stored.
+	for _, id := range order {
+		if hasRejected[id] {
+			f.fail(ctx, id)
 		}
-		if p.remaining > 0 {
-			p.remaining--
+	}
+
+	// Per-document settlement of the resources still standing: drift checks
+	// — the root once per chunk, its children per document — and the count
+	// of documents still expected.
+	driftCheck := make(map[string][]ChangeCheck)
+	rootChecked := make(map[string]bool)
+	for _, id := range order {
+		p := f.state[id]
+		if p == nil || p.failed {
+			continue
+		}
+		for _, it := range landed[id] {
+			if p.drift.checkRoot && !rootChecked[id] {
+				rootChecked[id] = true
+				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: f.root(id), Start: p.drift.start})
+			}
+			for _, r := range it.relations {
+				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: r.Resource, Start: p.drift.start})
+			}
+			if p.remaining > 0 {
+				p.remaining--
+			}
 		}
 	}
 
@@ -310,9 +374,10 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 // Sequence. driftCheck maps each root with landed documents to its checks,
 // each carrying the root's start: every child its documents fetched and, for
 // a plan walk's root, the root itself. A root with a checked resource whose
-// change_seq exceeds that start had a change accepted after its fetch began —
-// a child's possibly while the root's edges were missing, so fanout could not
-// reach it — and must re-build to converge.
+// change_seq exceeds that start had a change accepted after its fetch began
+// that the fetch may have missed — e.g. a child only this rebuild found,
+// whose fanout ran before the root's edge to it was stored and so could not
+// reach the root — and must re-build to converge.
 //
 // One batched query serves the common no-drift case; a hit narrows with one
 // query per root, and each changed root is re-marked and re-built via the
@@ -354,8 +419,9 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 
 // finish flushes the remainder and settles resources that never received all
 // their expected documents (a plan walk skipped them, e.g. deleted upstream
-// mid-walk). Their Build Sequence was bumped and, on a full rebuild, their
-// edges wiped — they must converge via the sweep, so they are marked stale.
+// mid-walk). Their Build Sequence was bumped and only some of their versions'
+// documents and edge sets were refreshed — they must converge via the sweep,
+// so they are marked stale.
 func (f *rebuildFlusher) finish(ctx context.Context) error {
 	if err := f.flush(ctx); err != nil {
 		return err
@@ -375,8 +441,8 @@ func (f *rebuildFlusher) finish(ctx context.Context) error {
 
 // salvage durably marks every unfinished resource stale after an abort. It
 // runs on a detached context: the abort may stem from cancellation, and these
-// marks are the only durable recovery for resources whose edges were already
-// wiped.
+// marks are the only durable recovery for resources that were begun but not
+// fully written.
 func (f *rebuildFlusher) salvage(ctx context.Context) {
 	if len(f.state) == 0 {
 		return

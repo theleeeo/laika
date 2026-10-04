@@ -173,10 +173,6 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return fmt.Errorf("plans for %s/%s disagree on existence: version(s) %v returned no data; leaving stale for retry", resourceType, resourceID, missing)
 	}
 
-	if err := idx.st.RemoveResource(ctx, model.Resource{Type: resourceType, Id: resourceID}); err != nil {
-		return fmt.Errorf("removing relations: %w", err)
-	}
-
 	var allRelations []model.VersionedResource
 	var parents []model.Resource
 	seenParents := make(map[model.Resource]bool)
@@ -205,16 +201,22 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		}
 	}
 
-	// Persist relation edges (unversioned — just the resource identity).
-	plainRelations := make([]model.Resource, len(allRelations))
-	for i, r := range allRelations {
-		plainRelations[i] = r.Resource
+	// Store each version's edges at this build's Build Sequence — also for a
+	// version whose write lost above: the Store keeps, per version, the set
+	// of the highest Build Sequence, as Elasticsearch keeps the document
+	// (ADR 0002). This build ran every configured plan, so it declares their
+	// versions, and the sets of versions the config no longer has are
+	// dropped.
+	sets := make([]EdgeSet, len(docs))
+	for i, vd := range docs {
+		sets[i] = EdgeSet{SchemaVersion: vd.version, Children: relationResources(vd.doc.Relations)}
 	}
-	if err := idx.st.AddChildResources(ctx,
-		model.Resource{Type: resourceType, Id: resourceID},
-		plainRelations,
-	); err != nil {
-		return fmt.Errorf("persist relations for %s/%s: %w", resourceType, resourceID, err)
+	declared := make([]int, len(plans))
+	for i, p := range plans {
+		declared[i] = p.Version
+	}
+	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared); err != nil {
+		return fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
 	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
@@ -227,8 +229,9 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// Drift check (ADR 0002). start is the Change Sequence value BeginBuild
 	// took before the fetches. A child whose change_seq exceeds it had a
 	// change accepted after the build started that the fetch may have missed
-	// — e.g. while our edge was missing, so fanout could not reach us.
-	// Re-schedule (mark first) to converge. An owned build is the root's live
+	// — e.g. a child only this build found, whose fanout ran before this
+	// build stored its edge and so could not reach us. Re-schedule (mark
+	// first) to converge. An owned build is the root's live
 	// owner, so its re-mark submits nothing and its FinishOwned runs the
 	// follow-up; an unowned one claims the root and submits it, unless
 	// another build owns it. The root is not checked: its BeginBuild precedes
@@ -258,6 +261,16 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	return nil
 }
 
+// relationResources is the resources of relations, without their versions:
+// an edge set's Children.
+func relationResources(relations []model.VersionedResource) []model.Resource {
+	out := make([]model.Resource, len(relations))
+	for i, r := range relations {
+		out[i] = r.Resource
+	}
+	return out
+}
+
 func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebuildResume) error {
 	if len(params.ResourceIDs) > 0 {
 		if resume.start != nil {
@@ -273,7 +286,7 @@ func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebu
 func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
-	plans, full, err := idx.plansForRebuild(params)
+	plans, err := idx.plansForRebuild(params)
 	if err != nil {
 		return err
 	}
@@ -293,19 +306,6 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		}
 
 		root := model.Resource{Type: params.ResourceType, Id: id}
-
-		if full {
-			// ADR 0002 wipe-and-replace: the Plans, not stored history, are
-			// the source of truth for the resource's edges. Only a full
-			// rebuild may wipe — a targeted one merges, because the
-			// non-targeted versions' plans do not run here and wiping would
-			// drop the edges only they discover.
-			if err := idx.st.RemoveResource(ctx, root); err != nil {
-				logger.Warn("failed to remove relations", slog.String("id", id), slog.String("error", err.Error()))
-				fl.fail(ctx, id)
-				continue
-			}
-		}
 
 		begun, err := idx.st.BeginBuild(ctx, root, 0)
 		if err != nil {
@@ -356,7 +356,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 				ID:      id,
 				Doc:     vd.doc.Doc,
 				Version: begun.BuildIdx,
-			}, vd.doc.Relations); err != nil {
+			}, vd.version, vd.doc.Relations); err != nil {
 				fl.salvage(ctx)
 				return err
 			}
@@ -375,7 +375,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume rebuildResume) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
-	plans, full, err := idx.plansForRebuild(params)
+	plans, err := idx.plansForRebuild(params)
 	if err != nil {
 		return err
 	}
@@ -384,9 +384,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	// several, a resource first seen by an early plan stays unsettled until
 	// the later plans' documents land, so every mid-walk position steps over
 	// begun-but-unsettled resources — and an attempt resuming past one whose
-	// remaining listing no longer emits it would leave it with wiped edges, an
-	// un-refreshed document and no stale mark. With one plan, a page boundary
-	// is reached only once its resources have settled or been marked stale.
+	// remaining listing no longer emits it would leave it with some versions'
+	// documents and edge sets refreshed, others not, and no stale mark. With
+	// one plan, a page boundary is reached only once its resources have
+	// settled or been marked stale.
 	activePlans, activeIdx := 0, -1
 	for i, p := range plans {
 		if p.Executer != nil {
@@ -417,12 +418,6 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			slog.Int("plan_version", resume.start.PlanVersion),
 			slog.String("page_token", startToken))
 	}
-
-	// ADR 0002 wipe-and-replace, resumed or not: a single-plan resume only
-	// re-enters the listing past pages whose resources already settled (their
-	// edges re-added after the wipe) or were never begun, so the walk's first
-	// sighting of a resource is still the right place to wipe.
-	wipe := full
 
 	fl := newRebuildFlusher(idx, params.ResourceType, params.Metadata)
 
@@ -508,16 +503,6 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				}
 
 				if !fl.tracked(id) {
-					if wipe {
-						// ADR 0002 wipe-and-replace; a targeted rebuild
-						// merges instead (see rebuildByIDs).
-						if err := idx.st.RemoveResource(ctx, doc.Root); err != nil {
-							logger.Warn("failed to remove relations", slog.String("id", id), slog.String("error", err.Error()))
-							fl.fail(ctx, id)
-							continue
-						}
-					}
-
 					begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
 					if err != nil {
 						logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
@@ -542,7 +527,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					ID:      id,
 					Doc:     doc.Doc,
 					Version: occVersion,
-				}, doc.Relations); err != nil {
+				}, plan.Version, doc.Relations); err != nil {
 					fl.salvage(ctx)
 					return err
 				}

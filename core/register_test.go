@@ -55,8 +55,8 @@ type recordingStore struct {
 	finishErr error
 	deleteErr error
 	// onRemove, when set, runs inside every RemoveResource, outside the lock
-	// and before it returns: a test can register a change while a delete (or
-	// a build's edge wipe) is in flight.
+	// and before it returns: a test can register a change while a delete is
+	// in flight.
 	onRemove func(model.Resource)
 	// onRenew, when set, runs at the start of every RenewOwners, outside the
 	// lock, with the ownerships it was given: a test can hand a row to
@@ -65,6 +65,13 @@ type recordingStore struct {
 	// and returns the error.
 	onRenew  func([]Owned)
 	renewErr error
+	// replaced records every ReplaceEdges call, in order; replaceErr fails
+	// every ReplaceEdges. onReplace, when set, runs inside every
+	// ReplaceEdges, outside the lock: a test can see what else had happened
+	// by the time a build stored its edges.
+	replaced   []edgeReplace
+	replaceErr error
+	onReplace  func(edgeReplace)
 
 	rows     map[model.Resource]*memRow
 	seq      int64 // the last stale_seq handed out
@@ -72,6 +79,14 @@ type recordingStore struct {
 	// followUps records every non-zero FollowUp FinishOwned and
 	// DeleteResourceIfSeq returned, per resource, in order.
 	followUps map[model.Resource][]FollowUp
+}
+
+// edgeReplace is one recorded Store.ReplaceEdges call.
+type edgeReplace struct {
+	resource model.Resource
+	buildSeq int64
+	sets     []EdgeSet
+	declared []int
 }
 
 // memRow is one resource row of recordingStore.
@@ -362,12 +377,22 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 	}
 	return err
 }
-func (s *recordingStore) AddChildResources(context.Context, model.Resource, []model.Resource) error {
-	return nil
+func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
+	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: sets, declared: declared}
+	s.mu.Lock()
+	s.recordLocked("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq)
+	s.replaced = append(s.replaced, call)
+	s.mu.Unlock()
+	if s.onReplace != nil {
+		s.onReplace(call)
+	}
+	return s.replaceErr
 }
-func (s *recordingStore) AddRelations(context.Context, []Relation) error { return nil }
-func (s *recordingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
-	return nil
+
+func (s *recordingStore) replacedSnapshot() []edgeReplace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]edgeReplace(nil), s.replaced...)
 }
 func (s *recordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil

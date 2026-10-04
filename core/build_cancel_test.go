@@ -37,23 +37,16 @@ func (e *staticExecuter) Execute(ctx context.Context, req projection.BuildReques
 	return ch
 }
 
-// cancellingStore cancels the build's ctx during the first RemoveResource
-// call, simulating a job timeout landing mid-rebuild.
+// cancellingStore cancels the rebuild's ctx during the first BeginBuild
+// call, simulating a job timeout landing mid-rebuild, and counts the
+// BeginBuild calls.
 type cancellingStore struct {
-	cancel      context.CancelFunc
-	removeCalls int
+	cancel     context.CancelFunc
+	beginCalls int
 }
 
-func (s *cancellingStore) RemoveResource(ctx context.Context, _ model.Resource) error {
-	s.removeCalls++
-	s.cancel()
-	return context.Canceled
-}
+func (s *cancellingStore) RemoveResource(context.Context, model.Resource) error { return nil }
 
-func (s *cancellingStore) AddChildResources(context.Context, model.Resource, []model.Resource) error {
-	return nil
-}
-func (s *cancellingStore) AddRelations(context.Context, []Relation) error { return nil }
 func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
 	return nil
 }
@@ -67,7 +60,9 @@ func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[strin
 	return nil, nil
 }
 func (s *cancellingStore) BeginBuild(context.Context, model.Resource, int64) (BuildBegun, error) {
-	return BuildBegun{BuildIdx: 1}, nil
+	s.beginCalls++
+	s.cancel()
+	return BuildBegun{}, context.Canceled
 }
 func (s *cancellingStore) NextChangeSeq(context.Context) (int64, error) { return 0, nil }
 func (s *cancellingStore) AnyChangedSince(context.Context, []ChangeCheck) (bool, error) {
@@ -90,7 +85,9 @@ func (s *cancellingStore) FinishOwned(context.Context, model.Resource, int64, in
 
 // A cancelled ctx must abort the all-of-type rebuild loop with the ctx error
 // instead of warn-and-continuing through every remaining document (and then
-// reporting success).
+// reporting success). The ctx is cancelled inside the first document's
+// BeginBuild — a call the loop makes per document, before any flush — so
+// the loop must stop at the next document's ctx check.
 func TestRebuildAll_CancelledContext_AbortsDocLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -118,8 +115,8 @@ func TestRebuildAll_CancelledContext_AbortsDocLoop(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
-	if store.removeCalls != 1 {
-		t.Fatalf("expected rebuild to stop after the cancelling call, RemoveResource was called %d times", store.removeCalls)
+	if store.beginCalls != 1 {
+		t.Fatalf("expected rebuild to stop after the cancelling call, BeginBuild was called %d times", store.beginCalls)
 	}
 }
 

@@ -61,14 +61,15 @@ func (e *pagingExecuter) Execute(context.Context, projection.BuildRequest) <-cha
 	return ch
 }
 
-// captureBackend records every write and can reject specific document IDs in
+// captureBackend records every write and can reject specific documents in
 // bulk responses or answer single upserts with a version conflict.
 type captureBackend struct {
 	mu             sync.Mutex
 	bulkCalls      [][]BulkItem
 	deletes        []string        // "index/id"
 	upserts        []string        // "index/id"
-	rejectIDs      map[string]bool // BulkUpsert reports these IDs as rejected
+	rejectIDs      map[string]bool // BulkUpsert reports every document of these IDs as rejected
+	rejectDocs     map[string]bool // BulkUpsert reports these "index/id" documents as rejected
 	upsertConflict map[string]bool // Upsert returns ErrVersionConflict for "index/id"
 	// bulkErr fails the whole BulkUpsert request (no per-item failures) —
 	// the case where nothing can be assumed written.
@@ -102,7 +103,7 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 	}
 	var failures []BulkFailure
 	for _, it := range items {
-		if b.rejectIDs[it.ID] {
+		if b.rejectIDs[it.ID] || b.rejectDocs[it.Index+"/"+it.ID] {
 			failures = append(failures, BulkFailure{Index: it.Index, ID: it.ID, Status: 400, Reason: "test rejection"})
 		}
 	}
@@ -175,6 +176,27 @@ type rebuildRecordingStore struct {
 	// never hands on a follow-up — so ownership behaviour is tested on
 	// recordingStore, not here.
 	tokens int64
+	// replaced records every ReplaceEdges call, in order; replaceErrs fails
+	// the ReplaceEdges of each resource whose id it names.
+	replaced    []edgeReplace
+	replaceErrs map[string]error
+}
+
+func (s *rebuildRecordingStore) replacedSnapshot() []edgeReplace {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]edgeReplace(nil), s.replaced...)
+}
+
+// replacedFor returns the recorded ReplaceEdges calls for r, in order.
+func (s *rebuildRecordingStore) replacedFor(r model.Resource) []edgeReplace {
+	var out []edgeReplace
+	for _, c := range s.replacedSnapshot() {
+		if c.resource == r {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func (s *rebuildRecordingStore) checksSnapshot() [][]ChangeCheck {
@@ -304,14 +326,12 @@ func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource,
 	return FollowUp{}, nil
 }
 
-func (s *rebuildRecordingStore) AddChildResources(_ context.Context, parent model.Resource, _ []model.Resource) error {
-	s.record("AddChildResources:%s/%s", parent.Type, parent.Id)
-	return nil
-}
-
-func (s *rebuildRecordingStore) AddRelations(context.Context, []Relation) error { return nil }
-func (s *rebuildRecordingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
-	return nil
+func (s *rebuildRecordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, fmt.Sprintf("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq))
+	s.replaced = append(s.replaced, edgeReplace{resource: r, buildSeq: buildSeq, sets: slices.Clone(sets), declared: slices.Clone(declared)})
+	return s.replaceErrs[r.Id]
 }
 
 func (s *rebuildRecordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
@@ -337,13 +357,53 @@ func newRebuildIndexer(st Store, es SearchBackend, plans map[string][]projection
 	})
 }
 
-func TestRebuild_TargetedVersion_WritesOnlySelectedIndex_AndMergesEdges(t *testing.T) {
+// assertReplaces checks r's ReplaceEdges calls: exactly one per want entry,
+// in order, each at buildSeq, carrying exactly that entry's sets (in any
+// order) and declaring nothing — a rebuild passes nil.
+func assertReplaces(t *testing.T, st *rebuildRecordingStore, r model.Resource, buildSeq int64, want ...[]EdgeSet) {
+	t.Helper()
+	got := st.replacedFor(r)
+	if len(got) != len(want) {
+		t.Fatalf("%v: want %d ReplaceEdges call(s), got %d: %v", r, len(want), len(got), st.callsSnapshot())
+	}
+	for i, c := range got {
+		if c.buildSeq != buildSeq {
+			t.Fatalf("%v: ReplaceEdges call %d at Build Sequence %d, want the resource's %d", r, i, c.buildSeq, buildSeq)
+		}
+		if !equalSets(c.sets, want[i]) {
+			t.Fatalf("%v: ReplaceEdges call %d carries sets %+v, want %+v", r, i, sortedSets(c.sets), sortedSets(want[i]))
+		}
+		if c.declared != nil {
+			t.Fatalf("%v: a rebuild must declare nothing, ReplaceEdges call %d declared %v", r, i, c.declared)
+		}
+	}
+}
+
+// assertNoWipe checks the rebuild never removed r's edges wholesale.
+func assertNoWipe(t *testing.T, st *rebuildRecordingStore, r model.Resource) {
+	t.Helper()
+	if st.has("RemoveResource:" + r.Type + "/" + r.Id) {
+		t.Fatalf("a rebuild must not remove the edges of a resource it builds: %v", st.callsSnapshot())
+	}
+}
+
+// versionSet is version's edge set with the given product children.
+func versionSet(version int, children ...string) EdgeSet {
+	s := EdgeSet{SchemaVersion: version}
+	for _, c := range children {
+		s.Children = append(s.Children, product(c))
+	}
+	return s
+}
+
+// A targeted rebuild replaces only its selected versions' edge sets: the
+// non-targeted versions' plans did not run, and their sets stay untouched.
+func TestRebuild_TargetedVersion_WritesOnlySelectedIndex_AndReplacesOnlyItsEdgeSet(t *testing.T) {
 	st := &rebuildRecordingStore{}
 	es := &captureBackend{}
-	child := model.VersionedResource{Resource: model.Resource{Type: "product", Id: "c1"}, Version: 1}
 	plans := map[string][]projection.Plan{"product": {
-		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", child)}}},
-		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1", child)}}},
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c2")}}},
 	}}
 	idx := newRebuildIndexer(st, es, plans, 0)
 
@@ -363,23 +423,22 @@ func TestRebuild_TargetedVersion_WritesOnlySelectedIndex_AndMergesEdges(t *testi
 			t.Fatalf("a targeted rebuild must only write the selected version's index, wrote %s", it.Index)
 		}
 	}
-	if st.has("RemoveResource:product/1") {
-		t.Fatal("a targeted rebuild must merge edges, not wipe them: the non-targeted versions' plans did not run, so wiping would drop the edges only they discover")
-	}
-	if !st.has("AddChildResources:product/1") {
-		t.Fatal("edges discovered by the executed plan must still be persisted")
-	}
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(2, "c2")})
 	if !st.has("ClearStale:product/1") {
 		t.Fatal("a fully flushed resource must clear its stale mark")
 	}
 }
 
-func TestRebuild_AllVersions_WipesEdges_AndWritesEveryIndex(t *testing.T) {
+// A full rebuild replaces every version's edge set in one call at the
+// resource's Build Sequence — an empty set for a version whose plan found no
+// children — and wipes nothing.
+func TestRebuild_AllVersions_ReplacesEveryVersionsEdgeSet_AndWritesEveryIndex(t *testing.T) {
 	st := &rebuildRecordingStore{}
 	es := &captureBackend{}
 	plans := map[string][]projection.Plan{"product": {
-		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1")}}},
-		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1")}}},
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1")}}},
 	}}
 	idx := newRebuildIndexer(st, es, plans, 0)
 
@@ -397,11 +456,111 @@ func TestRebuild_AllVersions_WipesEdges_AndWritesEveryIndex(t *testing.T) {
 	if !indices["product_search_v1"] || !indices["product_search_v2"] {
 		t.Fatalf("a full rebuild must write every schema version's index, wrote %v", indices)
 	}
-	if !st.has("RemoveResource:product/1") {
-		t.Fatal("a full rebuild must wipe-and-replace edges (ADR 0002)")
-	}
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1, "c1"), versionSet(2)})
 	if !st.has("ClearStale:product/1") {
 		t.Fatal("a fully flushed resource must clear its stale mark")
+	}
+}
+
+// A multi-plan walk replaces each version's set as that version's documents
+// land: with one document per flush, product/1's v1 set in the first flush
+// and its v2 set in the second, both at its one Build Sequence.
+func TestRebuildAll_MultiPlan_ReplacesEachVersionsSetAsItsDocumentLands(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{}
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c2")}}},
+	}}
+	idx := newRebuildIndexer(st, es, plans, 1)
+
+	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := len(es.bulkCalls); n != 2 {
+		t.Fatalf("chunk size 1 must flush each version's document separately, got %d flushes", n)
+	}
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1, "c1")}, []EdgeSet{versionSet(2, "c2")})
+	if !st.has("ClearStale:product/1") {
+		t.Fatal("a resource whose every document landed must clear its stale mark")
+	}
+}
+
+// Ruling R2: a rejected document fails its resource, but the edge set of
+// every document that landed in the same flush is still replaced.
+func TestRebuildByIDs_RejectedSiblingDocument_StillReplacesTheLandedSet_AndFailsTheResource(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{rejectDocs: map[string]bool{"product_search_v2/1": true}}
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c2")}}},
+	}}
+	idx := newRebuildIndexer(st, es, plans, 0)
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1"}}})
+	if err == nil {
+		t.Fatal("a rebuild with a rejected document must not report success")
+	}
+
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1, "c1")})
+	if !st.has("MarkStale:product/1") {
+		t.Fatal("a resource with a rejected document must be durably marked stale")
+	}
+	if st.has("ClearStale:product/1") {
+		t.Fatal("a resource with a rejected document must not clear its stale mark")
+	}
+}
+
+// A failed edge replace fails its resource — marked stale, not cleared — and
+// the rebuild reports it; another resource of the same flush completes.
+func TestRebuildByIDs_FailedEdgeReplace_FailsTheResource(t *testing.T) {
+	st := &rebuildRecordingStore{replaceErrs: map[string]error{"1": errors.New("db down")}}
+	exec := childDocs(map[string][]string{"1": {"c1"}, "2": {"c2"}})
+	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}}, 0)
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2"}}})
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("a resource whose edges were not stored must fail the rebuild, got %v", err)
+	}
+
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "MarkStale:product/1") == 0 {
+		t.Fatalf("a resource whose edges were not stored must be durably marked stale: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/1:") != 0 {
+		t.Fatalf("a resource whose edges were not stored must not clear its stale mark: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/2:") != 1 {
+		t.Fatalf("product/2's edges were stored and it must complete: %v", calls)
+	}
+}
+
+// Each resource of a flush gets its own single ReplaceEdges call carrying its
+// own sets.
+func TestRebuildByIDs_TwoResourcesInOneFlush_EachReplaceTheirOwnSets(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{}
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: childDocs(map[string][]string{"1": {"c1a"}, "2": {"c2a"}})},
+		{Version: 2, Executer: childDocs(map[string][]string{"1": nil, "2": {"c2b", "c2c"}})},
+	}}
+	idx := newRebuildIndexer(st, es, plans, 0)
+
+	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := len(es.bulkCalls); n != 1 {
+		t.Fatalf("both resources' documents must land in one flush, got %d flushes", n)
+	}
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1, "c1a"), versionSet(2)})
+	assertReplaces(t, st, product("2"), 2, []EdgeSet{versionSet(1, "c2a"), versionSet(2, "c2b", "c2c")})
+	if n := len(st.replacedSnapshot()); n != 2 {
+		t.Fatalf("one ReplaceEdges call per resource, got %d: %v", n, st.callsSnapshot())
 	}
 }
 
@@ -539,7 +698,7 @@ func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {
 	}
 
 	if !st.has("MarkStale:product/1") {
-		t.Fatal("a child that drifted during the rebuild's edge-less window must re-mark the parent (ADR 0002 drift check)")
+		t.Fatal("a child that changed after the rebuild's start must re-mark the parent (ADR 0002 drift check)")
 	}
 	if st.has("MarkStale:product/2") {
 		t.Fatal("a resource without drifted children must not be re-marked")
@@ -997,7 +1156,7 @@ func TestRebuildAll_PageError_AbortsAndMarksBegunResourcesStale(t *testing.T) {
 
 	for _, id := range []string{"1", "2"} {
 		if !st.has("MarkStale:product/" + id) {
-			t.Fatalf("resource %s had its edges wiped but was never completed — it must be marked stale so the sweep repairs it", id)
+			t.Fatalf("resource %s was begun but never completed — it must be marked stale so the sweep repairs it", id)
 		}
 		if st.has("ClearStale:product/" + id) {
 			t.Fatalf("resource %s must not be cleared on abort", id)
@@ -1114,16 +1273,16 @@ func TestRebuildAll_MultiPlanWalkNeverCheckpoints(t *testing.T) {
 	// A resource first seen by v1's plan stays unsettled until v2's document
 	// lands, so no mid-walk position is safe to resume from: an attempt
 	// resuming past it whose remaining listing omits it would leave it with
-	// wiped edges, a stale document and no stale mark.
+	// v1's document and edge set refreshed, v2's not, and no stale mark.
 	if len(cps) != 0 {
 		t.Fatalf("a multi-plan walk has no settled mid-walk position and must never checkpoint, got %v", cps)
 	}
 	if !st.has("ClearStale:product/1") {
 		t.Fatal("the walk must still complete normally")
 	}
-	if !st.has("RemoveResource:product/1") {
-		t.Fatal("a full rebuild must still wipe-and-replace edges (ADR 0002)")
-	}
+	// Both documents land in the one flush, so one call carries both sets.
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1), versionSet(2)})
 }
 
 func TestRebuild_TargetedVersionResume_SeedsToken(t *testing.T) {
@@ -1158,9 +1317,10 @@ func TestRebuild_TargetedVersionResume_SeedsToken(t *testing.T) {
 	if len(reqs) != 1 || reqs[0].PageToken != "p7" {
 		t.Fatalf("the walk's only active plan must start at the cursor's page token, got %+v", reqs)
 	}
-	if st.has("RemoveResource:product/1") {
-		t.Fatal("a version-targeted rebuild merges edges, not wipes: the non-targeted versions' plans did not run, so wiping would drop the edges only they discover")
-	}
+	// Only the selected version's set is replaced: the non-targeted
+	// version's plan did not run, and its set stays untouched.
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(2)})
 	if !st.has("ClearStale:product/1") {
 		t.Fatal("a resource whose every selected plan flushed must settle")
 	}
@@ -1206,9 +1366,9 @@ func TestRebuildAll_MultiPlanCursorIgnored(t *testing.T) {
 			t.Fatalf("a multi-plan walk must ignore the cursor and walk %s from the start, got %+v", name, reqs)
 		}
 	}
-	if !st.has("RemoveResource:product/1") {
-		t.Fatal("a walk that ignored its cursor runs from scratch — full wipe-and-replace applies")
-	}
+	// From scratch, both plans run, and both versions' sets are replaced.
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1), versionSet(2)})
 }
 
 func TestRebuildAll_ResumeWithUnknownVersionRestartsFromScratch(t *testing.T) {
@@ -1233,9 +1393,10 @@ func TestRebuildAll_ResumeWithUnknownVersionRestartsFromScratch(t *testing.T) {
 	if len(v1.requests()) != 1 || v1.requests()[0].PageToken != "" {
 		t.Fatalf("a cursor naming a version this walk does not run must restart it from scratch, got %+v", v1.requests())
 	}
-	if !st.has("RemoveResource:product/1") {
-		t.Fatal("a from-scratch walk is not resumed — full wipe-and-replace applies")
-	}
+	// The walk's only plan ran from the listing's head and replaced its
+	// version's set.
+	assertNoWipe(t, st, product("1"))
+	assertReplaces(t, st, product("1"), 1, []EdgeSet{versionSet(1)})
 }
 
 func TestRebuildAll_FailedFlushDoesNotCheckpoint(t *testing.T) {
@@ -1263,7 +1424,7 @@ func TestRebuildAll_FailedFlushDoesNotCheckpoint(t *testing.T) {
 	}
 	for _, id := range []string{"1", "2"} {
 		if !st.has("MarkStale:product/" + id) {
-			t.Fatalf("resource %s had its edges wiped but never landed — salvage must mark it stale", id)
+			t.Fatalf("resource %s was begun but never landed — salvage must mark it stale", id)
 		}
 		if st.has("ClearStale:product/" + id) {
 			t.Fatalf("resource %s must not be cleared after a failed flush", id)
@@ -1461,4 +1622,35 @@ func TestRebuild_CancelledBeforeDriftCheck_FailsTheRoot(t *testing.T) {
 
 func (s *rebuildRecordingStore) RegisterChanges(context.Context, []Registration, time.Duration) (Registered, error) {
 	panic("RegisterChanges: not implemented")
+}
+
+// A flush whose edge replace fails because the walk's context ended — here
+// the last flush of a checkpointing single-plan walk, where no salvage
+// follows — still marks the resource stale, on a context detached from the
+// walk's: the checkpoint the flush reports steps over it, so the mark is its
+// only recovery.
+func TestRebuildAll_EdgeReplaceFailsOnCancellation_MarksTheResourceStaleDetached(t *testing.T) {
+	st := &rebuildRecordingStore{ctxAware: true, replaceErrs: map[string]error{"1": context.Canceled}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	es := &captureBackend{onBulk: cancel}
+	plans := map[string][]projection.Plan{"product": {{Version: 1, Executer: &cursorPagingExecuter{
+		pages: []aggregation.ExecutionResult[projection.BuildDoc]{{Items: []projection.BuildDoc{productDoc("1")}, NextPageToken: "p2"}},
+	}}}}
+	idx := newRebuildIndexer(st, es, plans, 0)
+
+	var cps []RebuildCursor
+	err := idx.RebuildNowResumable(ctx, ResourceSelector{ResourceType: "product"}, nil,
+		func(c RebuildCursor) { cps = append(cps, c) })
+	if err == nil {
+		t.Fatal("a walk whose resource was not settled must not report success")
+	}
+
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "MarkStale:product/1") == 0 {
+		t.Fatalf("a resource whose edge replace failed on cancellation must still be durably marked stale: %v (checkpoints %v)", calls, cps)
+	}
+	if countPrefix(calls, "ClearStale:product/1") != 0 {
+		t.Fatalf("a resource whose edges were not stored must not clear its mark: %v", calls)
+	}
 }
