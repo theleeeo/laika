@@ -56,7 +56,7 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 }
 
 // detachedMarkTimeout bounds a stale mark made on a context detached from the
-// rebuild's cancellation (salvage, a failed drift re-mark's retry).
+// rebuild's cancellation (a failed resource's mark, salvage).
 const detachedMarkTimeout = 30 * time.Second
 
 // pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped)
@@ -181,7 +181,8 @@ func (f *rebuildFlusher) discard(id string) {
 }
 
 // fail records a resource the rebuild could not serve: its queued documents
-// are dropped and it is durably marked stale so the sweep recovers it. A
+// are dropped and it is durably marked stale so the sweep recovers it — on a
+// context detached from the rebuild's cancellation (markStale). A
 // resource that was never begun (e.g. a failed BeginBuild) gets a failed
 // entry, so a later plan walk cannot re-begin it and complete it with only a
 // subset of its versions written.
@@ -213,8 +214,14 @@ func (f *rebuildFlusher) dropPending(id string) {
 // docKey identifies one document of a bulk chunk.
 func docKey(index, id string) string { return index + "/" + id }
 
+// markStale durably marks one resource stale on a context detached from the
+// rebuild's cancellation: the walk may have been cancelled after the failure
+// it reacts to, and a checkpoint reported after this mark steps over the
+// resource, so the mark is its only recovery.
 func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
-	if _, err := f.idx.st.MarkStale(ctx, []model.Resource{f.root(id)}, f.metadata, 0); err != nil {
+	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
+	defer cancel()
+	if _, err := f.idx.st.MarkStale(mctx, []model.Resource{f.root(id)}, f.metadata, 0); err != nil {
 		slog.Error("failed to mark rebuilt resource stale; sweep cannot recover it",
 			slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
 	}
@@ -303,14 +310,10 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			sets = append(sets, set)
 		}
 		if err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil); err != nil {
-			// Marked on a context detached from cancellation: the replace may
-			// have failed because the walk's context ended, and this flush's
-			// checkpoint steps over the resource, so the mark is its only
-			// recovery.
+			// The replace may have failed because the walk's context ended;
+			// fail marks on a detached context all the same.
 			slog.Warn("failed to replace edges; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
-			mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
-			f.fail(mctx, id)
-			cancel()
+			f.fail(ctx, id)
 		}
 	}
 
@@ -383,7 +386,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 // query per root, and each changed root is re-marked and re-built via the
 // mark-first primitive. A root whose re-mark fails is failed instead: clearing
 // it would leave its possibly outdated document with no mark for the sweep.
-// Its mark is retried on a context detached from cancellation — the re-mark
+// fail retries its mark on a context detached from cancellation — the re-mark
 // may have failed because the walk's context ended — and the rebuild reports
 // the failure.
 func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][]ChangeCheck) {
@@ -409,9 +412,7 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		if perErr != nil || perResource {
 			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, f.metadata); err != nil {
 				slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
-				mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
-				f.fail(mctx, id)
-				cancel()
+				f.fail(ctx, id)
 			}
 		}
 	}

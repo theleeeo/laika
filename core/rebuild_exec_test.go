@@ -1654,3 +1654,37 @@ func TestRebuildAll_EdgeReplaceFailsOnCancellation_MarksTheResourceStaleDetached
 		t.Fatalf("a resource whose edges were not stored must not clear its mark: %v", calls)
 	}
 }
+
+// A flush whose document is rejected while the walk's context ends — here
+// the last flush of a checkpointing single-plan walk, where no salvage
+// follows — marks the resource stale on a context detached from the walk's
+// before the flush reports its checkpoint: the checkpoint steps over the
+// resource, so the mark is its only recovery.
+func TestRebuildAll_RejectedDocumentOnCancellation_MarksTheResourceStaleBeforeTheCheckpoint(t *testing.T) {
+	st := &rebuildRecordingStore{ctxAware: true}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	es := &captureBackend{rejectIDs: map[string]bool{"1": true}, onBulk: cancel}
+	plans := map[string][]projection.Plan{"product": {{Version: 1, Executer: &cursorPagingExecuter{
+		pages: []aggregation.ExecutionResult[projection.BuildDoc]{{Items: []projection.BuildDoc{productDoc("1")}, NextPageToken: "p2"}},
+	}}}}
+	idx := newRebuildIndexer(st, es, plans, 0)
+
+	err := idx.RebuildNowResumable(ctx, ResourceSelector{ResourceType: "product"}, nil,
+		func(c RebuildCursor) { st.record("Checkpoint:%d/%v", c.PlanVersion, c.PageToken) })
+	if err == nil {
+		t.Fatal("a walk whose resource was not settled must not report success")
+	}
+
+	calls := st.callsSnapshot()
+	marks, cps := callIndexes(calls, "MarkStale:product/1"), callIndexes(calls, "Checkpoint:1/p2")
+	if len(marks) == 0 {
+		t.Fatalf("a resource with a rejected document must be durably marked stale even on a cancelled walk: %v", calls)
+	}
+	if len(cps) != 0 && cps[0] < marks[0] {
+		t.Fatalf("the checkpoint must not step over the resource before it is durably marked: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/1") != 0 {
+		t.Fatalf("a resource with a rejected document must not clear its mark: %v", calls)
+	}
+}
