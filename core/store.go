@@ -7,11 +7,6 @@ import (
 	"github.com/theleeeo/laika/model"
 )
 
-type Relation struct {
-	Parent model.Resource
-	Child  model.Resource
-}
-
 type Store interface {
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
 	GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error)
@@ -23,7 +18,8 @@ type Store interface {
 	// stamps it with buildSeq; a set stamped higher is left unchanged. So each
 	// version's edges follow the Build Sequence like its document does
 	// (ADR 0002): they come from the build Elasticsearch keeps. A set with no
-	// Children replaces the stored one with no edges. The order of sets does
+	// Children replaces the stored one with no edges; a child may repeat in
+	// Children (two relation fields can name it) and is stored once. The order of sets does
 	// not matter.
 	//
 	// Versions not in sets are untouched, unless declared is non-nil: then

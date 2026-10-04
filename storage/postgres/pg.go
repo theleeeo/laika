@@ -24,40 +24,6 @@ func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool}
 }
 
-func (s *Store) AddRelations(ctx context.Context, relations []core.Relation) error {
-	if len(relations) == 0 {
-		return nil
-	}
-
-	batch := &pgx.Batch{}
-	for _, relation := range relations {
-		batch.Queue(
-			`INSERT INTO relations (resource, resource_id, related_resource, related_resource_id) 
-			 VALUES ($1, $2, $3, $4) 
-			 ON CONFLICT (resource, resource_id, related_resource, related_resource_id) DO NOTHING`,
-			relation.Parent.Type, relation.Parent.Id, relation.Child.Type, relation.Child.Id,
-		)
-	}
-
-	br := s.pool.SendBatch(ctx, batch)
-	if err := br.Close(); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (s *Store) AddChildResources(ctx context.Context, parent model.Resource, childs []model.Resource) error {
-	var relations []core.Relation
-	for _, child := range childs {
-		relations = append(relations, core.Relation{
-			Parent: parent,
-			Child:  child,
-		})
-	}
-	return s.AddRelations(ctx, relations)
-}
-
 // GetParentResources returns the Parents of childResource: every resource
 // with an edge to it in any Schema Version's set, each once.
 func (s *Store) GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error) {
