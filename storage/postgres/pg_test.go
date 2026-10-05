@@ -1152,16 +1152,27 @@ func TestSchema_RaisesAChangeSequenceLeftBehindTheStamps(t *testing.T) {
 
 // build_idx and stale_seq are drawn from the Change Sequence too, so the
 // guard keeps it ahead of them as well: a sequence behind either would hand
-// a recreated row numbers below those its old row carried.
-func TestSchema_RaisesAChangeSequenceLeftBehindABuildIdxOrStaleSeq(t *testing.T) {
-	for _, column := range []string{"build_idx", "stale_seq"} {
+// a recreated row numbers below those its old row carried. An edge set's
+// stamp is a Build Sequence that can outlive its row — a late build writes
+// it after a hard delete — so the guard keeps the sequence ahead of it too:
+// behind it, a recreate's ReplaceEdges would be rejected for that version.
+func TestSchema_RaisesAChangeSequenceLeftBehindABuildIdxStaleSeqOrEdgeSetStamp(t *testing.T) {
+	ahead := map[string]string{
+		"build_idx": `UPDATE resources SET build_idx = change_seq + 100 WHERE type=$1 AND id=$2 RETURNING build_idx`,
+		"stale_seq": `UPDATE resources SET stale_seq = change_seq + 100 WHERE type=$1 AND id=$2 RETURNING stale_seq`,
+		// Stamped above every number of the row, which is then hard-deleted.
+		"edge_sets.build_seq": `WITH gone AS (DELETE FROM resources WHERE type=$1 AND id=$2 RETURNING change_seq)
+		     INSERT INTO edge_sets (type, id, schema_version, build_seq)
+		     SELECT $1, $2, 1, change_seq + 100 FROM gone RETURNING build_seq`,
+	}
+	for _, column := range []string{"build_idx", "stale_seq", "edge_sets.build_seq"} {
 		for _, tc := range []struct {
 			name    string
 			restart bool
 		}{
-			// The column is ahead of the sequence, which is ahead of change_seq.
+			// The number is ahead of the sequence, which is ahead of change_seq.
 			{"behind", false},
-			// Next value exactly the column's: is_called is false, so a draw
+			// Next value exactly the number: is_called is false, so a draw
 			// would not exceed it.
 			{"restart at the number", true},
 		} {
@@ -1170,22 +1181,20 @@ func TestSchema_RaisesAChangeSequenceLeftBehindABuildIdxOrStaleSeq(t *testing.T)
 				st, pool := isolatedStore(t)
 				res := model.Resource{Type: "cq8", Id: "1"}
 				register(t, st, core.Registration{Resource: res, Version: 1})
-				var ahead int64
-				if err := pool.QueryRow(ctx,
-					`UPDATE resources SET `+column+` = change_seq + 100 WHERE type=$1 AND id=$2 RETURNING `+column,
-					res.Type, res.Id).Scan(&ahead); err != nil {
+				var number int64
+				if err := pool.QueryRow(ctx, ahead[column], res.Type, res.Id).Scan(&number); err != nil {
 					t.Fatal(err)
 				}
 				if tc.restart {
-					if _, err := pool.Exec(ctx, fmt.Sprintf(`ALTER SEQUENCE change_sequence RESTART WITH %d`, ahead)); err != nil {
+					if _, err := pool.Exec(ctx, fmt.Sprintf(`ALTER SEQUENCE change_sequence RESTART WITH %d`, number)); err != nil {
 						t.Fatal(err)
 					}
 				}
 				if err := applySchema(ctx, pool); err != nil {
 					t.Fatal(err)
 				}
-				if next := start(t, st); next <= ahead {
-					t.Fatalf("after re-applying the schema the next value %d must exceed the %s %d", next, column, ahead)
+				if next := start(t, st); next <= number {
+					t.Fatalf("after re-applying the schema the next value %d must exceed the %s %d", next, column, number)
 				}
 			})
 		}

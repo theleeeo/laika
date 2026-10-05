@@ -64,8 +64,11 @@ CREATE TABLE IF NOT EXISTS edge_sets (
 -- up, and would repeat build_idx and stale_seq values rows already carry: a
 -- build below its document's Elasticsearch version loses its write, and a
 -- repeated stale_seq can match a token or a captured mark it doesn't belong
--- to. Raise it to the largest change_seq, build_idx or stale_seq only when
--- its next value would not exceed that; an empty table, rows never changed,
+-- to. An edge set's build_seq is a Build Sequence too, and can outlive its
+-- row (a late build writes it after a hard delete): behind it, a recreate's
+-- ReplaceEdges would be rejected for that version. Raise the sequence to the
+-- largest change_seq, build_idx, stale_seq or edge-set build_seq only when
+-- its next value would not exceed that; empty tables, rows never changed,
 -- built or marked, or a sequence already ahead are left alone, so applying
 -- this file never moves the sequence backwards. The next value is last_value
 -- + 1 once called, but last_value itself on a fresh or RESTARTed sequence
@@ -75,7 +78,10 @@ DECLARE
     stamped bigint;
     next_value bigint;
 BEGIN
-    SELECT greatest(max(change_seq), max(build_idx), max(stale_seq)) INTO stamped FROM resources;
+    SELECT greatest(
+               (SELECT greatest(max(change_seq), max(build_idx), max(stale_seq)) FROM resources),
+               (SELECT max(build_seq) FROM edge_sets))
+        INTO stamped;
     SELECT CASE WHEN is_called THEN last_value + 1 ELSE last_value END
         INTO next_value FROM change_sequence;
     IF stamped >= next_value THEN
