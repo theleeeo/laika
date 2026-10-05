@@ -72,7 +72,7 @@ type Config struct {
 	// outlives it costs a duplicate build; a delete that outlives it after
 	// its renewal can lose a recreated document while the delete is
 	// unversioned: the recreate claims and builds, the delete lands after the
-	// build's write, and the build's finish clears the mark (seam S9).
+	// build's write, and the build's finish clears the mark (seams S9).
 	// Default 30s.
 	OwnerLease time.Duration
 

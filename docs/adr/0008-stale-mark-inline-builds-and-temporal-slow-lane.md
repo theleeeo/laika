@@ -48,7 +48,7 @@
 > document is lost. Any inline delete racing an inline build had this before
 > ownership; ownership narrows it to a lease lapsing mid-run, or to an owner
 > token the recreated row repeats (seams S9 and S8 in laika-dev's
-> `docs/open-questions.md`).
+> `docs/open-questions.md` (at e1dc955)).
 >
 > *The race-safe clear* below changes accordingly: a newer change that moved
 > `stale_seq` mid-build is served by the owner's follow-up, not by "the newer

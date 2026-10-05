@@ -240,7 +240,7 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // the items and their Parents — in (type, id) order, as MarkStale and the
 // owner statements lock theirs, so none of them deadlock over rows that exist
 // when the statement starts. Rows created or removed concurrently can still
-// deadlock it, and it then returns core.ErrRegistrationAborted (seam S4).
+// deadlock it, and it then returns core.ErrRegistrationAborted (seams S4).
 // The item upsert's WHERE is the stale-version check: a delete or a
 // version-0 item is always accepted, a versioned one only when strictly
 // newer. Parents are found from
@@ -427,7 +427,7 @@ const lockedInput = `locked AS MATERIALIZED (
 // RegisterChanges does, and returns those; a lease of zero leaves the owner
 // columns alone and returns nil. Either way the rows are locked in (type, id)
 // order before any is marked, so it doesn't deadlock over rows that exist when
-// it starts; rows created or removed concurrently still can (seam S4).
+// it starts; rows created or removed concurrently still can (seams S4).
 func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -522,7 +522,7 @@ func ownedArrays(owned []core.Owned) (types, ids []string, tokens []int64) {
 
 // RenewOwners renews the lease of every given ownership whose token is still
 // the row's owner token and returns those: the ownerships still held. It
-// locks the rows in (type, id) order first, as the marks do (seam S4).
+// locks the rows in (type, id) order first, as the marks do (seams S4).
 func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Owned, error) {
 	if len(owned) == 0 {
 		return nil, nil
@@ -556,7 +556,7 @@ func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Own
 
 // ReleaseOwners drops every given ownership whose token is still the row's
 // owner token. The stale mark stays for the next change or the sweep. It
-// locks the rows in (type, id) order first, as the marks do (seam S4).
+// locks the rows in (type, id) order first, as the marks do (seams S4).
 func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 	if len(owned) == 0 {
 		return nil
@@ -582,7 +582,7 @@ func (s *Store) NextChangeSeq(ctx context.Context) (int64, error) {
 // AnyChangedSince reports whether any checked resource's change_seq exceeds
 // its check's Start, all checks in one query. A resource without a row has
 // never changed. It takes no row locks: a registration numbered above a
-// start but not yet committed is not seen (seam S6).
+// start but not yet committed is not seen (seams S6).
 func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) (bool, error) {
 	if len(checks) == 0 {
 		return false, nil

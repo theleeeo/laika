@@ -53,7 +53,7 @@
 > the new set reaches the Parent by fanout. The drift check still covers a
 > Child new to the Parent's edges, whose registration can read the edges
 > before the build commits them (seam S6 in laika-dev's
-> `docs/open-questions.md`).
+> `docs/open-questions.md` (at e1dc955)).
 >
 > Why: the wipe and the re-add were separate commits, so a slower build that
 > wiped and re-added after a newer one left its own edges beside the newer
@@ -85,13 +85,13 @@
 > before the build's (the sequence is `CACHE 1`, so `nextval` order is
 > real-time order across sessions), and its notification came after its write
 > was visible at source, so the build's fetch sees it. This is the assumption of
-> seam S5 in laika-dev's `docs/open-questions.md` — the source serves a resource
-> at least as new as its Notification — now for the Children as well as the
-> root. No bound is needed: each hit is a change accepted after the build
-> started. What the check still misses — a registration numbered above the
-> start that is uncommitted when the drift query runs, and a deleted Child
-> whose row is hard-deleted before it — is seam S6 there; its design pass is
-> open point Q14.
+> seam S5 in laika-dev's `docs/open-questions.md` (at e1dc955) — the source
+> serves a resource at least as new as its Notification — now for the Children
+> as well as the root. No bound is needed: each hit is a change accepted after
+> the build started. What the check still misses — a registration numbered
+> above the start that is uncommitted when the drift query runs, and a deleted
+> Child whose row is hard-deleted before it — is seam S6 there; its design pass
+> is open point Q14.
 >
 > A Rebuild walk takes one start per plan walk (`Store.NextChangeSeq`) before
 > the plan executes: the aggregation pipeline fetches pages ahead of the roots'
