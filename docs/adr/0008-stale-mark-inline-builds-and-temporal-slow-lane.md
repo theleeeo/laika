@@ -1,5 +1,52 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-05, runbook step L2.1):** the numbers a mark and a build
+> capture come from the **Change Sequence**, and the L1.4 note's exception for
+> a delete is closed.
+>
+> - **_The race-safe clear_.** `BeginBuild` no longer bumps a per-row
+>   `build_idx`: it draws one value from `change_sequence`, which is both the
+>   Build Sequence and the build's start, and every mark sets `stale_seq` to
+>   a fresh value from the same sequence; a claim sets `owner_seq` to that
+>   value, so an owner token is still the `stale_seq` of its claim. The clear
+>   compares `stale_seq` for equality as before. Since no value is reused,
+>   across a hard delete and a recreate too, a build, captured mark or owner
+>   token of the old row never matches the recreated row. One repeat stays:
+>   `ListStale` claims at the row's current `stale_seq` without drawing a new
+>   one, so a sweep can claim under the token of an owner whose lease expired
+>   (seams S8 in laika-dev's `docs/seams.md`).
+> - **The delete exception.** The notified delete (`deleteOne`) takes a Build
+>   Sequence before it deletes anything: `Store.BeginDelete` bumps the
+>   tombstone's `build_idx` and renews the delete's lease, as `BeginBuild`
+>   does for a build. Its Elasticsearch deletes are versioned at that number
+>   and its edge removal bounded by it (ADR 0002's L2.1 note). A recreate
+>   that claims the row after a lapsed lease and builds after the bump writes
+>   above the delete, so the late delete is rejected and the document stays.
+>   A recreate registered before the bump has made the row a live one again
+>   (and one that claimed and built before it has written its document), and
+>   `BeginDelete` reports the delete **superseded**: it deletes nothing and
+>   finishes through `DeleteResourceIfSeq`, whose follow-up — a build of the
+>   recreate, when the recreate only marked the row and the delete still
+>   owns it — is submitted. A lapsed lease now costs a duplicate build or delete, as for
+>   any owner, with one exception left: a build whose lease lapses, so that
+>   a delete claims and runs, and whose write lands more than Elasticsearch's
+>   `index.gc_deletes` after that delete is accepted below the delete's
+>   version and brings the document back (seams S16 in laika-dev's
+>   `docs/seams.md`).
+>
+>   `BeginDelete` reports the delete superseded only when the row is gone or
+>   no longer a tombstone. A tombstone whose `stale_seq` moved since the
+>   delete's mark — a Parent mark (marks don't skip tombstones, and a
+>   deleted Parent is reached through its `relations` rows until
+>   `RemoveResource` removes them), a `MarkStale`, a newer delete
+>   registration — is not: the delete runs at its bump, and
+>   `DeleteResourceIfSeq` then re-claims the moved mark for a follow-up
+>   delete, as before. This is narrower than runbook step L2.1's wording,
+>   which also counted a moved `stale_seq` as superseded. Why: a superseded
+>   delete removes nothing, its edges included, so under that rule steady
+>   traffic to a deleted Parent's children would keep superseding its delete,
+>   and its document would stay searchable.
+
 > **Note (2026-10-04, runbook step L1.4):** inline builds are owned per
 > resource. The `resources` row records a **Build owner** next to the stale
 > mark: `owner_seq`, the owner token, and `owner_since`, when the owner last

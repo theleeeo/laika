@@ -1,5 +1,43 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-05, runbook step L2.1):** leg 1 orders **deletes** by the
+> Build Sequence like writes, and the Build Sequence is drawn from the
+> **Change Sequence**.
+>
+> - **Deletes are versioned.** Every Elasticsearch delete is sent as
+>   `external_gte` at the deleting path's Build Sequence: the live build's or
+>   a rebuild's own `BeginBuild` when every plan found the resource gone, the
+>   one a Rebuild walk began the id at (or a fresh `BeginBuild` for an id it
+>   hadn't begun), and for a notified delete the bump `Store.BeginDelete`
+>   takes before it deletes anything. A document a newer build wrote rejects
+>   a late delete (409), which is success, like a write that lost OCC; a
+>   missing document (404) is success too. The edge removal
+>   (`RemoveResource`) takes the same sequence and removes only the edge
+>   sets stamped at or below it, so the L1.5 note's unguarded delete is
+>   gone: a set a newer build stored stays.
+> - **The numbers don't restart.** `build_idx` and `stale_seq` no longer
+>   count per row from 1. `BeginBuild` draws one value from `change_sequence`
+>   and returns it as both the Build Sequence and the build's start (leg 3),
+>   and every stale mark sets `stale_seq` to a fresh value. Neither restarts
+>   across a hard delete and a recreate: `build_idx` keeps rising, so a
+>   recreated resource is built above every version Elasticsearch remembers
+>   for its deleted document, and no `stale_seq` value is reused, so nothing
+>   of the old row matches the new row's numbers. The schema
+>   guard that keeps the sequence ahead of `change_seq` keeps it ahead of
+>   `build_idx`, `stale_seq` and `edge_sets.build_seq` too.
+> - **A walk checks a root it deleted.** A Rebuild walk fetches a page before
+>   its roots' `BeginBuild`, so a root listed without data can be recreated
+>   and built before the walk's delete runs at a higher sequence. After such
+>   a delete the walk checks the root against its walk start, as it checks a
+>   root it settles, and re-builds it on a hit.
+>
+> Why: an unversioned delete from a build that found a resource gone could
+> remove the document, and its edge removal the edges, that a later build of
+> the recreated resource wrote. And a row recreated after a hard delete
+> restarted at 1, while Elasticsearch remembers a deleted document's version
+> for `index.gc_deletes` (60s by default): the recreate's write lost as an OCC
+> conflict, its finish cleared the mark, and it was not indexed.
+
 > **Note (2026-10-04, runbook step L1.5):** leg 2 is a **per-version replace
 > guarded by the Build Sequence**, with no wipe. Edges are stored per Schema
 > Version: each `relations` row carries the `schema_version` whose plan found

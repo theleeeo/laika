@@ -78,8 +78,9 @@ sweep:
 # build owns its resource without renewing: while it is live, a change to the
 # resource on any instance submits no second build, and the owner runs one
 # follow-up for it; 0 means 30s. Size it above a build's or delete's queue wait
-# plus its run: a build that outlives it costs a duplicate build, and a delete
-# that outlives it can lose the document of a resource recreated meanwhile.
+# plus its run: a build or delete that outlives it costs a duplicate one, and a
+# build that a delete overtakes and that writes more than Elasticsearch's
+# index.gc_deletes (60s) after it brings the deleted document back.
 pool:
   size: 10
   queue_size: 100
