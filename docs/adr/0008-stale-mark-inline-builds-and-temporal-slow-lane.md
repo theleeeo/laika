@@ -1,5 +1,24 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-05, runbook step L2.3):** a row's metadata is its own: its
+> registrations', else its plan's report, never a walk's. Until now only a
+> stale mark wrote `resources.metadata` and `BeginBuild` wrote none, so a row
+> only a Rebuild walk built had none, and a later build with no notification
+> behind it — the sweep's, an owner's follow-up — fetched without the
+> resource's actor. Now a plan may report the resource's own metadata
+> (`projection.BuildDoc.ResourceMetadata`, beside `Metadata`, the fetch
+> context), and every build path — the live build, a by-ids rebuild, a walk
+> through its flusher — stores it with its edge sets (`Store.ReplaceEdges`)
+> on a row whose metadata is NULL or empty, so before the drift check and the
+> Parent cascade; metadata the row holds is never overwritten, and a
+> registration that commits later replaces the report. The drift re-mark
+> carries the row's metadata as that write leaves it, falling back to the
+> build's own only when the row has none, so it no longer overwrites a stored
+> report with a walk's actor or with nothing. The other marks still write the
+> metadata they carry: a Parent's mark its child's, a walk's failure and
+> salvage marks the walk's. Runbook step L1.8 makes the marks leave metadata
+> alone and has a build read the row's at `BeginBuild`.
+
 > **Note (2026-10-05, runbook step L2.2):** a build that finds every plan nil
 > removes the row, as a notified delete does. Until now only a notified delete
 > hard-deleted its row; a build path's delete deleted the documents and edge
