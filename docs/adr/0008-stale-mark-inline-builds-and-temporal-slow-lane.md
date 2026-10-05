@@ -14,10 +14,13 @@
 > registration that commits later replaces the report. The drift re-mark
 > carries the row's metadata as that write leaves it, falling back to the
 > build's own only when the row has none, so it no longer overwrites a stored
-> report with a walk's actor or with nothing. The other marks still write the
-> metadata they carry: a Parent's mark its child's, a walk's failure and
-> salvage marks the walk's. Runbook step L1.8 makes the marks leave metadata
-> alone and has a build read the row's at `BeginBuild`.
+> report with a walk's actor or with nothing. That rule is not yet whole: the
+> other marks still write the metadata they carry — a Parent's mark its
+> child's, a walk's failure, `finish` and salvage marks the walk's — and so
+> does a drift re-mark of a row that has none; once such a mark has given a
+> row metadata, later reports are refused (seams S19 in laika-dev's
+> `docs/seams.md`). Runbook step L1.8 makes the marks leave metadata alone
+> and has a build read the row's at `BeginBuild`.
 
 > **Note (2026-10-05, runbook step L2.2):** a build that finds every plan nil
 > removes the row, as a notified delete does. Until now only a notified delete

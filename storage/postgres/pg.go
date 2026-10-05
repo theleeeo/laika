@@ -807,8 +807,9 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 // ListStale returns up to limit resources whose stale mark is older than
 // before and that have no live owner, oldest first, including delete
 // tombstones, and claims each one in the same statement at its current
-// stale_seq (no bump), which is its Token. Each entry carries the metadata
-// stored by its most recent mark. The candidates are locked FOR UPDATE SKIP
+// stale_seq (no bump), which is its Token. Each entry carries the row's
+// metadata: its most recent mark's, or the plans' report ReplaceEdges stored
+// on a row that had none. The candidates are locked FOR UPDATE SKIP
 // LOCKED inside the claiming UPDATE, so of two concurrent sweeps only one
 // claims a row: the other skips it while it is locked, and re-checks the
 // owner condition against the claimed row once it has committed.

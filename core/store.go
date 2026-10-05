@@ -188,7 +188,8 @@ type FollowUp struct {
 	// stale_seq at the re-claim; 0 means no follow-up is due. A follow-up
 	// delete is guarded by it (DeleteResourceIfSeq's staleSeq).
 	Token int64
-	// Metadata is the row's metadata: that of its last mark, in commit order.
+	// Metadata is the row's metadata: that of its last mark, in commit order,
+	// or, on a row no mark gave any, its plans' report (see ReplaceEdges).
 	Metadata map[string]string
 	// Deleted reports a tombstone: the follow-up is a delete, not a build.
 	Deleted bool
@@ -201,8 +202,9 @@ type StaleResource struct {
 	// Token is the owner token ListStale claimed the row under.
 	Token   int64
 	Deleted bool
-	// Metadata is the notification metadata stored by the most recent
-	// MarkStale, replayed into the build that serves the mark.
+	// Metadata is the row's metadata — that of its most recent mark, or, on
+	// a row no mark gave any, its plans' report (see ReplaceEdges) — replayed
+	// into the build that serves the mark.
 	Metadata map[string]string
 }
 
