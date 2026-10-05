@@ -64,15 +64,17 @@ func (e *pagingExecuter) Execute(context.Context, projection.BuildRequest) <-cha
 // captureBackend records every write and can reject specific documents in
 // bulk responses or answer single upserts with a version conflict.
 type captureBackend struct {
-	mu             sync.Mutex
-	bulkCalls      [][]BulkItem
-	deletes        []string        // "index/id"
+	mu        sync.Mutex
+	bulkCalls [][]BulkItem
+	deletes   []string // "index/id"
+	// deleteVersions is each delete's version, parallel to deletes.
+	deleteVersions []int64
 	upserts        []string        // "index/id"
 	rejectIDs      map[string]bool // BulkUpsert reports every document of these IDs as rejected
 	rejectDocs     map[string]bool // BulkUpsert reports these "index/id" documents as rejected
 	// extraFailures are appended to every BulkUpsert response as they are —
 	// e.g. a failure whose Index names no document of the chunk.
-	extraFailures []BulkFailure
+	extraFailures  []BulkFailure
 	upsertConflict map[string]bool // Upsert returns ErrVersionConflict for "index/id"
 	// bulkErr fails the whole BulkUpsert request (no per-item failures) —
 	// the case where nothing can be assumed written.
@@ -113,10 +115,11 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 	return append(failures, b.extraFailures...), nil
 }
 
-func (b *captureBackend) Delete(_ context.Context, index, docID string, _ int64) error {
+func (b *captureBackend) Delete(_ context.Context, index, docID string, version int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.deletes = append(b.deletes, index+"/"+docID)
+	b.deleteVersions = append(b.deleteVersions, version)
 	return nil
 }
 
@@ -142,6 +145,17 @@ func (b *captureBackend) deletesSnapshot() []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return append([]string(nil), b.deletes...)
+}
+
+// deletesAt is every delete as "index/id@version", in order.
+func (b *captureBackend) deletesAt() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.deletes))
+	for i, d := range b.deletes {
+		out[i] = fmt.Sprintf("%s@%d", d, b.deleteVersions[i])
+	}
+	return out
 }
 
 // rebuildRecordingStore records per-resource lifecycle calls.
@@ -183,6 +197,9 @@ type rebuildRecordingStore struct {
 	// the ReplaceEdges of each resource whose id it names.
 	replaced    []edgeReplace
 	replaceErrs map[string]error
+	// beginErrs fails the BeginBuild of each resource whose id it names; the
+	// call is still recorded.
+	beginErrs map[string]error
 }
 
 func (s *rebuildRecordingStore) replacedSnapshot() []edgeReplace {
@@ -268,6 +285,9 @@ func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource, 
 	s.record("BeginBuild:%s/%s", r.Type, r.Id)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.beginErrs[r.Id]; err != nil {
+		return BuildBegun{}, err
+	}
 	s.buildIdx++
 	// Start = 100 + BuildIdx: distinct per build, so a test can tell whose
 	// start a check carries.
@@ -345,12 +365,18 @@ func (s *rebuildRecordingStore) GetParentResources(context.Context, model.Resour
 	return nil, nil
 }
 
-func (s *rebuildRecordingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
-	return DeleteBegun{}, nil
+// BeginDelete bumps the Build Sequence and is never superseded: this store
+// keeps no rows, and its tests don't drive notified deletes.
+func (s *rebuildRecordingStore) BeginDelete(_ context.Context, r model.Resource, staleSeq, token int64) (DeleteBegun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, fmt.Sprintf("BeginDelete:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token))
+	s.buildIdx++
+	return DeleteBegun{BuildIdx: s.buildIdx}, nil
 }
 
-func (s *rebuildRecordingStore) RemoveResource(_ context.Context, r model.Resource, _ int64) error {
-	s.record("RemoveResource:%s/%s", r.Type, r.Id)
+func (s *rebuildRecordingStore) RemoveResource(_ context.Context, r model.Resource, buildSeq int64) error {
+	s.record("RemoveResource:%s/%s:%d", r.Type, r.Id, buildSeq)
 	return nil
 }
 
@@ -732,6 +758,92 @@ func TestRebuildAll_NilDocDeletesFromAllVersions(t *testing.T) {
 			t.Fatalf("resource %s must still complete normally", id)
 		}
 	}
+}
+
+// A plan walk deletes a resource listed without data at a Build Sequence of
+// its own: one first seen as nil begins a build for it, one an earlier plan's
+// document already began in this walk reuses that build's sequence, and one
+// whose BeginBuild fails is deleted nowhere and marked stale instead.
+func TestRebuildAll_NilDoc_DeletesAtTheResourcesSequence(t *testing.T) {
+	t.Run("first seen as nil: begins a build for the delete", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41}
+		es := &captureBackend{}
+		plans := map[string][]projection.Plan{"product": {
+			{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("2"), productDoc("3")}}},
+		}}
+		idx := newRebuildIndexer(st, es, plans, 0)
+
+		if err := idx.RebuildNow(context.Background(), []ResourceSelector{{ResourceType: "product"}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// 1 begins at 42, 2 at 43, 3 at 44.
+		calls := st.callsSnapshot()
+		begin, remove := slices.Index(calls, "BeginBuild:product/2"), slices.Index(calls, "RemoveResource:product/2:43")
+		if begin == -1 || st.count("BeginBuild:product/2") != 1 {
+			t.Fatalf("the nil resource must begin exactly one build for its delete: %v", calls)
+		}
+		if remove != -1 && remove < begin {
+			t.Fatalf("the delete must follow its BeginBuild: %v", calls)
+		}
+		assertDeletedAt(t, st, es, "2", 43)
+		if st.has("ClearStale:product/2") {
+			t.Fatalf("the delete path owns the deleted resource; the rebuild must not clear it: %v", calls)
+		}
+	})
+
+	t.Run("begun by an earlier plan's document: reuses its sequence", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41}
+		es := &captureBackend{}
+		plans := map[string][]projection.Plan{"product": {
+			{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("2")}}},
+			{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("2")}}},
+		}}
+		idx := newRebuildIndexer(st, es, plans, 0)
+
+		if err := idx.RebuildNow(context.Background(), []ResourceSelector{{ResourceType: "product"}}); err != nil {
+			t.Fatal(err)
+		}
+
+		// v1 begins 1 at 42 and 2 at 43; v2's nil for 2 begins nothing.
+		if n := st.count("BeginBuild:product/2"); n != 1 {
+			t.Fatalf("a resource begun earlier in the walk must not begin again for its delete, got %d: %v", n, st.callsSnapshot())
+		}
+		assertDeletedAt(t, st, es, "2", 43)
+	})
+
+	t.Run("BeginBuild fails: deletes nothing, marks stale", func(t *testing.T) {
+		st := &rebuildRecordingStore{beginErrs: map[string]error{"2": errors.New("db down")}}
+		es := &captureBackend{}
+		plans := map[string][]projection.Plan{"product": {
+			{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("2"), productDoc("3")}}},
+		}}
+		idx := newRebuildIndexer(st, es, plans, 0)
+
+		if err := idx.RebuildNow(context.Background(), []ResourceSelector{{ResourceType: "product"}}); err == nil {
+			t.Fatal("a rebuild that could not settle a resource must report failure")
+		}
+
+		if !st.has("BeginBuild:product/2") {
+			t.Fatalf("setup: the nil resource must try to begin a build: %v", st.callsSnapshot())
+		}
+		for _, d := range es.deletesSnapshot() {
+			if strings.HasSuffix(d, "/2") {
+				t.Fatalf("a delete without a Build Sequence must not run: %v", es.deletesSnapshot())
+			}
+		}
+		if st.has("RemoveResource:product/2") {
+			t.Fatalf("a delete without a Build Sequence must not remove edges: %v", st.callsSnapshot())
+		}
+		if !st.has("MarkStale:product/2") {
+			t.Fatalf("the failed resource must be durably marked stale for the sweep: %v", st.callsSnapshot())
+		}
+		for _, id := range []string{"1", "3"} {
+			if !st.has("ClearStale:product/" + id) {
+				t.Fatalf("resource %s must still complete normally", id)
+			}
+		}
+	})
 }
 
 func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {

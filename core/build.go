@@ -164,7 +164,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return idx.handleDelete(ctx, RebuildPayload{
 			ResourceType: resourceType,
 			ResourceID:   resourceID,
-		}, 0)
+		}, occVersion)
 	}
 	// Plans disagree on existence: a transient source inconsistency or a
 	// broken plan. Fail the build without writing — the stale mark survives
@@ -327,7 +327,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			if err := idx.handleDelete(ctx, RebuildPayload{
 				ResourceType: params.ResourceType,
 				ResourceID:   id,
-			}, 0); err != nil {
+			}, begun.BuildIdx); err != nil {
 				logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 				fl.fail(ctx, id)
 			}
@@ -479,13 +479,26 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				}
 
 				// Source listed the resource but returned no data — hand it
-				// to the delete path, which removes every version's document.
+				// to the delete path, which removes every version's document
+				// at a Build Sequence of the resource's: the one this walk
+				// began it at, or else a fresh BeginBuild's (a failed entry
+				// that was never begun holds 0).
 				if doc.Doc == nil {
+					seq, ok := fl.occ(id)
+					if !ok || seq <= 0 {
+						begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
+						if err != nil {
+							logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
+							fl.fail(ctx, id)
+							continue
+						}
+						seq = begun.BuildIdx
+					}
 					fl.discard(id)
 					if err := idx.handleDelete(ctx, RebuildPayload{
 						ResourceType: params.ResourceType,
 						ResourceID:   id,
-					}, 0); err != nil {
+					}, seq); err != nil {
 						logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 						fl.fail(ctx, id)
 					}

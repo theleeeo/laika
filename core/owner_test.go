@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -276,6 +277,262 @@ func TestOwner_DeleteFollowUp(t *testing.T) {
 			t.Fatalf("the follow-up delete must hard-delete R's row, got %+v", r)
 		}
 	})
+}
+
+// newTwoVersionCaptureIndexer is newCaptureIndexer over two Schema Versions,
+// both served by the one recordingExecuter, so a test sees a delete reach
+// every version's index.
+func newTwoVersionCaptureIndexer(st Store, poolSize, queueSize int) (*Indexer, *recordingExecuter, *captureBackend) {
+	ex := &recordingExecuter{}
+	be := &captureBackend{}
+	return mustNew(Config{
+		Resources: twoVersionResources(),
+		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}, {Version: 2, Executer: ex}}},
+		ES:        be,
+		Store:     st,
+		PoolSize:  poolSize,
+		QueueSize: queueSize,
+	}), ex, be
+}
+
+// deletesOf is every ES delete of product id, as "index/id@version".
+func deletesOf(be *captureBackend, id string) []string {
+	var out []string
+	for _, d := range be.deletesAt() {
+		if strings.Contains(d, "/"+id+"@") {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// inOrder fails unless every call in want was recorded, in that order.
+func inOrder(t *testing.T, st *recordingStore, want ...string) {
+	t.Helper()
+	last := -1
+	calls := st.callsSnapshot()
+	for _, w := range want {
+		i := slices.Index(calls, w)
+		if i == -1 || i < last {
+			t.Fatalf("want %v in that order: %v", want, calls)
+		}
+		last = i
+	}
+}
+
+// A notified delete bumps the row's Build Sequence with BeginDelete after its
+// renewal and before it deletes anything; every version's ES delete and the
+// edge removal carry the bumped sequence, and the guarded hard delete
+// finishes it.
+func TestOwner_NotifiedDelete_DeletesAtTheSequenceBeginDeleteBumped(t *testing.T) {
+	t.Run("inline", func(t *testing.T) {
+		R := product("R")
+		st := &recordingStore{buildIdx: 41} // BeginDelete bumps to 42
+		idx, _, be := newTwoVersionCaptureIndexer(st, 1, 4)
+
+		mustRegister(t, idx, notify("R", ChangeDeleted, nil)) // stale_seq 1, token 1
+		waitIdle(t, idx)
+
+		inOrder(t, st, "RenewOwners:product/R:1", "BeginDelete:product/R:1:1",
+			"RemoveResource:product/R:42", "DeleteResourceIfSeq:product/R:1:1")
+		if got, want := deletesOf(be, "R"), []string{"product_search_v1/R@42", "product_search_v2/R@42"}; !slices.Equal(got, want) {
+			t.Fatalf("every version's delete must carry BeginDelete's Build Sequence: got %v want %v", got, want)
+		}
+		if n := st.count("RemoveResource:"); n != 1 {
+			t.Fatalf("the edges are removed once: %v", st.callsSnapshot())
+		}
+		if r, ok := st.row(R); ok {
+			t.Fatalf("the finished delete must hard-delete the row, got %+v", r)
+		}
+	})
+
+	t.Run("sweep", func(t *testing.T) {
+		gone := product("gone")
+		st := &staleListingStore{entries: []StaleResource{{Resource: gone, StaleSeq: 9, Token: 10, Deleted: true}}}
+		st.buildIdx = 41
+		idx, _, be := newTwoVersionCaptureIndexer(st, 1, 4)
+
+		if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+			t.Fatal(err)
+		}
+		waitIdle(t, idx)
+
+		inOrder(t, &st.recordingStore, "RenewOwners:product/gone:10", "BeginDelete:product/gone:9:10",
+			"RemoveResource:product/gone:42", "DeleteResourceIfSeq:product/gone:9:10")
+		if got, want := deletesOf(be, "gone"), []string{"product_search_v1/gone@42", "product_search_v2/gone@42"}; !slices.Equal(got, want) {
+			t.Fatalf("every version's delete must carry BeginDelete's Build Sequence: got %v want %v", got, want)
+		}
+		if r, ok := st.row(gone); ok {
+			t.Fatalf("the swept delete must hard-delete the row, got %+v", r)
+		}
+	})
+}
+
+// A notified delete that BeginDelete reports superseded — something reached
+// the row between the delete's renewal and its bump — deletes nothing: no ES
+// delete, no edge removal. It still finishes with the guarded hard delete
+// under its mark and token, which hands on the follow-up the change is due,
+// if the delete still owns the row.
+func TestOwner_SupersededDelete_DeletesNothingAndFinishesAsAMovedMark(t *testing.T) {
+	R := product("R")
+	recreate := map[string]string{"m": "recreate"}
+
+	// setup registers the delete of R (stale_seq 1, token 1) and runs during
+	// once, at the start of its BeginDelete.
+	setup := func(t *testing.T, during func(st *recordingStore, idx *Indexer)) (*recordingStore, *recordingExecuter, *captureBackend) {
+		st := &recordingStore{buildIdx: 41}
+		idx, ex, be := newCaptureIndexer(st, 1, 8)
+		var once sync.Once
+		st.onBeginDelete = func(r model.Resource) {
+			if r == R {
+				once.Do(func() { during(st, idx) })
+			}
+		}
+		mustRegister(t, idx, notify("R", ChangeDeleted, map[string]string{"m": "delete"}))
+		waitIdle(t, idx)
+		if begins := callsWithPrefix(st, "BeginDelete:product/R:1:1"); len(begins) != 1 {
+			t.Fatalf("setup: the delete must begin once under its mark and token: %v", st.callsSnapshot())
+		}
+		inOrder(t, st, "BeginDelete:product/R:1:1", "DeleteResourceIfSeq:product/R:1:1")
+		return st, ex, be
+	}
+	register := func(t *testing.T, ns ...Notification) func(*recordingStore, *Indexer) {
+		return func(_ *recordingStore, idx *Indexer) {
+			for _, n := range ns {
+				if err := idx.RegisterChange(context.Background(), n); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+	}
+
+	t.Run("recreate: the follow-up builds R once", func(t *testing.T) {
+		st, ex, be := setup(t, register(t, notify("R", ChangeCreated, recreate)))
+
+		if ds := deletesOf(be, "R"); len(ds) != 0 {
+			t.Fatalf("a superseded delete must not delete from ES: %v", ds)
+		}
+		if n := st.count("RemoveResource:"); n != 0 {
+			t.Fatalf("a superseded delete must not remove edges: %v", st.callsSnapshot())
+		}
+		fus := st.followUpsOf(R)
+		if len(fus) != 1 || fus[0].Deleted || !maps.Equal(fus[0].Metadata, recreate) {
+			t.Fatalf("the finish must hand on one build follow-up with the recreate's metadata, got %v: %v", fus, st.callsSnapshot())
+		}
+		fu := fus[0]
+		begins := callsWithPrefix(st, "BeginBuild:product/R:")
+		if want := fmt.Sprintf("BeginBuild:product/R:%d", fu.Token); len(begins) != 1 || begins[0] != want {
+			t.Fatalf("R must be built exactly once, by the follow-up (%s), got %v: %v", want, begins, st.callsSnapshot())
+		}
+		if st.indexOf(fmt.Sprintf("FinishOwned:product/R:%d:%d", fu.Token, fu.Token)) == -1 {
+			t.Fatalf("the follow-up must finish as an owned build: %v", st.callsSnapshot())
+		}
+		if reqs := ex.requestsFor("R"); len(reqs) != 1 || !maps.Equal(reqs[0].Metadata, recreate) {
+			t.Fatalf("the one build of R must run with the recreate's metadata: %v", reqs)
+		}
+		if r, ok := st.row(R); !ok || r.deleted || r.stale || r.owner != 0 {
+			t.Fatalf("after the follow-up R must exist, clear and unowned: %+v (exists %v)", r, ok)
+		}
+	})
+
+	t.Run("recreate and re-delete: the follow-up delete runs at its own sequence", func(t *testing.T) {
+		st, ex, be := setup(t, register(t,
+			notify("R", ChangeCreated, recreate),
+			notify("R", ChangeDeleted, map[string]string{"m": "redelete"})))
+
+		fus := st.followUpsOf(R)
+		if len(fus) != 1 || !fus[0].Deleted {
+			t.Fatalf("the finish must hand on one delete follow-up, got %v: %v", fus, st.callsSnapshot())
+		}
+		tok := fus[0].Token
+		// The superseded delete bumped nothing, so the follow-up's bump is 42.
+		inOrder(t, st, "DeleteResourceIfSeq:product/R:1:1",
+			fmt.Sprintf("BeginDelete:product/R:%d:%d", tok, tok),
+			"RemoveResource:product/R:42",
+			fmt.Sprintf("DeleteResourceIfSeq:product/R:%d:%d", tok, tok))
+		if removes := callsWithPrefix(st, "RemoveResource:"); len(removes) != 1 {
+			t.Fatalf("only the follow-up delete removes edges: %v", st.callsSnapshot())
+		}
+		if got, want := deletesOf(be, "R"), []string{"product_search_v1/R@42"}; !slices.Equal(got, want) {
+			t.Fatalf("only the follow-up delete deletes from ES, at its Build Sequence: got %v want %v", got, want)
+		}
+		if n := st.count("BeginBuild:product/R:"); n != 0 || len(ex.requestsFor("R")) != 0 {
+			t.Fatalf("nothing may build R: %v", st.callsSnapshot())
+		}
+		if r, ok := st.row(R); ok {
+			t.Fatalf("the follow-up delete must hard-delete R's row, got %+v", r)
+		}
+	})
+
+	t.Run("ownership lost: no follow-up", func(t *testing.T) {
+		var stolen int64
+		st, _, be := setup(t, func(st *recordingStore, _ *Indexer) { stolen = steal(st, R, false) })
+
+		if ds := deletesOf(be, "R"); len(ds) != 0 {
+			t.Fatalf("a superseded delete must not delete from ES: %v", ds)
+		}
+		if n := st.count("RemoveResource:"); n != 0 {
+			t.Fatalf("a superseded delete must not remove edges: %v", st.callsSnapshot())
+		}
+		if fus := st.followUpsOf(R); len(fus) != 0 {
+			t.Fatalf("a delete that lost the row hands on nothing, got %v: %v", fus, st.callsSnapshot())
+		}
+		if n := st.count("BeginBuild:product/R:"); n != 0 {
+			t.Fatalf("the new owner builds R, not the lost delete: %v", st.callsSnapshot())
+		}
+		if r, ok := st.row(R); !ok || r.owner != stolen || !r.stale || r.deleted {
+			t.Fatalf("the new owner (%d) must keep the row and its mark: %+v (exists %v)", stolen, r, ok)
+		}
+	})
+
+	t.Run("row gone: nothing to do", func(t *testing.T) {
+		st, _, be := setup(t, func(st *recordingStore, _ *Indexer) {
+			st.mu.Lock()
+			delete(st.rows, R)
+			st.mu.Unlock()
+		})
+
+		if ds := deletesOf(be, "R"); len(ds) != 0 {
+			t.Fatalf("a superseded delete must not delete from ES: %v", ds)
+		}
+		if n := st.count("RemoveResource:"); n != 0 {
+			t.Fatalf("a superseded delete must not remove edges: %v", st.callsSnapshot())
+		}
+		if fus := st.followUpsOf(R); len(fus) != 0 {
+			t.Fatalf("a gone row hands on nothing, got %v: %v", fus, st.callsSnapshot())
+		}
+		if n := st.count("BeginBuild:"); n != 0 {
+			t.Fatalf("nothing may be built: %v", st.callsSnapshot())
+		}
+	})
+}
+
+// A notified delete whose BeginDelete fails deletes nothing and does not
+// finish: its ownership is released and the tombstone stays for the next
+// change or the sweep.
+func TestOwner_BeginDeleteFails_DeletesNothingAndKeepsTheTombstone(t *testing.T) {
+	R := product("R")
+	st := &recordingStore{beginDeleteErr: errors.New("db down")}
+	idx, _, be := newCaptureIndexer(st, 2, 4)
+
+	mustRegister(t, idx, notify("R", ChangeDeleted, nil)) // stale_seq 1, token 1
+	waitIdle(t, idx)
+
+	if st.indexOf("BeginDelete:product/R:1:1") == -1 {
+		t.Fatalf("setup: the delete must try to begin: %v", st.callsSnapshot())
+	}
+	if ds := deletesOf(be, "R"); len(ds) != 0 {
+		t.Fatalf("a delete that could not begin must not delete from ES: %v", ds)
+	}
+	for _, p := range []string{"RemoveResource:", "DeleteResourceIfSeq:"} {
+		if n := st.count(p); n != 0 {
+			t.Fatalf("a delete that could not begin must not call %s: %v", p, st.callsSnapshot())
+		}
+	}
+	inOrder(t, st, "BeginDelete:product/R:1:1", "ReleaseOwners:product/R:1")
+	if r, ok := st.row(R); !ok || !r.deleted || !r.stale || r.owner != 0 {
+		t.Fatalf("the tombstone must stay, unowned: %+v (exists %v)", r, ok)
+	}
 }
 
 // A failed owned build releases its ownership and leaves the mark, so the

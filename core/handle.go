@@ -16,6 +16,9 @@ type RebuildPayload struct {
 }
 
 // handleDelete removes the document from Elasticsearch and cleans up relations in PG.
+// buildSeq is the deleting path's Build Sequence: every version's delete
+// carries it as its version, and it bounds the edge removal, so neither
+// undoes what a build at a higher Build Sequence wrote.
 func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq int64) error {
 	logger := slog.With(slog.String("jobType", "delete"), slog.String("type", p.ResourceType), slog.String("id", p.ResourceID))
 
@@ -46,17 +49,32 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq
 
 // deleteOne removes the resource's documents and edges, then hard-deletes the
 // tombstoned row if no newer change arrived. token is the delete's ownership
-// (0 = none): a newer change registered meanwhile, which its ownership kept
-// from submitting, comes back from DeleteResourceIfSeq as the follow-up — a
-// build for a recreate — and is submitted. Failures are logged, not returned:
-// the tombstone stays stale, its ownership is released, and the next change
-// or the sweep retries it.
+// (0 = none). Before deleting anything it bumps the row's Build Sequence with
+// BeginDelete, guarded by staleSeq, the tombstone's mark: the ES deletes and
+// the edge removal carry the bumped sequence, so they never undo a newer
+// build. A delete BeginDelete reports superseded — a newer mark, a recreate
+// or a finished delete got to the row first — deletes nothing and only
+// finishes. Either way a newer change registered meanwhile, which its
+// ownership kept from submitting, comes back from DeleteResourceIfSeq as the
+// follow-up — a build for a recreate — and is submitted. Failures are
+// logged, not returned: the tombstone stays stale, its ownership is
+// released, and the next change or the sweep retries it.
 func (idx *Indexer) deleteOne(ctx context.Context, res model.Resource, staleSeq, token int64) {
 	owned := []Owned{{Resource: res, Token: token}}
 	if token == 0 {
 		owned = nil
 	}
-	if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}, 0); err != nil {
+	begun, err := idx.st.BeginDelete(ctx, res, staleSeq, token)
+	if err != nil {
+		slog.Warn("begin delete failed; tombstone remains for sweep",
+			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+		idx.releaseOwners(ctx, owned)
+		return
+	}
+	if begun.Superseded {
+		slog.Info("delete superseded by a newer change; deleting nothing",
+			slog.String("type", res.Type), slog.String("id", res.Id))
+	} else if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}, begun.BuildIdx); err != nil {
 		slog.Warn("inline delete failed; tombstone remains for sweep",
 			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
 		idx.releaseOwners(ctx, owned)

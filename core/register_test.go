@@ -48,12 +48,19 @@ type recordingStore struct {
 	registerErr   error
 	registrations [][]Registration
 
-	// beginErr fails every BeginBuild, removeErr every RemoveResource,
-	// finishErr every FinishOwned and deleteErr every DeleteResourceIfSeq.
-	beginErr  error
-	removeErr error
-	finishErr error
-	deleteErr error
+	// beginErr fails every BeginBuild, beginDeleteErr every BeginDelete,
+	// removeErr every RemoveResource, finishErr every FinishOwned and
+	// deleteErr every DeleteResourceIfSeq.
+	beginErr       error
+	beginDeleteErr error
+	removeErr      error
+	finishErr      error
+	deleteErr      error
+	// onBeginDelete, when set, runs at the start of every BeginDelete,
+	// outside the lock and before it records the call: a test can register a
+	// change, or hand the row to another owner, between a delete's renewal
+	// and its Build Sequence bump.
+	onBeginDelete func(model.Resource)
 	// onRemove, when set, runs inside every RemoveResource, outside the lock
 	// and before it returns: a test can register a change while a delete is
 	// in flight.
@@ -400,12 +407,31 @@ func (s *recordingStore) GetChildResources(context.Context, model.Resource) ([]m
 func (s *recordingStore) GetParentResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }
-func (s *recordingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
-	return DeleteBegun{}, nil
+
+// BeginDelete follows the contract: the delete is superseded when the row is
+// gone, its stale_seq is no longer staleSeq or it is no longer a tombstone;
+// otherwise it bumps the Build Sequence. Its lease renewal is a no-op here,
+// where leases never expire.
+func (s *recordingStore) BeginDelete(_ context.Context, r model.Resource, staleSeq, token int64) (DeleteBegun, error) {
+	if s.onBeginDelete != nil {
+		s.onBeginDelete(r)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("BeginDelete:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token)
+	if s.beginDeleteErr != nil {
+		return DeleteBegun{}, s.beginDeleteErr
+	}
+	row, ok := s.rows[r]
+	if !ok || row.staleSeq != staleSeq || !row.deleted {
+		return DeleteBegun{Superseded: true}, nil
+	}
+	s.buildIdx++
+	return DeleteBegun{BuildIdx: s.buildIdx}, nil
 }
 
-func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource, _ int64) error {
-	s.record("RemoveResource:%s/%s", r.Type, r.Id)
+func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource, buildSeq int64) error {
+	s.record("RemoveResource:%s/%s:%d", r.Type, r.Id, buildSeq)
 	if s.onRemove != nil {
 		s.onRemove(r)
 	}
