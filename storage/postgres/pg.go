@@ -241,8 +241,9 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // owner statements lock theirs, so none of them deadlock over rows that exist
 // when the statement starts. Rows created or removed concurrently can still
 // deadlock it, and it then returns core.ErrRegistrationAborted (seam S4).
-// The item upsert's WHERE is the stale-version check: a delete or a version-0 item is always
-// accepted, a versioned one only when strictly newer. Parents are found from
+// The item upsert's WHERE is the stale-version check: a delete or a
+// version-0 item is always accepted, a versioned one only when strictly
+// newer. Parents are found from
 // the accepted items only, so a stale item marks nothing; accepted in-batch
 // items are excluded from the Parent mark because one statement may modify a
 // row only once, and their own row already carries the mark. A Parent shared
