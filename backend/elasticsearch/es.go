@@ -97,9 +97,6 @@ func Dial(addrs []string, username, password string) (*Client, error) {
 
 func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, version int64) error {
 	now := time.Now()
-	defer func() {
-		slog.Info("upserted doc", "docID", docID, "index", indexAlias, "duration", time.Since(now))
-	}()
 
 	if version <= 0 {
 		return fmt.Errorf("invalid external version %d for %s/%s", version, indexAlias, docID)
@@ -136,6 +133,7 @@ func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, 
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("es error: %s %s", res.Status(), string(b))
 	}
+	slog.Info("upserted doc", "docID", docID, "index", indexAlias, "duration", time.Since(now))
 	return nil
 }
 
