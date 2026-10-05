@@ -139,7 +139,15 @@ func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, 
 	return nil
 }
 
+// Delete removes docID at the deleting path's Build Sequence, sent as an
+// external_gte version like a write's. A 409 means the index holds the
+// document at a higher version, written by a newer build: it stays, and that
+// is not an error. A missing document (404) is not an error either.
 func (c *Client) Delete(ctx context.Context, indexAlias, docID string, version int64) error {
+	if version <= 0 {
+		return fmt.Errorf("invalid external version %d for %s/%s", version, indexAlias, docID)
+	}
+
 	refresh := "false"
 	if c.withRefresh {
 		refresh = "true"
@@ -150,16 +158,21 @@ func (c *Client) Delete(ctx context.Context, indexAlias, docID string, version i
 		docID,
 		c.es.Delete.WithContext(ctx),
 		c.es.Delete.WithRefresh(refresh),
+		c.es.Delete.WithVersion(int(version)),
+		c.es.Delete.WithVersionType("external_gte"),
 	)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
 
-	if res.StatusCode == 404 {
+	switch {
+	case res.StatusCode == 404:
 		return nil
-	}
-	if res.IsError() {
+	case res.StatusCode == 409:
+		slog.Debug("delete rejected, newer doc kept", "docID", docID, "index", indexAlias, "version", version)
+		return nil
+	case res.IsError():
 		b, _ := io.ReadAll(res.Body)
 		return fmt.Errorf("es error: %s %s", res.Status(), string(b))
 	}

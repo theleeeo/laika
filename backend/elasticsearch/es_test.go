@@ -227,3 +227,110 @@ func TestBulkUpsert_ReturnsPerItemFailures(t *testing.T) {
 		t.Fatalf("failure must carry the ES reason: %+v", f)
 	}
 }
+
+// statusClient builds a Client whose transport answers every request with the
+// given status and body, and records the last request it served.
+func statusClient(t *testing.T, status int, responseBody string) (*Client, **http.Request) {
+	t.Helper()
+	var last *http.Request
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		last = req
+		headers := make(http.Header)
+		headers.Set("X-Elastic-Product", "Elasticsearch")
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Header:     headers,
+		}, nil
+	})
+	esClient, err := esv8.NewClient(esv8.Config{
+		Addresses: []string{"http://example.invalid"},
+		Transport: rt,
+	})
+	if err != nil {
+		t.Fatalf("new es client: %v", err)
+	}
+	return New(esClient, false), &last
+}
+
+func TestDelete_UsesExternalVersion(t *testing.T) {
+	c, last := statusClient(t, http.StatusOK, `{"result":"deleted"}`)
+	if err := c.Delete(context.Background(), "idx", "1", 7); err != nil {
+		t.Fatalf("delete failed: %v", err)
+	}
+	req := *last
+	if req == nil {
+		t.Fatal("no request sent")
+	}
+	if req.Method != http.MethodDelete {
+		t.Fatalf("expected DELETE method, got %s", req.Method)
+	}
+	q := req.URL.Query()
+	if got := q.Get("version"); got != "7" {
+		t.Fatalf("expected version=7, got %q", got)
+	}
+	if got := q.Get("version_type"); got != "external_gte" {
+		t.Fatalf("expected version_type=external_gte, got %q", got)
+	}
+}
+
+func TestDelete_ResponseStatus(t *testing.T) {
+	cases := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{
+			name:   "deleted",
+			status: http.StatusOK,
+			body:   `{"result":"deleted"}`,
+		},
+		{
+			// A newer build holds the document at a higher version: it stays,
+			// as an OCC loss does for a write.
+			name:   "version conflict keeps the newer document",
+			status: http.StatusConflict,
+			body:   `{"error":{"type":"version_conflict_engine_exception","reason":"[1]: version conflict"},"status":409}`,
+		},
+		{
+			name:   "missing document",
+			status: http.StatusNotFound,
+			body:   `{"result":"not_found"}`,
+		},
+		{
+			name:    "other error",
+			status:  http.StatusInternalServerError,
+			body:    `{"error":"boom"}`,
+			wantErr: true,
+		},
+		{
+			name:    "bad request",
+			status:  http.StatusBadRequest,
+			body:    `{"error":"bad"}`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := statusClient(t, tc.status, tc.body)
+			err := c.Delete(context.Background(), "idx", "1", 3)
+			if tc.wantErr && err == nil {
+				t.Fatalf("status %d must return an error", tc.status)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("status %d must not be an error, got: %v", tc.status, err)
+			}
+		})
+	}
+}
+
+func TestDelete_RejectsNonPositiveVersion(t *testing.T) {
+	c, last := statusClient(t, http.StatusOK, `{"result":"deleted"}`)
+	if err := c.Delete(context.Background(), "idx", "1", 0); err == nil {
+		t.Fatal("a delete without a Build Sequence must be rejected, not sent")
+	}
+	if *last != nil {
+		t.Fatal("no request may be sent for an invalid version")
+	}
+}
