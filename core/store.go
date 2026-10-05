@@ -17,7 +17,12 @@ var ErrRegistrationAborted = errors.New("registration aborted")
 type Store interface {
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
 	GetParentResources(ctx context.Context, childResource model.Resource) ([]model.Resource, error)
-	RemoveResource(ctx context.Context, resource model.Resource) error
+	// RemoveResource removes a deleted resource's edges at the deleting
+	// path's Build Sequence buildSeq, in one transaction: each stored edge
+	// set stamped at or below buildSeq goes with its relations; a set stamped
+	// above it was written by a newer build and is left, as ReplaceEdges
+	// leaves a set stamped above the build that offers it.
+	RemoveResource(ctx context.Context, resource model.Resource, buildSeq int64) error
 	// ReplaceEdges stores the edges one build of resource discovered, per
 	// Schema Version, at the build's Build Sequence buildSeq, in one
 	// transaction. Each set replaces its version's stored edge set only when
@@ -65,6 +70,15 @@ type Store interface {
 	// token renews its lease (owner_since = now()); 0 is a build that owns
 	// nothing.
 	BeginBuild(ctx context.Context, resource model.Resource, token int64) (BuildBegun, error)
+	// BeginDelete is BeginBuild for a notified delete of a tombstone, run
+	// before it deletes anything: it bumps the row's Build Sequence, which
+	// the delete's Elasticsearch deletes and edge removal carry, and a
+	// non-zero token that is the row's owner token renews its lease. It
+	// reports the delete superseded when stale_seq is no longer staleSeq (the
+	// delete's mark), the row is no longer a tombstone, or the row is gone;
+	// a superseded delete deletes nothing and finishes as DeleteResourceIfSeq
+	// does when stale_seq moved.
+	BeginDelete(ctx context.Context, resource model.Resource, staleSeq, token int64) (DeleteBegun, error)
 	// RenewOwners renews the lease of every given ownership whose token is
 	// still the row's owner token, leaves the others alone, and returns the
 	// renewed ones: the ownerships still held. One it didn't renew is lost —
@@ -124,6 +138,17 @@ type BuildBegun struct {
 	// Start is a value of the Change Sequence taken before the build's
 	// fetches; the drift check compares against it.
 	Start int64
+}
+
+// DeleteBegun is what BeginDelete returns for one tombstone.
+type DeleteBegun struct {
+	// BuildIdx is the bumped Build Sequence, the version of the delete's
+	// Elasticsearch deletes and the bound of its edge removal; 0 when
+	// Superseded.
+	BuildIdx int64
+	// Superseded reports that the delete must not run: a newer mark, a
+	// recreate or a finished delete got to the row first.
+	Superseded bool
 }
 
 // ChangeCheck is one resource of a drift check, with the start of the build

@@ -139,7 +139,7 @@ func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, 
 	return nil
 }
 
-func (c *Client) Delete(ctx context.Context, indexAlias, docID string) error {
+func (c *Client) Delete(ctx context.Context, indexAlias, docID string, version int64) error {
 	refresh := "false"
 	if c.withRefresh {
 		refresh = "true"

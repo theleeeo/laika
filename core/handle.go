@@ -16,7 +16,7 @@ type RebuildPayload struct {
 }
 
 // handleDelete removes the document from Elasticsearch and cleans up relations in PG.
-func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload) error {
+func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq int64) error {
 	logger := slog.With(slog.String("jobType", "delete"), slog.String("type", p.ResourceType), slog.String("id", p.ResourceID))
 
 	// A type dropped from config has an unknowable version set: its ES
@@ -29,14 +29,14 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload) error {
 	} else {
 		for _, v := range cfg.SortedVersions() {
 			indexName := IndexName(p.ResourceType, v)
-			if err := idx.es.Delete(ctx, indexName, p.ResourceID); err != nil {
+			if err := idx.es.Delete(ctx, indexName, p.ResourceID, buildSeq); err != nil {
 				return fmt.Errorf("delete %s/%s from %s: %w", p.ResourceType, p.ResourceID, indexName, err)
 			}
 		}
 	}
 
 	// Remove relation edges from PG so stale roots are no longer affected.
-	if err := idx.st.RemoveResource(ctx, model.Resource{Type: p.ResourceType, Id: p.ResourceID}); err != nil {
+	if err := idx.st.RemoveResource(ctx, model.Resource{Type: p.ResourceType, Id: p.ResourceID}, buildSeq); err != nil {
 		return fmt.Errorf("clean up relations for %s/%s: %w", p.ResourceType, p.ResourceID, err)
 	}
 
@@ -56,7 +56,7 @@ func (idx *Indexer) deleteOne(ctx context.Context, res model.Resource, staleSeq,
 	if token == 0 {
 		owned = nil
 	}
-	if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}); err != nil {
+	if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}, 0); err != nil {
 		slog.Warn("inline delete failed; tombstone remains for sweep",
 			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
 		idx.releaseOwners(ctx, owned)

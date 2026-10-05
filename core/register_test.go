@@ -400,7 +400,11 @@ func (s *recordingStore) GetChildResources(context.Context, model.Resource) ([]m
 func (s *recordingStore) GetParentResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }
-func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource) error {
+func (s *recordingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
+	return DeleteBegun{}, nil
+}
+
+func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource, _ int64) error {
 	s.record("RemoveResource:%s/%s", r.Type, r.Id)
 	if s.onRemove != nil {
 		s.onRemove(r)

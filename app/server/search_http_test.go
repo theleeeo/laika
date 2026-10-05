@@ -30,7 +30,7 @@ func (b *fakeBackend) Upsert(context.Context, string, string, any, int64) error 
 func (b *fakeBackend) BulkUpsert(context.Context, []core.BulkItem) ([]core.BulkFailure, error) {
 	return nil, nil
 }
-func (b *fakeBackend) Delete(context.Context, string, string) error { return nil }
+func (b *fakeBackend) Delete(context.Context, string, string, int64) error { return nil }
 func (b *fakeBackend) FederatedSearch(_ context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
 	b.fedParams = p
 	return b.fedResponse, nil

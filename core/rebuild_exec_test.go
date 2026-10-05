@@ -113,7 +113,7 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 	return append(failures, b.extraFailures...), nil
 }
 
-func (b *captureBackend) Delete(_ context.Context, index, docID string) error {
+func (b *captureBackend) Delete(_ context.Context, index, docID string, _ int64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.deletes = append(b.deletes, index+"/"+docID)
@@ -345,7 +345,11 @@ func (s *rebuildRecordingStore) GetParentResources(context.Context, model.Resour
 	return nil, nil
 }
 
-func (s *rebuildRecordingStore) RemoveResource(_ context.Context, r model.Resource) error {
+func (s *rebuildRecordingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
+	return DeleteBegun{}, nil
+}
+
+func (s *rebuildRecordingStore) RemoveResource(_ context.Context, r model.Resource, _ int64) error {
 	s.record("RemoveResource:%s/%s", r.Type, r.Id)
 	return nil
 }

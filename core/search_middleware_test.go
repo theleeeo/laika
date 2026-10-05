@@ -28,7 +28,9 @@ func (b *recordingBackend) Upsert(ctx context.Context, index, docID string, doc 
 func (b *recordingBackend) BulkUpsert(ctx context.Context, items []BulkItem) ([]BulkFailure, error) {
 	return nil, nil
 }
-func (b *recordingBackend) Delete(ctx context.Context, index, docID string) error { return nil }
+func (b *recordingBackend) Delete(ctx context.Context, index, docID string, version int64) error {
+	return nil
+}
 func (b *recordingBackend) Search(ctx context.Context, req SearchRequest, indexAlias string, vc *resource.VersionConfig) (SearchResponse, error) {
 	b.called = true
 	b.gotReq = req

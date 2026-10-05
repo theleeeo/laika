@@ -49,7 +49,7 @@ func (g *gatingBackend) releaseDelete() {
 }
 
 // Delete implements [core.SearchBackend].
-func (g *gatingBackend) Delete(ctx context.Context, index, docID string) error {
+func (g *gatingBackend) Delete(ctx context.Context, index, docID string, version int64) error {
 	g.mu.Lock()
 	var reached, release chan struct{}
 	if g.docID != "" && g.docID == docID {
@@ -66,7 +66,7 @@ func (g *gatingBackend) Delete(ctx context.Context, index, docID string) error {
 			return ctx.Err()
 		}
 	}
-	return g.SearchBackend.Delete(ctx, index, docID)
+	return g.SearchBackend.Delete(ctx, index, docID, version)
 }
 
 // ownerColumns reads the resource's owner_seq and owner_since; nil means no

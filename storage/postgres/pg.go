@@ -83,7 +83,7 @@ func (s *Store) GetChildResources(ctx context.Context, parentResource model.Reso
 // the row that replace committed, where REPEATABLE READ would fail it with a
 // serialization error. (The removal itself is unguarded; ordering it against
 // a build is L2.1's.)
-func (s *Store) RemoveResource(ctx context.Context, resource model.Resource) error {
+func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, buildSeq int64) error {
 	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT schema_version FROM edge_sets WHERE type=$1 AND id=$2
@@ -506,6 +506,11 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token i
 		return core.BuildBegun{}, err
 	}
 	return b, nil
+}
+
+// BeginDelete: see core.Store. Contract stub, implemented by L2.1 lane A.
+func (s *Store) BeginDelete(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.DeleteBegun, error) {
+	return core.DeleteBegun{}, errors.New("BeginDelete: not implemented")
 }
 
 // ownedArrays splits ownerships into the parallel arrays the owner

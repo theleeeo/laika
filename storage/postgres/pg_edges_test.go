@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"math"
 	"reflect"
 	"sort"
 	"testing"
@@ -199,7 +200,7 @@ func TestRemoveResource_RemovesEveryVersionsEdgesAndSets(t *testing.T) {
 	replace(t, st, p, 5, nil, edgeSet(1, c("a")), edgeSet(2, c("a"), c("b")), edgeSet(3))
 	replace(t, st, q, 5, nil, edgeSet(1, c("a")))
 
-	if err := st.RemoveResource(ctx, p); err != nil {
+	if err := st.RemoveResource(ctx, p, math.MaxInt64); err != nil {
 		t.Fatal(err)
 	}
 	requireSets(t, p, map[int]stored{})
@@ -387,7 +388,7 @@ func TestRemoveResource_DoesNotDeadlockWithAReplace(t *testing.T) {
 	rep := func() error {
 		return st.ReplaceEdges(ctx, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
 	}
-	rm := func() error { return st.RemoveResource(ctx, p) }
+	rm := func() error { return st.RemoveResource(ctx, p, math.MaxInt64) }
 	queueBehind(t, lockEdgeSet(t, p, 1), rep, rm)
 
 	requireSets(t, p, map[int]stored{})
@@ -408,7 +409,7 @@ func TestRemoveResource_DoesNotDeadlockWithAReplaceHoldingTheLowerVersion(t *tes
 	rep := func() error {
 		return st.ReplaceEdges(ctx, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
 	}
-	rm := func() error { return st.RemoveResource(ctx, p) }
+	rm := func() error { return st.RemoveResource(ctx, p, math.MaxInt64) }
 	queueBehind(t, lockEdgeSet(t, p, 2), rep, rm)
 
 	requireSets(t, p, map[int]stored{})
@@ -449,7 +450,7 @@ func TestReplaceEdgesAndRemoveResource_WaitUnderARepeatableReadDefault(t *testin
 	t.Run("remove behind a replace", func(t *testing.T) {
 		p := model.Resource{Type: "re15", Id: "remove"}
 		replace(t, st, p, 1, nil, edgeSet(1, c("old")))
-		queueBehind(t, lockEdgeSet(t, p, 1), repAt(p, 10, "lo"), func() error { return st.RemoveResource(ctx, p) })
+		queueBehind(t, lockEdgeSet(t, p, 1), repAt(p, 10, "lo"), func() error { return st.RemoveResource(ctx, p, math.MaxInt64) })
 		requireSets(t, p, map[int]stored{})
 	})
 }

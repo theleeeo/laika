@@ -45,7 +45,10 @@ type cancellingStore struct {
 	beginCalls int
 }
 
-func (s *cancellingStore) RemoveResource(context.Context, model.Resource) error { return nil }
+func (s *cancellingStore) RemoveResource(context.Context, model.Resource, int64) error { return nil }
+func (s *cancellingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
+	return DeleteBegun{}, nil
+}
 
 func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
 	return nil

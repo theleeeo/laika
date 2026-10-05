@@ -26,7 +26,13 @@ type SearchBackend interface {
 	// reported: they are OCC losses to a concurrent build (see
 	// ErrVersionConflict) and count as success.
 	BulkUpsert(ctx context.Context, items []BulkItem) ([]BulkFailure, error)
-	Delete(ctx context.Context, index, docID string) error
+	// Delete removes the document at the deleting path's Build Sequence
+	// version, sent as the external_gte version like a write's: the index
+	// rejects it when it holds the document at a higher version, written by
+	// a newer build, and that rejection is not an error — the newer document
+	// stays, as an OCC loss does for a write (ErrVersionConflict). A missing
+	// document is not an error either.
+	Delete(ctx context.Context, index, docID string, version int64) error
 	Search(ctx context.Context, req SearchRequest, indexAlias string, vc *resource.VersionConfig) (SearchResponse, error)
 	FederatedSearch(ctx context.Context, params FederatedSearchParams) (FederatedSearchResult, error)
 }

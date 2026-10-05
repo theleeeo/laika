@@ -164,7 +164,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return idx.handleDelete(ctx, RebuildPayload{
 			ResourceType: resourceType,
 			ResourceID:   resourceID,
-		})
+		}, 0)
 	}
 	// Plans disagree on existence: a transient source inconsistency or a
 	// broken plan. Fail the build without writing — the stale mark survives
@@ -327,7 +327,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			if err := idx.handleDelete(ctx, RebuildPayload{
 				ResourceType: params.ResourceType,
 				ResourceID:   id,
-			}); err != nil {
+			}, 0); err != nil {
 				logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 				fl.fail(ctx, id)
 			}
@@ -485,7 +485,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					if err := idx.handleDelete(ctx, RebuildPayload{
 						ResourceType: params.ResourceType,
 						ResourceID:   id,
-					}); err != nil {
+					}, 0); err != nil {
 						logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 						fl.fail(ctx, id)
 					}
