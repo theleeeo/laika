@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/model"
 )
 
 // sourceList extracts a []any from a hit's Source map.
@@ -681,16 +682,14 @@ func (t *TestSuite) resourceVersion(resourceType, resourceID string) int64 {
 	return version
 }
 
+// resourceRebuildCounter returns how many builds of the resource have begun
+// in this test: the successful BeginBuild calls the suite's Store counted,
+// across every Indexer the suite built. It does not read resources.build_idx:
+// that column is the Build Sequence, the ES external_gte version, whose values
+// need only grow — they are not a count of the row's builds. Unlike build_idx,
+// the count does not restart when the row is deleted and recreated.
 func (t *TestSuite) resourceRebuildCounter(resourceType, resourceID string) int64 {
-	var counter int64
-	err := t.pool.QueryRow(t.T().Context(),
-		`SELECT build_idx FROM resources WHERE type=$1 AND id=$2`,
-		resourceType, resourceID,
-	).Scan(&counter)
-	if err != nil {
-		return 0
-	}
-	return counter
+	return t.store.beganBuilds(model.Resource{Type: resourceType, Id: resourceID})
 }
 
 func (t *TestSuite) Test_VersionControl() {

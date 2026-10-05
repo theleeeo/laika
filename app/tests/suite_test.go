@@ -351,6 +351,9 @@ type TestSuite struct {
 
 	fakeProvider *FakeProvider
 	st           *postgres.Store
+	// store wraps st and is the Store every Indexer the suite builds runs on;
+	// it counts begun builds (see resourceRebuildCounter).
+	store *suiteStore
 }
 
 // primaryTier marks a fixture field as feeding the primary `search_primary`
@@ -555,6 +558,7 @@ func (t *TestSuite) SetupSuite() {
 	}
 
 	t.st = postgres.NewStore(dbpool)
+	t.store = newSuiteStore(t.st)
 	t.fakeProvider = NewFakeProvider()
 
 	plans := dsl.BuildPlansFromConfig(t.fakeProvider, DefaultResourceConfig)
@@ -563,7 +567,7 @@ func (t *TestSuite) SetupSuite() {
 		Plans:     plans,
 		Resources: DefaultResourceConfig,
 		ES:        elasticsearch.New(esClient, true),
-		Store:     t.st,
+		Store:     t.store,
 		PoolSize:  10,
 		// Large enough that the suite never sheds a build to the sweep.
 		QueueSize: 1000,
@@ -636,9 +640,11 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 // own (a smaller RebuildChunkSize, say). It shares the suite's Postgres and
 // Elasticsearch state, and builds its plans from the given resource config the
 // same way SetupSuite does. Only the tuning knobs the caller sets are honoured,
-// plus cfg.ES: a caller may pass its own search backend (a wrapper over the
-// suite's, say), and a nil one gets the suite's. The rest of the wiring is the
-// suite's. The Temporal client is omitted — an indexer built here must not
+// plus cfg.ES and cfg.Store: a caller may pass its own search backend or Store
+// (a wrapper over the suite's, say), and a nil one gets the suite's — for the
+// Store, the counting t.store, so its builds count towards
+// resourceRebuildCounter like the suite indexer's. The rest of the wiring is
+// the suite's. The Temporal client is omitted — an indexer built here must not
 // reach the durable slow lane.
 func (t *TestSuite) newIndexer(resources resource.Configs, cfg core.Config) *core.Indexer {
 	cfg.Plans = dsl.BuildPlansFromConfig(t.fakeProvider, resources)
@@ -646,7 +652,9 @@ func (t *TestSuite) newIndexer(resources resource.Configs, cfg core.Config) *cor
 	if cfg.ES == nil {
 		cfg.ES = elasticsearch.New(t.esClient, true)
 	}
-	cfg.Store = t.st
+	if cfg.Store == nil {
+		cfg.Store = t.store
+	}
 	if cfg.PoolSize == 0 {
 		cfg.PoolSize = 10
 	}
@@ -666,6 +674,7 @@ func (t *TestSuite) newIndexer(resources resource.Configs, cfg core.Config) *cor
 }
 
 func (t *TestSuite) BeforeTest(suiteName, testName string) {
+	t.store.reset()
 }
 
 func (t *TestSuite) AfterTest(suiteName, testName string) {
