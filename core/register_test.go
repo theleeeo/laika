@@ -74,9 +74,9 @@ type recordingStore struct {
 	onRenew  func([]Owned)
 	renewErr error
 	// replaced records every ReplaceEdges call, in order; replaceErr fails
-	// every ReplaceEdges. onReplace, when set, runs inside every
-	// ReplaceEdges, outside the lock: a test can see what else had happened
-	// by the time a build stored its edges.
+	// every ReplaceEdges, which then stores no metadata. onReplace, when set,
+	// runs inside every ReplaceEdges, outside the lock: a test can see what
+	// else had happened by the time a build stored its edges.
 	replaced   []edgeReplace
 	replaceErr error
 	onReplace  func(edgeReplace)
@@ -95,6 +95,8 @@ type edgeReplace struct {
 	buildSeq int64
 	sets     []EdgeSet
 	declared []int
+	// reported is the metadata the build passed as its plans' report.
+	reported map[string]string
 }
 
 // memRow is one resource row of recordingStore.
@@ -391,12 +393,15 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 	}
 	return err
 }
-func (s *recordingStore) ReplaceEdges(ctx context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, _ map[string]string) (map[string]string, error) {
-	return nil, s.replaceEdges(ctx, r, buildSeq, sets, declared)
-}
 
-func (s *recordingStore) replaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
-	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: sets, declared: declared}
+// ReplaceEdges records the call, runs onReplace, and then fails with
+// replaceErr, writing nothing. Otherwise it follows the contract's metadata
+// rule on the in-memory row: a non-empty reported is stored only on a row
+// that exists and has no metadata, and it returns the row's metadata (nil
+// when the row has none or is gone). It never creates a row; edges are not
+// modelled.
+func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
+	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: sets, declared: declared, reported: maps.Clone(reported)}
 	s.mu.Lock()
 	s.recordLocked("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq)
 	s.replaced = append(s.replaced, call)
@@ -404,7 +409,22 @@ func (s *recordingStore) replaceEdges(_ context.Context, r model.Resource, build
 	if s.onReplace != nil {
 		s.onReplace(call)
 	}
-	return s.replaceErr
+	if s.replaceErr != nil {
+		return nil, s.replaceErr
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.rows[r]
+	if !ok {
+		return nil, nil
+	}
+	if len(row.metadata) == 0 && len(reported) > 0 {
+		row.metadata = maps.Clone(reported)
+	}
+	if len(row.metadata) == 0 {
+		return nil, nil
+	}
+	return maps.Clone(row.metadata), nil
 }
 
 func (s *recordingStore) replacedSnapshot() []edgeReplace {

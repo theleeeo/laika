@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"maps"
 	"slices"
 	"testing"
 
@@ -135,5 +136,128 @@ func TestBuild_FailedEdgeReplace_FailsTheBuild(t *testing.T) {
 	}
 	if r, _ := st.row(product("1")); !r.stale {
 		t.Fatalf("a failed build's mark must stay: %+v", r)
+	}
+}
+
+// The live build passes the first non-empty report among its plans' documents
+// (BuildDoc.ResourceMetadata), in plan order, to ReplaceEdges, which stores it
+// on a row without metadata; an empty report is no report.
+func TestBuild_SeveralPlans_TheFirstNonEmptyReportInPlanOrderIsStored(t *testing.T) {
+	cases := map[string]struct {
+		v1, v2, want map[string]string
+	}{
+		"both report: the first plan's": {
+			v1: map[string]string{"a": "1"}, v2: map[string]string{"a": "2"}, want: map[string]string{"a": "1"},
+		},
+		"the first reports empty: the second's": {
+			v1: map[string]string{}, v2: map[string]string{"a": "2"}, want: map[string]string{"a": "2"},
+		},
+		"the first reports none: the second's": {
+			v2: map[string]string{"a": "2"}, want: map[string]string{"a": "2"},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := &recordingStore{}
+			idx := mustNew(Config{
+				Resources: twoVersionResources(),
+				Plans: map[string][]projection.Plan{"product": {
+					{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{reporting(productDoc("1"), tc.v1)}}},
+					{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{reporting(productDoc("1"), tc.v2)}}},
+				}},
+				ES:    &captureBackend{},
+				Store: st,
+			})
+
+			buildProduct1(t, st, idx)
+
+			calls := st.replacedSnapshot()
+			if len(calls) != 1 {
+				t.Fatalf("one ReplaceEdges per build, got %d: %v", len(calls), st.callsSnapshot())
+			}
+			if !maps.Equal(calls[0].reported, tc.want) {
+				t.Fatalf("ReplaceEdges must pass the first non-empty report %v, passed %v", tc.want, calls[0].reported)
+			}
+			if r, _ := st.row(product("1")); !maps.Equal(r.metadata, tc.want) {
+				t.Fatalf("the row must store the report %v, holds %v", tc.want, r.metadata)
+			}
+		})
+	}
+}
+
+// An owned inline build of a row without metadata stores its plan's report,
+// and its drift re-mark carries that report instead of clobbering it with
+// the build's (empty) metadata: FinishOwned's follow-up hands it on, and the
+// follow-up build fetches as it.
+func TestBuild_OwnedBuild_StoresTheReport_AndTheDriftRemarkCarriesIt(t *testing.T) {
+	report := map[string]string{"actor": "a"}
+	st := &recordingStore{}
+	st.drift.Store(true) // the first build's drift check hits
+	exec := &requestLog{exec: &staticExecuter{byID: map[string][]projection.BuildDoc{
+		"1": {reporting(productDocWith("1", "child"), report)},
+	}}}
+	idx := mustNew(Config{
+		Resources: testResources(),
+		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}},
+		ES:        &fakeBackend{},
+		Store:     st,
+		PoolSize:  2,
+		QueueSize: 4,
+	})
+
+	// No Metadata: the registration leaves the row without any.
+	if err := idx.RegisterChange(t.Context(), Notification{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if r, _ := st.row(product("1")); !maps.Equal(r.metadata, report) {
+		t.Fatalf("the row must end with the plan's report %v, holds %v: %v", report, r.metadata, st.callsSnapshot())
+	}
+	fus := st.followUpsOf(product("1"))
+	if len(fus) != 1 || !maps.Equal(fus[0].Metadata, report) {
+		t.Fatalf("the drift re-mark must carry the report into FinishOwned's follow-up, follow-ups %+v: %v", fus, st.callsSnapshot())
+	}
+	builds := exec.requestsFor("1")
+	if len(builds) != 2 {
+		t.Fatalf("the build and its follow-up, got %d builds: %v", len(builds), st.callsSnapshot())
+	}
+	if !maps.Equal(builds[1].Metadata, report) {
+		t.Fatalf("the follow-up build must fetch as the report %v, fetched as %v", report, builds[1].Metadata)
+	}
+}
+
+// A drift re-mark of a row left without metadata — none registered, none
+// reported — falls back to the build's metadata, as before the plan's report
+// existed: the re-mark stores it, and the re-build it claims fetches as it.
+func TestBuild_DriftRemark_RowWithoutMetadata_CarriesTheBuildsMetadata(t *testing.T) {
+	buildMD := map[string]string{"b": "1"}
+	st := &recordingStore{}
+	st.drift.Store(true) // the first build's drift check hits
+	exec := &requestLog{exec: &staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "child")}}}
+	idx := mustNew(Config{
+		Resources: testResources(),
+		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}},
+		ES:        &fakeBackend{},
+		Store:     st,
+		PoolSize:  2,
+		QueueSize: 4,
+	})
+
+	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}, Metadata: buildMD}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	if r, _ := st.row(product("1")); !maps.Equal(r.metadata, buildMD) {
+		t.Fatalf("the re-mark must carry the build's metadata %v, the row holds %v: %v", buildMD, r.metadata, st.callsSnapshot())
+	}
+	builds := exec.requestsFor("1")
+	if len(builds) != 2 || !maps.Equal(builds[1].Metadata, buildMD) {
+		t.Fatalf("the claimed re-build must fetch as %v, builds %+v: %v", buildMD, builds, st.callsSnapshot())
 	}
 }

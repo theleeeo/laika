@@ -161,6 +161,18 @@ func executeAllPlans(ctx context.Context, plans []projection.Plan, req projectio
 	return docs, missing, nil
 }
 
+// firstReport is the resource's own metadata as its plans report it: the
+// first non-empty BuildDoc.ResourceMetadata of docs, in plan order; nil when
+// none reports any.
+func firstReport(docs []versionedDoc) map[string]string {
+	for _, vd := range docs {
+		if len(vd.doc.ResourceMetadata) > 0 {
+			return vd.doc.ResourceMetadata
+		}
+	}
+	return nil
+}
+
 // buildOne builds one resource at the Build Sequence occVersion. gone reports
 // that every plan returned nil and the resource's documents and edge sets
 // were deleted instead; the caller removes its row.
@@ -241,7 +253,13 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	for i, p := range plans {
 		declared[i] = p.Version
 	}
-	if _, err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, nil); err != nil {
+	// The same write stores the plans' report — the first non-empty one, in
+	// plan order — as the row's metadata if the row has none, before the
+	// drift check and the cascade: any later build of the resource without a
+	// notification fetches as it. own is the row's metadata as the write
+	// left it.
+	own, err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs))
+	if err != nil {
 		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
@@ -263,7 +281,9 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// another build owns it. The root is not checked: its BeginBuild precedes
 	// its own fetch, so a root change numbered below start is seen by the
 	// fetch, and one above it bumped stale_seq, so the guarded finish leaves
-	// the mark for the follow-up build.
+	// the mark for the follow-up build. The re-mark carries the root's own
+	// metadata (own), so it doesn't clobber the report just stored; a row
+	// without any is re-marked with the build's metadata.
 	if len(allRelations) > 0 {
 		checks := make([]ChangeCheck, len(allRelations))
 		for i, r := range allRelations {
@@ -278,7 +298,11 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType),
 				slog.String("id", resourceID),
 			)
-			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
+			remark := own
+			if len(remark) == 0 {
+				remark = metadata
+			}
+			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, remark); err != nil {
 				return false, fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
 		}
@@ -375,7 +399,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 				ID:      id,
 				Doc:     vd.doc.Doc,
 				Version: begun.BuildIdx,
-			}, vd.version, vd.doc.Relations); err != nil {
+			}, vd.version, vd.doc.Relations, vd.doc.ResourceMetadata); err != nil {
 				fl.salvage(ctx)
 				return err
 			}
@@ -574,7 +598,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					ID:      id,
 					Doc:     doc.Doc,
 					Version: occVersion,
-				}, plan.Version, doc.Relations); err != nil {
+				}, plan.Version, doc.Relations, doc.ResourceMetadata); err != nil {
 					fl.salvage(ctx)
 					return err
 				}

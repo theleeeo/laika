@@ -70,6 +70,10 @@ type pendingResource struct {
 	// set stored, stale mark cleared — when it hits 0.
 	remaining int
 	failed    bool
+	// metadata is the resource row's metadata as its last ReplaceEdges
+	// returned it; its drift re-mark carries it when non-empty, else the
+	// rebuild's metadata.
+	metadata map[string]string
 }
 
 // driftBase is where a begun resource's drift check measures from. It is per
@@ -90,13 +94,15 @@ type driftBase struct {
 	checkRoot bool
 }
 
-// pendingItem is one document awaiting a bulk flush: its Schema Version and
-// the relations its plan discovered, stored as that version's edge set only
-// after the document landed.
+// pendingItem is one document awaiting a bulk flush: its Schema Version, the
+// relations its plan discovered, stored as that version's edge set only after
+// the document landed, and its plan's report of the resource's own metadata
+// (BuildDoc.ResourceMetadata), stored with the edge sets.
 type pendingItem struct {
 	BulkItem
 	version   int
 	relations []model.Resource
+	reported  map[string]string
 }
 
 // rebuildFlusher streams a rebuild's documents to the backend in bounded bulk
@@ -160,14 +166,14 @@ func (f *rebuildFlusher) occ(id string) (occVersion, staleSeq int64, ok bool) {
 	return p.occVersion, p.staleSeq, true
 }
 
-// add queues one plan document of Schema Version version. Flushes when the
-// chunk bound is reached.
-func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.Resource) error {
+// add queues one plan document of Schema Version version, with its plan's
+// report reported. Flushes when the chunk bound is reached.
+func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.Resource, reported map[string]string) error {
 	p := f.state[item.ID]
 	if p == nil || p.failed {
 		return nil
 	}
-	f.pending = append(f.pending, pendingItem{BulkItem: item, version: version, relations: relations})
+	f.pending = append(f.pending, pendingItem{BulkItem: item, version: version, relations: relations, reported: reported})
 	if len(f.pending) >= f.chunkSize {
 		return f.flush(ctx)
 	}
@@ -305,7 +311,10 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	// resource's Build Sequence — an empty set too, which replaces the stored
 	// one with no edges — also for a resource with a rejected sibling
 	// document: what landed is what Elasticsearch now holds (ruling R2).
-	// Versions without a landed document keep their stored sets.
+	// Versions without a landed document keep their stored sets. The same
+	// write stores the resource's report — the first non-empty one among its
+	// landed documents, in chunk order — as its row's metadata if the row has
+	// none; across flushes, the first stored stays.
 	for _, id := range order {
 		docs := landed[id]
 		if len(docs) == 0 {
@@ -313,7 +322,11 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 		}
 		sets := make([]EdgeSet, 0, len(docs))
 		at := make(map[int]int, len(docs))
+		var reported map[string]string
 		for _, it := range docs {
+			if reported == nil && len(it.reported) > 0 {
+				reported = it.reported
+			}
 			set := EdgeSet{SchemaVersion: it.version, Children: it.relations}
 			// A version listed twice in one chunk: its later document is the
 			// one the bulk write left in place.
@@ -324,12 +337,15 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			at[it.version] = len(sets)
 			sets = append(sets, set)
 		}
-		if _, err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil, nil); err != nil {
+		own, err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil, reported)
+		if err != nil {
 			// The replace may have failed because the walk's context ended;
 			// fail marks on a detached context all the same.
 			slog.Warn("failed to replace edges; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
 			f.fail(ctx, id)
+			continue
 		}
+		f.state[id].metadata = own
 	}
 
 	// Resources with a rejected document are failed after their landed
@@ -399,11 +415,13 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 //
 // One batched query serves the common no-drift case; a hit narrows with one
 // query per root, and each changed root is re-marked and re-built via the
-// mark-first primitive. A root whose re-mark fails is failed instead: clearing
-// it would leave its possibly outdated document with no mark for the sweep.
-// fail retries its mark on a context detached from cancellation — the re-mark
-// may have failed because the walk's context ended — and the rebuild reports
-// the failure.
+// mark-first primitive, carrying the root's metadata as its ReplaceEdges
+// returned it, or the rebuild's when the row has none or the root had no
+// ReplaceEdges (the walk's nil-doc delete path). A root whose re-mark fails
+// is failed instead: clearing it would leave its possibly outdated document
+// with no mark for the sweep. fail retries its mark on a context detached
+// from cancellation — the re-mark may have failed because the walk's context
+// ended — and the rebuild reports the failure.
 func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][]ChangeCheck) {
 	if len(driftCheck) == 0 {
 		return
@@ -425,7 +443,11 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		// On a drift-check error, re-mark rather than risk a silent
 		// convergence gap: a redundant rebuild is safe, a missed one is not.
 		if perErr != nil || perResource {
-			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, f.metadata); err != nil {
+			metadata := f.metadata
+			if p := f.state[id]; p != nil && len(p.metadata) > 0 {
+				metadata = p.metadata
+			}
+			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, metadata); err != nil {
 				slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
 				f.fail(ctx, id)
 			}

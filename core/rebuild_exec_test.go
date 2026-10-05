@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"sync"
@@ -158,7 +159,14 @@ func (b *captureBackend) deletesAt() []string {
 	return out
 }
 
-// rebuildRecordingStore records per-resource lifecycle calls.
+// rebuildRecordingStore records per-resource lifecycle calls, and keeps a
+// minimal row per resource for the metadata rule: whether the row exists and
+// its metadata. BeginBuild creates a row without metadata, a successful
+// MarkStale creates one and sets its metadata to the mark's (last mark wins),
+// ReplaceEdges stores a plan's report on a row that exists and has none, and
+// a successful DeleteResourceIfSeq removes the row — its stale_seq guard is
+// not modelled (every BeginBuild hands out StaleSeq 42), so it always
+// removes. seedRow creates a row before the walk.
 type rebuildRecordingStore struct {
 	mu       sync.Mutex
 	calls    []string
@@ -203,6 +211,68 @@ type rebuildRecordingStore struct {
 	// deleteErrs fails the DeleteResourceIfSeq of each resource whose id it
 	// names; the call is still recorded.
 	deleteErrs map[string]error
+
+	// rows holds each resource's row (see the type's comment); marks records
+	// every successful MarkStale's metadata per resource, in order.
+	rows  map[model.Resource]*rebuildRow
+	marks []markRecord
+}
+
+// rebuildRow is one resource row of rebuildRecordingStore: it exists, with
+// this metadata.
+type rebuildRow struct {
+	metadata map[string]string
+}
+
+// markRecord is one resource of a successful rebuildRecordingStore.MarkStale
+// and the metadata the mark stored.
+type markRecord struct {
+	resource model.Resource
+	metadata map[string]string
+}
+
+// rowLocked returns r's row, creating it without metadata if absent.
+func (s *rebuildRecordingStore) rowLocked(r model.Resource) *rebuildRow {
+	if s.rows == nil {
+		s.rows = make(map[model.Resource]*rebuildRow)
+	}
+	row, ok := s.rows[r]
+	if !ok {
+		row = &rebuildRow{}
+		s.rows[r] = row
+	}
+	return row
+}
+
+// seedRow creates r's row with metadata md, as a registration would.
+func (s *rebuildRecordingStore) seedRow(r model.Resource, md map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rowLocked(r).metadata = maps.Clone(md)
+}
+
+// rowMetadata returns a copy of r's row metadata and whether the row exists.
+func (s *rebuildRecordingStore) rowMetadata(r model.Resource) (map[string]string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.rows[r]
+	if !ok {
+		return nil, false
+	}
+	return maps.Clone(row.metadata), true
+}
+
+// marksOf is the metadata of every successful mark of r, in order.
+func (s *rebuildRecordingStore) marksOf(r model.Resource) []map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []map[string]string
+	for _, m := range s.marks {
+		if m.resource == r {
+			out = append(out, maps.Clone(m.metadata))
+		}
+	}
+	return out
 }
 
 func (s *rebuildRecordingStore) replacedSnapshot() []edgeReplace {
@@ -251,7 +321,7 @@ func (s *rebuildRecordingStore) has(prefix string) bool {
 	return false
 }
 
-func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, _ map[string]string, lease time.Duration) ([]Owned, error) {
+func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resource, md map[string]string, lease time.Duration) ([]Owned, error) {
 	var err error
 	if s.ctxAware && ctx.Err() != nil {
 		err = ctx.Err()
@@ -271,11 +341,18 @@ func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resour
 			s.record("MarkStale:%s/%s", r.Type, r.Id)
 		}
 	}
-	if err != nil || lease <= 0 {
+	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	for _, r := range rs {
+		s.rowLocked(r).metadata = maps.Clone(md)
+		s.marks = append(s.marks, markRecord{resource: r, metadata: maps.Clone(md)})
+	}
+	if lease <= 0 {
+		return nil, nil
+	}
 	owned := make([]Owned, len(rs))
 	for i, r := range rs {
 		s.tokens++
@@ -291,6 +368,7 @@ func (s *rebuildRecordingStore) BeginBuild(_ context.Context, r model.Resource, 
 	if err := s.beginErrs[r.Id]; err != nil {
 		return BuildBegun{}, err
 	}
+	s.rowLocked(r)
 	s.buildIdx++
 	// Start = 100 + BuildIdx: distinct per build, so a test can tell whose
 	// start a check carries.
@@ -338,7 +416,11 @@ func (s *rebuildRecordingStore) DeleteResourceIfSeq(_ context.Context, r model.R
 	s.record("DeleteResourceIfSeq:%s/%s:%d", r.Type, r.Id, seq)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return FollowUp{}, s.deleteErrs[r.Id]
+	if err := s.deleteErrs[r.Id]; err != nil {
+		return FollowUp{}, err
+	}
+	delete(s.rows, r)
+	return FollowUp{}, nil
 }
 
 func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
@@ -354,16 +436,30 @@ func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource,
 	return FollowUp{}, nil
 }
 
-func (s *rebuildRecordingStore) ReplaceEdges(ctx context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, _ map[string]string) (map[string]string, error) {
-	return nil, s.replaceEdges(ctx, r, buildSeq, sets, declared)
-}
-
-func (s *rebuildRecordingStore) replaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
+// ReplaceEdges records the call and fails it, writing nothing, for an id in
+// replaceErrs. Otherwise it follows the contract's metadata rule on the row:
+// a non-empty reported is stored only on a row that exists and has no
+// metadata, and it returns the row's metadata (nil when the row has none or
+// is gone). It never creates a row.
+func (s *rebuildRecordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, fmt.Sprintf("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq))
-	s.replaced = append(s.replaced, edgeReplace{resource: r, buildSeq: buildSeq, sets: slices.Clone(sets), declared: slices.Clone(declared)})
-	return s.replaceErrs[r.Id]
+	s.replaced = append(s.replaced, edgeReplace{resource: r, buildSeq: buildSeq, sets: slices.Clone(sets), declared: slices.Clone(declared), reported: maps.Clone(reported)})
+	if err := s.replaceErrs[r.Id]; err != nil {
+		return nil, err
+	}
+	row, ok := s.rows[r]
+	if !ok {
+		return nil, nil
+	}
+	if len(row.metadata) == 0 && len(reported) > 0 {
+		row.metadata = maps.Clone(reported)
+	}
+	if len(row.metadata) == 0 {
+		return nil, nil
+	}
+	return maps.Clone(row.metadata), nil
 }
 
 func (s *rebuildRecordingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
