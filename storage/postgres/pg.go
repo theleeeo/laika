@@ -124,7 +124,8 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 }
 
 // ReplaceEdges stores a build's edge sets per Schema Version, guarded by the
-// Build Sequence (see core.Store), in one transaction of two phases.
+// Build Sequence (see core.Store), and the metadata its plans report, in one
+// transaction of two phases and a last metadata write.
 //
 // Phase one takes the edge_sets row of every version the call touches, one
 // statement per version, in ascending version order: a version in sets
@@ -141,12 +142,22 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 // REPEATABLE READ that waiting guard would fail with a serialization error
 // instead of re-checking.
 //
+// The metadata write comes last, whatever the guard decided for the sets:
+// when reported is non-empty, an UPDATE of the resource's resources row
+// guarded by metadata IS NULL OR metadata = '{}' stores it — never an
+// insert, so a row hard-deleted since BeginBuild stays gone. It returns the
+// metadata it wrote; when it wrote nothing, or reported is empty, a plain
+// SELECT, which takes no lock, reads the row's metadata in the same
+// transaction. The empty object reads as none, like NULL.
+//
 // It cannot deadlock against another ReplaceEdges, whatever declared each
 // carries, or against RemoveResource: each takes a resource's edge_sets
 // rows in ascending schema_version order and holds them to commit, and
 // touches a version's relations only while holding that version's row. So
 // a call only ever waits for a row above every row it holds, and no cycle
-// of waits can form.
+// of waits can form. The resources row is locked only by that last write,
+// after every edge_sets row, and held from then to commit, and nothing locks
+// a resources row and then waits for edge_sets, so it adds no cycle either.
 //
 // The undeclared versions are read without a lock before phase one, so the
 // call drops only versions stored before that read. The outcome is decided
@@ -158,18 +169,15 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 // only adds edges — extra fanout to this resource — until the next live
 // build, which declares its versions, prunes it.
 func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
-	return nil, s.replaceEdges(ctx, resource, buildSeq, sets, declared)
-}
-
-func (s *Store) replaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
 	children := make(map[int][]model.Resource, len(sets))
 	for _, set := range sets {
 		if _, dup := children[set.SchemaVersion]; dup {
-			return fmt.Errorf("replace edges of %s/%s: schema version %d named twice", resource.Type, resource.Id, set.SchemaVersion)
+			return nil, fmt.Errorf("replace edges of %s/%s: schema version %d named twice", resource.Type, resource.Id, set.SchemaVersion)
 		}
 		children[set.SchemaVersion] = set.Children
 	}
-	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+	var metadata map[string]string
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		versions := slices.Collect(maps.Keys(children))
 		if declared != nil {
 			rows, err := tx.Query(ctx,
@@ -222,32 +230,59 @@ func (s *Store) replaceEdges(ctx context.Context, resource model.Resource, build
 				addIds = append(addIds, c.Id)
 			}
 		}
-		if len(cleared) == 0 {
-			return nil
+
+		if len(cleared) > 0 {
+			if _, err := tx.Exec(ctx,
+				`DELETE FROM relations r
+				 WHERE r.resource=$1 AND r.resource_id=$2 AND r.schema_version = ANY($3::int[])
+				   AND NOT EXISTS (
+				       SELECT 1 FROM unnest($4::int[], $5::text[], $6::text[]) AS x(v, t, i)
+				       WHERE x.v = r.schema_version AND x.t = r.related_resource AND x.i = r.related_resource_id
+				   )`,
+				resource.Type, resource.Id, cleared, addVersions, addTypes, addIds,
+			); err != nil {
+				return err
+			}
+		}
+		if len(addVersions) > 0 {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO relations (resource, resource_id, schema_version, related_resource, related_resource_id)
+				 SELECT $1, $2, v, t, i FROM unnest($3::int[], $4::text[], $5::text[]) AS x(v, t, i)
+				 ON CONFLICT DO NOTHING`,
+				resource.Type, resource.Id, addVersions, addTypes, addIds,
+			); err != nil {
+				return err
+			}
 		}
 
-		if _, err := tx.Exec(ctx,
-			`DELETE FROM relations r
-			 WHERE r.resource=$1 AND r.resource_id=$2 AND r.schema_version = ANY($3::int[])
-			   AND NOT EXISTS (
-			       SELECT 1 FROM unnest($4::int[], $5::text[], $6::text[]) AS x(v, t, i)
-			       WHERE x.v = r.schema_version AND x.t = r.related_resource AND x.i = r.related_resource_id
-			   )`,
-			resource.Type, resource.Id, cleared, addVersions, addTypes, addIds,
-		); err != nil {
-			return err
+		// The resources row is taken last, whatever the guard decided above.
+		if len(reported) > 0 {
+			err := tx.QueryRow(ctx,
+				`UPDATE resources SET metadata = $3::jsonb
+				 WHERE type=$1 AND id=$2 AND (metadata IS NULL OR metadata = '{}'::jsonb)
+				 RETURNING metadata`,
+				resource.Type, resource.Id, reported,
+			).Scan(&metadata)
+			if err == nil {
+				return nil
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
 		}
-		if len(addVersions) == 0 {
+		err := tx.QueryRow(ctx,
+			`SELECT metadata FROM resources WHERE type=$1 AND id=$2`,
+			resource.Type, resource.Id,
+		).Scan(&metadata)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
-		_, err := tx.Exec(ctx,
-			`INSERT INTO relations (resource, resource_id, schema_version, related_resource, related_resource_id)
-			 SELECT $1, $2, v, t, i FROM unnest($3::int[], $4::text[], $5::text[]) AS x(v, t, i)
-			 ON CONFLICT DO NOTHING`,
-			resource.Type, resource.Id, addVersions, addTypes, addIds,
-		)
 		return err
 	})
+	if err != nil || len(metadata) == 0 {
+		return nil, err
+	}
+	return metadata, nil
 }
 
 // RegisterChanges records a batch of changes in one statement, so each

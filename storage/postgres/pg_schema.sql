@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS resources (
     change_seq BIGINT NOT NULL DEFAULT 0,   -- Change Sequence value of the last accepted change; 0 = never changed
     stale_since TIMESTAMPTZ,                -- NULL = clean
     deleted BOOLEAN NOT NULL DEFAULT false,
-    metadata JSONB,                         -- notification metadata of the last stale mark
+    metadata JSONB,                         -- notification metadata of the last stale mark; a build stores its plans' report when the row has none (NULL or {})
     owner_seq BIGINT,                       -- Build owner token: the stale_seq its claim saw; NULL = no owner
     owner_since TIMESTAMPTZ,                -- when the owner last claimed or renewed; its lease runs from here
     UNIQUE (type, id)

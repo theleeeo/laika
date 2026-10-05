@@ -506,3 +506,179 @@ func TestReplaceEdgesAndRemoveResource_WaitUnderARepeatableReadDefault(t *testin
 		requireSets(t, p, map[int]stored{})
 	})
 }
+
+// ---- The metadata a build's plans report ----
+
+// replaceReporting runs ReplaceEdges with reported metadata, fails the test on
+// error, and returns the metadata the call returns.
+func replaceReporting(t *testing.T, st *Store, res model.Resource, buildSeq int64, reported map[string]string, sets ...core.EdgeSet) map[string]string {
+	t.Helper()
+	got, err := st.ReplaceEdges(context.Background(), res, buildSeq, sets, nil, reported)
+	if err != nil {
+		t.Fatalf("ReplaceEdges %s/%s at %d: %v", res.Type, res.Id, buildSeq, err)
+	}
+	return got
+}
+
+// seedMetadata writes a resources row directly with the given metadata, a
+// JSON text or nil for SQL NULL.
+func seedMetadata(t *testing.T, res model.Resource, metadata *string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO resources (type, id, metadata) VALUES ($1, $2, $3::jsonb)`,
+		res.Type, res.Id, metadata); err != nil {
+		t.Fatalf("seed %s/%s: %v", res.Type, res.Id, err)
+	}
+}
+
+// rawMetadata reads res's metadata as JSON text, nil for SQL NULL, so a test
+// tells NULL from the empty object.
+func rawMetadata(t *testing.T, res model.Resource) *string {
+	t.Helper()
+	var m *string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT metadata::text FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&m); err != nil {
+		t.Fatalf("read metadata %s/%s: %v", res.Type, res.Id, err)
+	}
+	return m
+}
+
+func requireMetadata(t *testing.T, what string, got, want map[string]string) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s: got %#v, want %#v", what, got, want)
+	}
+}
+
+func TestReplaceEdges_StoresTheReportOnARowWithNoMetadata(t *testing.T) {
+	st := NewStore(testPool)
+	p := model.Resource{Type: "rm1", Id: "p"}
+	seedMetadata(t, p, nil)
+
+	got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1, model.Resource{Type: "rm1c", Id: "a"}))
+
+	requireMetadata(t, "returned", got, meta("report"))
+	requireMetadata(t, "stored", metadataOf(t, p), meta("report"))
+	requireSets(t, p, map[int]stored{1: stamped(5, model.Resource{Type: "rm1c", Id: "a"})})
+}
+
+func TestReplaceEdges_KeepsTheMetadataTheRowHolds(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+
+	t.Run("a registration's", func(t *testing.T) {
+		p := model.Resource{Type: "rm2", Id: "registered"}
+		register(t, st, core.Registration{Resource: p, Version: 1, Metadata: meta("registration")})
+
+		got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
+
+		requireMetadata(t, "returned", got, meta("registration"))
+		requireMetadata(t, "stored", metadataOf(t, p), meta("registration"))
+	})
+	t.Run("a stale mark's", func(t *testing.T) {
+		p := model.Resource{Type: "rm2", Id: "marked"}
+		if _, err := st.MarkStale(ctx, []model.Resource{p}, meta("mark"), 0); err != nil {
+			t.Fatal(err)
+		}
+
+		got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
+
+		requireMetadata(t, "returned", got, meta("mark"))
+		requireMetadata(t, "stored", metadataOf(t, p), meta("mark"))
+	})
+	t.Run("an earlier report", func(t *testing.T) {
+		p := model.Resource{Type: "rm2", Id: "reported"}
+		seedMetadata(t, p, nil)
+		replaceReporting(t, st, p, 5, meta("first"), edgeSet(1))
+
+		got := replaceReporting(t, st, p, 6, meta("second"), edgeSet(1))
+
+		requireMetadata(t, "returned", got, meta("first"))
+		requireMetadata(t, "stored", metadataOf(t, p), meta("first"))
+	})
+}
+
+func TestReplaceEdges_AnEmptyObjectCountsAsNoMetadata(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	p := model.Resource{Type: "rm3", Id: "p"}
+	// A mark with empty metadata stores the empty object.
+	if _, err := st.MarkStale(ctx, []model.Resource{p}, map[string]string{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if m := rawMetadata(t, p); m == nil || *m != "{}" {
+		t.Fatalf("precondition: metadata %v, want the empty object", m)
+	}
+
+	got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
+
+	requireMetadata(t, "returned", got, meta("report"))
+	requireMetadata(t, "stored", metadataOf(t, p), meta("report"))
+}
+
+func TestReplaceEdges_NoReportWritesNothing(t *testing.T) {
+	st := NewStore(testPool)
+	empty := `{}`
+	for _, report := range []struct {
+		name string
+		m    map[string]string
+	}{{"nil", nil}, {"empty", map[string]string{}}} {
+		t.Run(report.name+" report on a NULL row", func(t *testing.T) {
+			p := model.Resource{Type: "rm4", Id: report.name + "-null"}
+			seedMetadata(t, p, nil)
+
+			got := replaceReporting(t, st, p, 5, report.m, edgeSet(1))
+
+			requireMetadata(t, "returned", got, nil)
+			if m := rawMetadata(t, p); m != nil {
+				t.Fatalf("stored metadata %q, want NULL", *m)
+			}
+		})
+		t.Run(report.name+" report on an empty-object row", func(t *testing.T) {
+			p := model.Resource{Type: "rm4", Id: report.name + "-empty"}
+			seedMetadata(t, p, &empty)
+
+			got := replaceReporting(t, st, p, 5, report.m, edgeSet(1))
+
+			requireMetadata(t, "returned", got, nil)
+			if m := rawMetadata(t, p); m == nil || *m != "{}" {
+				t.Fatalf("stored metadata %v, want the empty object unchanged", m)
+			}
+		})
+		t.Run(report.name+" report returns the row's metadata", func(t *testing.T) {
+			p := model.Resource{Type: "rm4", Id: report.name + "-held"}
+			register(t, st, core.Registration{Resource: p, Version: 1, Metadata: meta("registration")})
+
+			got := replaceReporting(t, st, p, 5, report.m, edgeSet(1))
+
+			requireMetadata(t, "returned", got, meta("registration"))
+			requireMetadata(t, "stored", metadataOf(t, p), meta("registration"))
+		})
+	}
+}
+
+func TestReplaceEdges_StoresTheReportWhenTheGuardRejectsEverySet(t *testing.T) {
+	st := NewStore(testPool)
+	c := func(id string) model.Resource { return model.Resource{Type: "rm5c", Id: id} }
+	p := model.Resource{Type: "rm5", Id: "p"}
+	seedMetadata(t, p, nil)
+	replace(t, st, p, 10, nil, edgeSet(1, c("newer")), edgeSet(2, c("newer")))
+
+	got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1, c("older")), edgeSet(2))
+
+	requireMetadata(t, "returned", got, meta("report"))
+	requireMetadata(t, "stored", metadataOf(t, p), meta("report"))
+	requireSets(t, p, map[int]stored{1: stamped(10, c("newer")), 2: stamped(10, c("newer"))})
+}
+
+func TestReplaceEdges_DoesNotRecreateAGoneRow(t *testing.T) {
+	st := NewStore(testPool)
+	p := model.Resource{Type: "rm6", Id: "p"}
+
+	got := replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
+
+	requireMetadata(t, "returned", got, nil)
+	if exists(t, p) {
+		t.Fatalf("ReplaceEdges created a resources row for %s/%s: %v", p.Type, p.Id, rowJSON(t, p))
+	}
+}
