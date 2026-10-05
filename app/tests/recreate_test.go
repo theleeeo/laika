@@ -68,6 +68,48 @@ func (t *TestSuite) Test_Recreate_WithinGCDeletes_IndexesNewData() {
 	t.Require().Equal("new", fields["field1"], "the recreated document carries the new data")
 }
 
+// Test_Recreate_AfterBuildPathDelete_LowerVersionIsBuilt: a/1 is created and
+// built at notification Version 5, then removed at the source; an update at
+// Version 6 — not a delete notification — is registered, so its build finds
+// every plan nil and deletes on the build path. a/1 is then recreated and
+// notified at Version 1, lower than any it had: a recreate restarts its
+// upstream's versioning.
+//
+// Before L2.2 the build-path delete deleted the document and kept the row,
+// with its stored version 6, so the recreate's Version 1 was rejected as
+// stale and a/1 stayed unindexed. The build path now hard-deletes the row as
+// a notified delete does, so the recreate is accepted against no row.
+func (t *TestSuite) Test_Recreate_AfterBuildPathDelete_LowerVersionIsBuilt() {
+	t.setResourceConfig(DefaultResourceConfig)
+	ctx := t.T().Context()
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "old"})
+	t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 5,
+	}))
+	t.worker.Drain(ctx)
+	t.Require().True(t.docExists("a", "1"), "the original a/1 is indexed")
+
+	t.fakeProvider.DeleteResource("a", "1")
+	t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 6,
+	}))
+	t.worker.Drain(ctx)
+	t.Require().False(t.docExists("a", "1"), "the build path deletes the document")
+	t.Require().Equal(0, t.resourceRowCount("a", "1"), "the build path removes the row")
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "new"})
+	t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1,
+	}))
+	t.worker.Drain(ctx)
+
+	fields, ok := t.docFields(core.IndexName("a", 1), "1")
+	t.Require().True(ok, "the recreate at a lower Version must be accepted and built")
+	t.Require().Equal("new", fields["field1"])
+	t.Require().Nil(t.staleSince("a", "1"), "the recreate's build clears the mark")
+}
+
 // createAWithChildBX creates a/1 ("old") with child b/x at the source,
 // registers both on x and requires a/1's document and its edge a/1 -> b/x.
 // The source keeps relating b/x to a/1 until the test changes it.
@@ -155,12 +197,13 @@ func (t *TestSuite) Test_Recreate_LateBuildPathDelete_KeepsRecreatedDocument() {
 	t.Require().Equal([]string{"b/x"}, t.childEdges("a", "1"), "B stored the edge a/1 -> b/x")
 
 	// 5, armed before 4. The final state must show only what A's late delete
-	// did. The recreate moved stale_seq past A's, so should A's FinishOwned
-	// still own the row it re-claims it for a follow-up, which would rebuild
-	// a/1 from the source and re-write the document and the edge, hiding a
-	// lost one. (Today B's ClearStale settled the mark and dropped A's
-	// ownership with it, so A's finish hands on nothing; the guard keeps the
-	// case meaningful if that changes.) The follow-up's fetch fails instead,
+	// did. The recreate moved stale_seq past A's, so A's finish
+	// (DeleteResourceIfSeq, the build path's row delete) keeps the row, and
+	// should A still own it, re-claims it for a follow-up, which would
+	// rebuild a/1 from the source and re-write the document and the edge,
+	// hiding a lost one. (Today B's ClearStale settled the mark and dropped
+	// A's ownership with it, so A's finish hands on nothing; the guard keeps
+	// the case meaningful if that changes.) The follow-up's fetch fails instead,
 	// and a build whose fetch fails writes and removes nothing: its plan
 	// errors before any write, and the build releases its ownership and
 	// leaves the mark for the sweep.
@@ -171,6 +214,7 @@ func (t *TestSuite) Test_Recreate_LateBuildPathDelete_KeepsRecreatedDocument() {
 	t.Require().NoError(x.WaitForIdle(waitCtx))
 	t.fakeProvider.SetError("a", "1", nil)
 
+	t.Require().Equal(1, t.resourceRowCount("a", "1"), "A's finish must not hard-delete the recreated row")
 	fields, ok = t.docFields(core.IndexName("a", 1), "1")
 	t.Require().True(ok, "A's late delete, at a lower Build Sequence than B's write, must leave the recreated document")
 	t.Require().Equal("new", fields["field1"], "the recreated document keeps B's data")

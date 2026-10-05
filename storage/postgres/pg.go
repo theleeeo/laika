@@ -734,15 +734,16 @@ func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleS
 	return f, nil
 }
 
-// DeleteResourceIfSeq hard-deletes a tombstoned row, guarded by stale_seq so a
-// concurrent re-create (which bumps the seq) wins over the in-flight delete;
-// the ownership goes with the row. When the seq moved and token is still the
-// owner token, the owner re-claims the row for its follow-up. The two
-// statements run in order, each on its own snapshot, so a re-create that
-// commits while the delete waits for the row lock is seen by the re-claim.
+// DeleteResourceIfSeq hard-deletes a resource's row, tombstone or not,
+// guarded by stale_seq so a concurrent change (a re-create, any mark: each
+// bumps the seq) wins over the in-flight delete; the ownership goes with the
+// row. When the seq moved and token is still the owner token, the owner
+// re-claims the row for its follow-up. The two statements run in order, each
+// on its own snapshot, so a re-create that commits while the delete waits for
+// the row lock is seen by the re-claim.
 func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
 	tag, err := s.pool.Exec(ctx,
-		`DELETE FROM resources WHERE type=$1 AND id=$2 AND stale_seq=$3 AND deleted`,
+		`DELETE FROM resources WHERE type=$1 AND id=$2 AND stale_seq=$3`,
 		resource.Type, resource.Id, staleSeq,
 	)
 	if err != nil || tag.RowsAffected() > 0 {

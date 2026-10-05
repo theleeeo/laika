@@ -150,13 +150,14 @@ func (f *rebuildFlusher) tracked(id string) bool {
 	return f.state[id] != nil
 }
 
-// occ returns the Build Sequence captured when the resource was begun.
-func (f *rebuildFlusher) occ(id string) (int64, bool) {
+// occ returns the Build Sequence captured when the resource was begun, and
+// the stale_seq its finish is guarded by.
+func (f *rebuildFlusher) occ(id string) (occVersion, staleSeq int64, ok bool) {
 	p := f.state[id]
 	if p == nil {
-		return 0, false
+		return 0, 0, false
 	}
-	return p.occVersion, true
+	return p.occVersion, p.staleSeq, true
 }
 
 // add queues one plan document of Schema Version version. Flushes when the
@@ -199,6 +200,20 @@ func (f *rebuildFlusher) fail(ctx context.Context, id string) {
 	f.failed++
 	f.dropPending(id)
 	f.markStale(ctx, id)
+}
+
+// removeRow finishes a resource the rebuild deleted as gone at source: it
+// hard-deletes its row, guarded by the stale_seq staleSeq the rebuild
+// captured at its BeginBuild, so a change that moved the mark keeps the row
+// for its own build. A rebuild owns nothing, so it hands on no follow-up. A
+// failed removal fails the resource: its mark brings the sweep, whose build
+// finds it gone and removes the row.
+func (f *rebuildFlusher) removeRow(ctx context.Context, id string, staleSeq int64) {
+	if _, err := f.idx.st.DeleteResourceIfSeq(ctx, f.root(id), staleSeq, 0); err != nil {
+		slog.Warn("removing the row of a resource gone at source failed; failing the resource",
+			slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
+		f.fail(ctx, id)
+	}
 }
 
 func (f *rebuildFlusher) dropPending(id string) {

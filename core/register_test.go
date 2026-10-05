@@ -18,7 +18,8 @@ import (
 
 // recordingStore records the order of Store calls and keeps the stale-mark
 // and ownership state of core/store.go in memory: one row per resource with
-// its stale_seq, mark, owner token, metadata and tombstone. A non-zero owner
+// its stale_seq, mark, owner token, metadata and tombstone, created by a mark
+// or a BeginBuild. A non-zero owner
 // is a live lease — leases never expire here — and every mark takes the next
 // value of one global counter as its stale_seq; a claim makes the row's new
 // stale_seq its owner token.
@@ -264,11 +265,17 @@ func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, token i
 		return BuildBegun{}, s.beginErr
 	}
 	s.buildIdx++
-	var seq int64
-	if row, ok := s.rows[r]; ok {
-		seq = row.staleSeq
+	// Like the real store, BeginBuild inserts a row, unmarked, for an id
+	// without one.
+	if s.rows == nil {
+		s.rows = make(map[model.Resource]*memRow)
 	}
-	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: seq, Start: s.start}, nil
+	row, ok := s.rows[r]
+	if !ok {
+		row = &memRow{}
+		s.rows[r] = row
+	}
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start}, nil
 }
 func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")

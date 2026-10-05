@@ -1,5 +1,22 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-05, runbook step L2.2):** a build that finds every plan nil
+> removes the row, as a notified delete does. Until now only a notified delete
+> hard-deleted its row; a build path's delete deleted the documents and edge
+> sets and kept the row, with its `version`. A recreate notified at a lower
+> Version was then rejected against that dead row, dead rows accumulated, a
+> tombstone a Parent mark claimed was built, deleted and settled into an
+> unmarked tombstone nothing listed again, and a by-ids rebuild or a walk left
+> the row its `BeginBuild` inserted for a resource the source never had.
+> Now every build path's nil finishes with `DeleteResourceIfSeq`, which
+> deletes the row whether or not it is a tombstone, guarded by the
+> `stale_seq` its `BeginBuild` captured: `Build` in place of `FinishOwned` or
+> `ClearStale`, with the owner's follow-up when a change moved the mark, and
+> the rebuild paths, which own nothing, after their delete — a walk after its
+> root's drift check, so a root that check re-marked keeps its row. The row's
+> `change_seq` goes with it, as with a notified delete (seams S6 in
+> laika-dev's `docs/seams.md`).
+
 > **Note (2026-10-05, runbook step L2.1):** the numbers a mark and a build
 > capture come from the **Change Sequence**, and the L1.4 note's exception for
 > a delete is closed.

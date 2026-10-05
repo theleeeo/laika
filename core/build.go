@@ -30,10 +30,13 @@ type RebuildArgs struct {
 // Build builds each of params' ids. An id with an owner token (OwnerTokens)
 // is an owned inline build: BeginBuild renews its lease, and a success
 // finishes it with FinishOwned, submitting the follow-up FinishOwned hands on.
-// An id without one owns nothing and finishes with ClearStale. A failed owned
-// id releases its ownership and keeps its mark, so the next change claims it
-// or the sweep rebuilds it; so does every owned id left unfinished when ctx
-// ends.
+// An id without one owns nothing and finishes with ClearStale. An id whose
+// plans all returned nil is gone at source: its documents are deleted, and it
+// finishes with DeleteResourceIfSeq instead, which removes its row — owned or
+// not, tombstone or not — and hands on the follow-up when a change moved the
+// mark. A failed owned id releases its ownership and keeps its mark, so the
+// next change claims it or the sweep rebuilds it; so does every owned id left
+// unfinished when ctx ends.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
@@ -67,10 +70,27 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		}
 
 		// TODO: Build multiple documents in a batch.
-		if err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, begun.BuildIdx, begun.Start); err != nil {
+		gone, err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, begun.BuildIdx, begun.Start)
+		if err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
 			idx.releaseOwners(ctx, params.owned([]string{id}))
+			continue
+		}
+
+		if gone {
+			// Race-safe as the finishes below: a change that moved stale_seq
+			// mid-build keeps the row, and an owner re-claims it for the
+			// follow-up — a build for a recreate. A token of 0 re-claims
+			// nothing.
+			fu, err := idx.st.DeleteResourceIfSeq(ctx, res, begun.StaleSeq, token)
+			if err != nil {
+				logger.Warn("removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
+					slog.String("id", id), slog.String("error", err.Error()))
+				idx.releaseOwners(ctx, params.owned([]string{id}))
+				continue
+			}
+			idx.submitFollowUp(ctx, res, fu)
 			continue
 		}
 
@@ -141,9 +161,12 @@ func executeAllPlans(ctx context.Context, plans []projection.Plan, req projectio
 	return docs, missing, nil
 }
 
-func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) error {
+// buildOne builds one resource at the Build Sequence occVersion. gone reports
+// that every plan returned nil and the resource's documents and edge sets
+// were deleted instead; the caller removes its row.
+func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) (gone bool, err error) {
 	if occVersion <= 0 {
-		return fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
+		return false, fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
 	}
 
 	// Execute every version's plan before deciding anything: existence is a
@@ -156,21 +179,24 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		Metadata:     metadata,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	// Every plan agrees the resource is gone at source — delete everywhere.
 	if len(docs) == 0 && len(missing) > 0 {
-		return idx.handleDelete(ctx, RebuildPayload{
+		if err := idx.handleDelete(ctx, RebuildPayload{
 			ResourceType: resourceType,
 			ResourceID:   resourceID,
-		}, occVersion)
+		}, occVersion); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	// Plans disagree on existence: a transient source inconsistency or a
 	// broken plan. Fail the build without writing — the stale mark survives
 	// and the retry converges on the source's real state.
 	if len(missing) > 0 {
-		return fmt.Errorf("plans for %s/%s disagree on existence: version(s) %v returned no data; leaving stale for retry", resourceType, resourceID, missing)
+		return false, fmt.Errorf("plans for %s/%s disagree on existence: version(s) %v returned no data; leaving stale for retry", resourceType, resourceID, missing)
 	}
 
 	var allRelations []model.Resource
@@ -194,7 +220,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 			// seq-guarded finish (ClearStale or FinishOwned) keeps recovery
 			// correct if the winner served a different change.
 			if !errors.Is(err, ErrVersionConflict) {
-				return fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
+				return false, fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
 			}
 			slog.Debug("build superseded by newer write",
 				slog.String("type", resourceType), slog.String("id", resourceID), slog.String("index", indexName))
@@ -216,14 +242,14 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		declared[i] = p.Version
 	}
 	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared); err != nil {
-		return fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
+		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
 	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
 	// Parents the Plans derived from the Child's own data, unioned across
 	// every Schema Version's plan.
 	if err := idx.scheduleBuild(ctx, parents, metadata); err != nil {
-		return err
+		return false, err
 	}
 
 	// Drift check (ADR 0002). start is the Change Sequence value BeginBuild
@@ -245,7 +271,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		}
 		drift, err := idx.st.AnyChangedSince(ctx, checks)
 		if err != nil {
-			return fmt.Errorf("drift check for %s/%s: %w", resourceType, resourceID, err)
+			return false, fmt.Errorf("drift check for %s/%s: %w", resourceType, resourceID, err)
 		}
 		if drift {
 			slog.Info("child drift detected, re-enqueueing build",
@@ -253,12 +279,12 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("id", resourceID),
 			)
 			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
-				return fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
+				return false, fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
 		}
 	}
 
-	return nil
+	return false, nil
 }
 
 func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebuildResume) error {
@@ -321,7 +347,8 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			continue
 		}
 
-		// Every selected plan agrees: gone at source — delete from all versions.
+		// Every selected plan agrees: gone at source — delete from all
+		// versions, and the row with them.
 		if len(docs) == 0 && len(missing) > 0 {
 			fl.discard(id)
 			if err := idx.handleDelete(ctx, RebuildPayload{
@@ -330,7 +357,9 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			}, begun.BuildIdx); err != nil {
 				logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 				fl.fail(ctx, id)
+				continue
 			}
+			fl.removeRow(ctx, id, begun.StaleSeq)
 			continue
 		}
 		if len(missing) > 0 {
@@ -482,9 +511,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				// to the delete path, which removes every version's document
 				// at a Build Sequence of the resource's: the one this walk
 				// began it at, or else a fresh BeginBuild's (a failed entry
-				// that was never begun holds 0).
+				// that was never begun holds 0). The row goes after them,
+				// guarded by the stale_seq the same BeginBuild captured.
 				if doc.Doc == nil {
-					seq, ok := fl.occ(id)
+					seq, staleSeq, ok := fl.occ(id)
 					if !ok || seq <= 0 {
 						begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
 						if err != nil {
@@ -492,7 +522,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 							fl.fail(ctx, id)
 							continue
 						}
-						seq = begun.BuildIdx
+						seq, staleSeq = begun.BuildIdx, begun.StaleSeq
 					}
 					fl.discard(id)
 					if err := idx.handleDelete(ctx, RebuildPayload{
@@ -509,8 +539,13 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					// Check the root against the walk start, as a root the
 					// walk settles checks itself (driftBase.checkRoot); a hit
 					// or a failed check re-marks and re-builds it — at worst
-					// a redundant build.
+					// a redundant build. The re-mark moves stale_seq, so the
+					// root keeps its row; a root whose re-mark failed was
+					// failed and keeps it too.
 					fl.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: doc.Root, Start: walkStart}}})
+					if !fl.tracked(id) {
+						fl.removeRow(ctx, id, staleSeq)
+					}
 					continue
 				}
 
@@ -529,7 +564,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					fl.begin(id, begun, driftBase{start: walkStart, checkRoot: true}, expected)
 				}
 
-				occVersion, ok := fl.occ(id)
+				occVersion, _, ok := fl.occ(id)
 				if !ok {
 					continue
 				}

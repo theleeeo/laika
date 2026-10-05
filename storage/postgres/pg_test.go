@@ -265,42 +265,52 @@ func TestRegisterChanges_DeleteTombstonesAndResetsVersion(t *testing.T) {
 	}
 }
 
+// DeleteResourceIfSeq removes the row at the matching stale_seq whether it is
+// a tombstone (a notified delete) or a live row (a build path whose plans all
+// returned nil: a marked row, or one a BeginBuild inserted and nothing
+// marked), and leaves it when a newer mark moved stale_seq.
 func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
-	res := model.Resource{Type: "dr", Id: "1"}
+	exists := func(res model.Resource) bool {
+		t.Helper()
+		var n int
+		if err := testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
 
-	seq := register(t, st, core.Registration{Resource: res, Deleted: true}).Items[0].StaleSeq
-
-	// Wrong seq: row must survive.
-	if _, err := st.DeleteResourceIfSeq(ctx, res, seq+1, 0); err != nil {
+	tombstone, live, inserted, remarked := model.Resource{Type: "dr", Id: "1"}, model.Resource{Type: "dr", Id: "2"},
+		model.Resource{Type: "dr", Id: "3"}, model.Resource{Type: "dr", Id: "4"}
+	tombSeq := register(t, st, core.Registration{Resource: tombstone, Deleted: true}).Items[0].StaleSeq
+	liveSeq := register(t, st, core.Registration{Resource: live, Version: 7}).Items[0].StaleSeq
+	begun, err := st.BeginBuild(ctx, inserted, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	var n int
-	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n)
-	if n != 1 {
-		t.Fatal("mismatched seq must not delete the row")
-	}
-
-	// Matching seq: row goes away.
-	if _, err := st.DeleteResourceIfSeq(ctx, res, seq, 0); err != nil {
+	remarkedSeq := register(t, st, core.Registration{Resource: remarked, Version: 7}).Items[0].StaleSeq
+	if _, err := st.MarkStale(ctx, []model.Resource{remarked}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n)
-	if n != 0 {
-		t.Fatal("matching seq must delete the row")
-	}
 
-	// Not-deleted rows are never hard-deleted even with matching seq.
-	res2 := model.Resource{Type: "dr", Id: "2"}
-	_, _ = st.MarkStale(ctx, []model.Resource{res2}, nil, 0) // deleted=false
-	_, _, seq2, _, _ := row(t, res2)
-	if _, err := st.DeleteResourceIfSeq(ctx, res2, seq2, 0); err != nil {
-		t.Fatal(err)
-	}
-	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res2.Type, res2.Id).Scan(&n)
-	if n != 1 {
-		t.Fatal("non-tombstoned rows must never be hard-deleted")
+	for _, c := range []struct {
+		name string
+		res  model.Resource
+		seq  int64
+		kept bool
+	}{
+		{"a tombstone at its stale_seq", tombstone, tombSeq, false},
+		{"a live row at its stale_seq", live, liveSeq, false},
+		{"a row BeginBuild inserted, never marked", inserted, begun.StaleSeq, false},
+		{"a row a newer mark moved", remarked, remarkedSeq, true},
+	} {
+		if _, err := st.DeleteResourceIfSeq(ctx, c.res, c.seq, 0); err != nil {
+			t.Fatal(err)
+		}
+		if got := exists(c.res); got != c.kept {
+			t.Fatalf("%s: row kept %v, want %v", c.name, got, c.kept)
+		}
 	}
 }
 

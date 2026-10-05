@@ -112,10 +112,12 @@ type Store interface {
 	// follow-up and returns it. Otherwise it changes nothing and returns no
 	// follow-up.
 	FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (FollowUp, error)
-	// DeleteResourceIfSeq finishes an owned delete: it hard-deletes the
-	// tombstoned row, and its ownership with it, when stale_seq still equals
+	// DeleteResourceIfSeq finishes a delete — a notified one, or a build
+	// path's whose plans all returned nil: it hard-deletes the row, tombstone
+	// or not, and its ownership with it, when stale_seq still equals
 	// staleSeq. When it moved and token is still the owner token, it
-	// re-claims the row and returns the follow-up, as FinishOwned does.
+	// re-claims the row and returns the follow-up, as FinishOwned does; a
+	// token of 0, a delete that owns nothing, re-claims nothing.
 	DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (FollowUp, error)
 	// ListStale returns up to limit resources whose stale mark predates
 	// before and that have no live owner under lease, and claims every row
@@ -136,7 +138,8 @@ type BuildBegun struct {
 	// version.
 	BuildIdx int64
 	// StaleSeq is the stale_seq the build's finish — FinishOwned, or
-	// ClearStale for a build that owns nothing — is guarded by.
+	// ClearStale for a build that owns nothing, or DeleteResourceIfSeq when
+	// its plans all returned nil — is guarded by.
 	StaleSeq int64
 	// Start is a value of the Change Sequence taken before the build's
 	// fetches; the drift check compares against it.

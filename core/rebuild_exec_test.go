@@ -200,6 +200,9 @@ type rebuildRecordingStore struct {
 	// beginErrs fails the BeginBuild of each resource whose id it names; the
 	// call is still recorded.
 	beginErrs map[string]error
+	// deleteErrs fails the DeleteResourceIfSeq of each resource whose id it
+	// names; the call is still recorded.
+	deleteErrs map[string]error
 }
 
 func (s *rebuildRecordingStore) replacedSnapshot() []edgeReplace {
@@ -333,7 +336,9 @@ func (s *rebuildRecordingStore) ClearStale(_ context.Context, r model.Resource, 
 
 func (s *rebuildRecordingStore) DeleteResourceIfSeq(_ context.Context, r model.Resource, seq, _ int64) (FollowUp, error) {
 	s.record("DeleteResourceIfSeq:%s/%s:%d", r.Type, r.Id, seq)
-	return FollowUp{}, nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return FollowUp{}, s.deleteErrs[r.Id]
 }
 
 func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
