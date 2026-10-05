@@ -108,11 +108,10 @@ func (t *TestSuite) createAWithChildBX(x *core.Indexer, waitCtx context.Context)
 //  5. Any follow-up A's finish hands on fails at its fetch, so it writes and
 //     removes nothing (see below).
 //
-// Before L2.1 the build path passed 0 to handleDelete: the ES delete was a
-// plain, unversioned delete that removed B's newer document, and
-// RemoveResource dropped every edge set whatever build stored it, so B's
-// a/1 -> b/x went too — a recreated resource left unindexed and cut off from
-// its child's fanout. With A's Build Sequence on both, Elasticsearch rejects
+// Before L2.1 the build path's delete was unversioned: handleDelete issued a
+// plain delete that removed B's newer document, and RemoveResource dropped
+// every edge set whatever build stored it, so B's a/1 -> b/x went too — a
+// recreated resource left unindexed and cut off from its child's fanout. With A's Build Sequence on both, Elasticsearch rejects
 // the delete against B's higher-versioned document and the Store keeps the
 // set B stamped above it.
 func (t *TestSuite) Test_Recreate_LateBuildPathDelete_KeepsRecreatedDocument() {
