@@ -367,10 +367,10 @@ func (s *rebuildRecordingStore) GetParentResources(context.Context, model.Resour
 
 // BeginDelete bumps the Build Sequence and is never superseded: this store
 // keeps no rows, and its tests don't drive notified deletes.
-func (s *rebuildRecordingStore) BeginDelete(_ context.Context, r model.Resource, staleSeq, token int64) (DeleteBegun, error) {
+func (s *rebuildRecordingStore) BeginDelete(_ context.Context, r model.Resource, token int64) (DeleteBegun, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls = append(s.calls, fmt.Sprintf("BeginDelete:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token))
+	s.calls = append(s.calls, fmt.Sprintf("BeginDelete:%s/%s:%d", r.Type, r.Id, token))
 	s.buildIdx++
 	return DeleteBegun{BuildIdx: s.buildIdx}, nil
 }

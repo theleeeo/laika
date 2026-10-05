@@ -101,8 +101,23 @@ func (g *gatingStore) releaseBeginDelete() {
 	g.armed, g.reached, g.release = false, nil, nil
 }
 
+// passBeginDelete lets the held BeginDelete through and re-arms the gate, in
+// one step, for the next BeginDelete of the same resource — such as the held
+// delete's follow-up — returning the new reached channel.
+func (g *gatingStore) passBeginDelete() <-chan struct{} {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.release != nil {
+		close(g.release)
+	}
+	g.armed = true
+	g.reached = make(chan struct{})
+	g.release = make(chan struct{})
+	return g.reached
+}
+
 // BeginDelete implements [core.Store].
-func (g *gatingStore) BeginDelete(ctx context.Context, res model.Resource, staleSeq, token int64) (core.DeleteBegun, error) {
+func (g *gatingStore) BeginDelete(ctx context.Context, res model.Resource, token int64) (core.DeleteBegun, error) {
 	g.mu.Lock()
 	var reached, release chan struct{}
 	if g.armed && g.res == res {
@@ -119,7 +134,7 @@ func (g *gatingStore) BeginDelete(ctx context.Context, res model.Resource, stale
 			return core.DeleteBegun{}, ctx.Err()
 		}
 	}
-	return g.suiteStore.BeginDelete(ctx, res, staleSeq, token)
+	return g.suiteStore.BeginDelete(ctx, res, token)
 }
 
 // RemoveResource implements [core.Store], counting the call.

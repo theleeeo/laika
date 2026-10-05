@@ -46,7 +46,7 @@ type cancellingStore struct {
 }
 
 func (s *cancellingStore) RemoveResource(context.Context, model.Resource, int64) error { return nil }
-func (s *cancellingStore) BeginDelete(context.Context, model.Resource, int64, int64) (DeleteBegun, error) {
+func (s *cancellingStore) BeginDelete(context.Context, model.Resource, int64) (DeleteBegun, error) {
 	return DeleteBegun{}, nil
 }
 

@@ -567,22 +567,24 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token i
 }
 
 // BeginDelete bumps a tombstone's Build Sequence to a fresh Change Sequence
-// value in one guarded UPDATE, only while its stale_seq is still staleSeq
-// and it is still deleted; a non-zero token that is the row's owner token
-// renews the owner's lease. No row updated — a later mark moved stale_seq, a
-// recreate cleared deleted, or the row is gone — reports the delete
-// Superseded and changes nothing. An UPDATE that waited for a concurrent
-// write re-checks its guard against the committed row and draws its value
-// then, so the bump lands above every number that write left.
-func (s *Store) BeginDelete(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.DeleteBegun, error) {
+// value in one guarded UPDATE, only while the row is still deleted, whatever
+// its stale_seq: a later mark that kept the tombstone (a Parent mark, a
+// MarkStale, a newer delete) leaves the delete to run, and its finish hands
+// on the follow-up. A non-zero token that is the row's owner token renews the
+// owner's lease. No row updated — a recreate cleared deleted, or the row is
+// gone — reports the delete Superseded and changes nothing. An UPDATE that
+// waited for a concurrent write re-checks its guard against the committed
+// row and draws its value then, so the bump lands above every number that
+// write left.
+func (s *Store) BeginDelete(ctx context.Context, resource model.Resource, token int64) (core.DeleteBegun, error) {
 	var d core.DeleteBegun
 	err := s.pool.QueryRow(ctx,
 		`UPDATE resources
 		 SET build_idx = nextval('change_sequence'),
-		     owner_since = CASE WHEN $4::bigint <> 0 AND owner_seq = $4 THEN now() ELSE owner_since END
-		 WHERE type=$1 AND id=$2 AND stale_seq=$3 AND deleted
+		     owner_since = CASE WHEN $3::bigint <> 0 AND owner_seq = $3 THEN now() ELSE owner_since END
+		 WHERE type=$1 AND id=$2 AND deleted
 		 RETURNING build_idx`,
-		resource.Type, resource.Id, staleSeq, token,
+		resource.Type, resource.Id, token,
 	).Scan(&d.BuildIdx)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.DeleteBegun{Superseded: true}, nil

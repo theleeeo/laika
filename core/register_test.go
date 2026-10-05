@@ -409,21 +409,21 @@ func (s *recordingStore) GetParentResources(context.Context, model.Resource) ([]
 }
 
 // BeginDelete follows the contract: the delete is superseded when the row is
-// gone, its stale_seq is no longer staleSeq or it is no longer a tombstone;
-// otherwise it bumps the Build Sequence. Its lease renewal is a no-op here,
-// where leases never expire.
-func (s *recordingStore) BeginDelete(_ context.Context, r model.Resource, staleSeq, token int64) (DeleteBegun, error) {
+// gone or no longer a tombstone, whatever its stale_seq; otherwise it bumps
+// the Build Sequence. Its lease renewal is a no-op here, where leases never
+// expire.
+func (s *recordingStore) BeginDelete(_ context.Context, r model.Resource, token int64) (DeleteBegun, error) {
 	if s.onBeginDelete != nil {
 		s.onBeginDelete(r)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recordLocked("BeginDelete:%s/%s:%d:%d", r.Type, r.Id, staleSeq, token)
+	s.recordLocked("BeginDelete:%s/%s:%d", r.Type, r.Id, token)
 	if s.beginDeleteErr != nil {
 		return DeleteBegun{}, s.beginDeleteErr
 	}
 	row, ok := s.rows[r]
-	if !ok || row.staleSeq != staleSeq || !row.deleted {
+	if !ok || !row.deleted {
 		return DeleteBegun{Superseded: true}, nil
 	}
 	s.buildIdx++

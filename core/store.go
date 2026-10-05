@@ -74,11 +74,14 @@ type Store interface {
 	// before it deletes anything: it bumps the row's Build Sequence, which
 	// the delete's Elasticsearch deletes and edge removal carry, and a
 	// non-zero token that is the row's owner token renews its lease. It
-	// reports the delete superseded when stale_seq is no longer staleSeq (the
-	// delete's mark), the row is no longer a tombstone, or the row is gone;
-	// a superseded delete deletes nothing and finishes as DeleteResourceIfSeq
-	// does when stale_seq moved.
-	BeginDelete(ctx context.Context, resource model.Resource, staleSeq, token int64) (DeleteBegun, error)
+	// reports the delete superseded only when the row is no longer a
+	// tombstone (a recreate) or is gone (a finished delete). A mark that
+	// moved stale_seq and kept the row deleted — a Parent mark, a MarkStale,
+	// a newer delete — does not supersede it: the delete runs at the bump,
+	// and its finish (DeleteResourceIfSeq) sees the moved mark and hands on
+	// the follow-up. A superseded delete deletes nothing and finishes as
+	// DeleteResourceIfSeq does when stale_seq moved.
+	BeginDelete(ctx context.Context, resource model.Resource, token int64) (DeleteBegun, error)
 	// RenewOwners renews the lease of every given ownership whose token is
 	// still the row's owner token, leaves the others alone, and returns the
 	// renewed ones: the ownerships still held. One it didn't renew is lost —
@@ -146,8 +149,9 @@ type DeleteBegun struct {
 	// Elasticsearch deletes and the bound of its edge removal; 0 when
 	// Superseded.
 	BuildIdx int64
-	// Superseded reports that the delete must not run: a newer mark, a
-	// recreate or a finished delete got to the row first.
+	// Superseded reports that the delete must not run: a recreate or a
+	// finished delete got to the row first. A newer mark that kept the row
+	// deleted does not supersede it.
 	Superseded bool
 }
 

@@ -314,10 +314,10 @@ func (b *deleteCountingBackend) deleteCalls(docID string) int {
 //     lets the mark claim the row under a new owner token, and the
 //     recreate's owned build R begins at N+1, writes the "new" document,
 //     stores the edge set a/1 -> b/x and finishes, clearing the mark.
-//  4. D is released into BeginDelete: stale_seq is no longer D's and the row
-//     is no longer a tombstone, so D is superseded and aborts. It issues no
-//     ES delete and removes no edges, and as it no longer owns the row, its
-//     finish neither re-claims it nor submits a follow-up.
+//  4. D is released into BeginDelete: the row is no longer a tombstone, so
+//     D is superseded and aborts. It issues no ES delete and removes no
+//     edges, and as it no longer owns the row, its finish neither re-claims
+//     it nor submits a follow-up.
 //
 // Without the abort D would bump the Build Sequence to N+2, above R's N+1,
 // and its versioned ES delete and bounded edge removal would both be

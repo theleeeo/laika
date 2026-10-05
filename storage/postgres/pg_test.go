@@ -1081,7 +1081,7 @@ func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	res := model.Resource{Type: "bd4", Id: "1"}
-	seq := tombstone(t, st, res)
+	tombstone(t, st, res)
 	g := lockRow(t, testPool, res)
 	var written int64
 	if err := g.tx.QueryRow(ctx,
@@ -1095,7 +1095,7 @@ func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		d, err := st.BeginDelete(ctx, res, seq, 0)
+		d, err := st.BeginDelete(ctx, res, 0)
 		done <- result{d, err}
 	}()
 	g.waitForWaiters(t, 1)
@@ -2565,9 +2565,9 @@ func TestRecreate_FirstNumbersAreAboveEveryNumberOfTheDeletedRow(t *testing.T) {
 }
 
 // beginDelete runs BeginDelete and fails the test on error.
-func beginDelete(t *testing.T, st *Store, res model.Resource, staleSeq, token int64) core.DeleteBegun {
+func beginDelete(t *testing.T, st *Store, res model.Resource, token int64) core.DeleteBegun {
 	t.Helper()
-	got, err := st.BeginDelete(context.Background(), res, staleSeq, token)
+	got, err := st.BeginDelete(context.Background(), res, token)
 	if err != nil {
 		t.Fatalf("BeginDelete %s/%s: %v", res.Type, res.Id, err)
 	}
@@ -2594,13 +2594,13 @@ func tombstone(t *testing.T, st *Store, res model.Resource) int64 {
 func TestBeginDelete_BumpsTheBuildSequenceOfATombstone(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "bd1", Id: "1"}
-	seq := tombstone(t, st, res)
+	tombstone(t, st, res)
 	expireOwner(t, testPool, res) // an unrenewed owner_since stays this one
 	earlier := highest(t, res)
 	before := rowJSON(t, res)
 	drawn := start(t, st)
 
-	got := beginDelete(t, st, res, seq, 0)
+	got := beginDelete(t, st, res, 0)
 	if got.Superseded || got.BuildIdx <= earlier || got.BuildIdx <= drawn {
 		t.Fatalf("got %+v, want not superseded, a BuildIdx above every number of the row (%d) and above %d drawn before the call", got, earlier, drawn)
 	}
@@ -2623,7 +2623,7 @@ func TestBeginDelete_RenewsOnlyAMatchingToken(t *testing.T) {
 	_, prev, _, _, _ := row(t, res)
 
 	for _, token := range []int64{tok + 1, 0, tok} {
-		got := beginDelete(t, st, res, tok, token)
+		got := beginDelete(t, st, res, token)
 		if got.Superseded || got.BuildIdx <= prev {
 			t.Fatalf("token %d: got %+v, want not superseded, a BuildIdx above %d", token, got, prev)
 		}
@@ -2635,26 +2635,62 @@ func TestBeginDelete_RenewsOnlyAMatchingToken(t *testing.T) {
 	requireFreshOwner(t, testPool, res, tok)
 }
 
+// A mark that moves a tombstone's stale_seq and keeps it deleted — a Parent
+// mark from a child's registration, a MarkStale — does not supersede its
+// delete: the delete still bumps the Build Sequence above every number the
+// row carries and renews a matching token, and its finish
+// (DeleteResourceIfSeq) sees the moved mark and hands on the follow-up.
+func TestBeginDelete_AMovedMarkOnATombstoneDoesNotSupersede(t *testing.T) {
+	st := NewStore(testPool)
+	for _, tc := range []struct {
+		name, id string
+		move     func(t *testing.T, res model.Resource)
+	}{
+		{"Parent mark", "parent", func(t *testing.T, res model.Resource) {
+			child := model.Resource{Type: "bd5-c", Id: res.Id}
+			got := register(t, st, core.Registration{Resource: child, Version: 1})
+			if len(got.Parents) != 1 || got.Parents[0].Resource != res {
+				t.Fatalf("the child's registration must mark the deleted parent: %+v", got.Parents)
+			}
+		}},
+		{"MarkStale", "marked", func(t *testing.T, res model.Resource) {
+			markUnclaimed(t, st, meta("later"), res)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := model.Resource{Type: "bd5", Id: tc.id}
+			// The parent's edge set, written by an earlier build, is what a
+			// child's registration reaches it through.
+			replace(t, st, res, 1, nil, edgeSet(1, model.Resource{Type: "bd5-c", Id: res.Id}))
+			tok := tombstone(t, st, res)
+			tc.move(t, res)
+			if _, _, seq, _, deleted := row(t, res); seq == tok || !deleted {
+				t.Fatalf("setup: stale_seq %d deleted %v, want a stale_seq moved off %d on a row still deleted", seq, deleted, tok)
+			}
+			expireOwner(t, testPool, res) // a renewal would show
+			high := highest(t, res)
+			_, _, moved, _, _ := row(t, res)
+
+			got := beginDelete(t, st, res, tok)
+			if got.Superseded || got.BuildIdx <= high {
+				t.Fatalf("got %+v, want not superseded, a BuildIdx above every number of the row (%d)", got, high)
+			}
+			if _, idx, seq, _, deleted := row(t, res); idx != got.BuildIdx || seq != moved || !deleted {
+				t.Fatalf("build_idx %d stale_seq %d deleted %v, want the returned BuildIdx %d, the moved mark %d kept, still deleted", idx, seq, deleted, got.BuildIdx, moved)
+			}
+			requireFreshOwner(t, testPool, res, tok)
+		})
+	}
+}
+
+// A delete is superseded only when its row is no longer a tombstone or is
+// gone, and a superseded delete changes nothing; a mark that keeps the
+// tombstone does not supersede it (TestBeginDelete_AMovedMarkOnATombstoneDoesNotSupersede).
 func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	r := func(id string) model.Resource { return model.Resource{Type: "bd3", Id: id} }
 	superseded := core.DeleteBegun{Superseded: true}
-
-	t.Run("stale_seq moved", func(t *testing.T) {
-		res := r("moved")
-		tok := tombstone(t, st, res)
-		markUnclaimed(t, st, meta("later"), res) // a later mark that keeps the tombstone
-		expireOwner(t, testPool, res)            // a renewal would show
-		before := rowJSON(t, res)
-
-		if got := beginDelete(t, st, res, tok, tok); got != superseded {
-			t.Fatalf("got %+v, want %+v", got, superseded)
-		}
-		if after := rowJSON(t, res); !reflect.DeepEqual(after, before) {
-			t.Fatalf("a superseded delete must change nothing:\n before %v\n after  %v", before, after)
-		}
-	})
 
 	t.Run("recreated", func(t *testing.T) {
 		res := r("recreated")
@@ -2663,11 +2699,11 @@ func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
 		if !re.Accepted {
 			t.Fatalf("recreate: %+v, want accepted", re)
 		}
-		expireOwner(t, testPool, res)
+		expireOwner(t, testPool, res) // a renewal would show
 		before := rowJSON(t, res)
 
-		// Even at the live row's current stale_seq: the row is not a tombstone.
-		if got := beginDelete(t, st, res, re.StaleSeq, tok); got != superseded {
+		// Even under the token that still owns the row: it is not a tombstone.
+		if got := beginDelete(t, st, res, tok); got != superseded {
 			t.Fatalf("got %+v, want %+v", got, superseded)
 		}
 		if after := rowJSON(t, res); !reflect.DeepEqual(after, before) {
@@ -2685,7 +2721,7 @@ func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
 			t.Fatal("the finished delete must hard-delete the row")
 		}
 
-		if got := beginDelete(t, st, res, tok, tok); got != superseded {
+		if got := beginDelete(t, st, res, tok); got != superseded {
 			t.Fatalf("got %+v, want %+v", got, superseded)
 		}
 		if exists(t, res) {
@@ -2695,7 +2731,7 @@ func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
 
 	t.Run("never existed", func(t *testing.T) {
 		res := r("never")
-		if got := beginDelete(t, st, res, start(t, st), 0); got != superseded {
+		if got := beginDelete(t, st, res, 0); got != superseded {
 			t.Fatalf("got %+v, want %+v", got, superseded)
 		}
 		if exists(t, res) {

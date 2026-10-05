@@ -232,6 +232,101 @@ func (t *TestSuite) Test_Owner_DeleteHeldBeforeESDelete_RecreateBuildsAfterIt() 
 	t.Require().Equal("rv2", fields["field1"])
 }
 
+// Test_Owner_DeletedParentMarkedByItsChild_IsDeletedByItsDelete: a/1 with
+// child b/x is created and built on X, then removed at the source and its
+// ChangeDeleted registered on X. Its edge a/1 -> b/x stays until a delete
+// removes it, so every change of b/x marks the tombstone as b/x's Parent. The
+// interleaving, forced through the gated store:
+//
+//  1. X claims the tombstone and its owned delete D is held on entry to
+//     BeginDelete.
+//  2. b/x changes, and its registration marks a/1 through the edge: stale_seq
+//     moves, the row stays a tombstone, and D still owns it.
+//  3. D is released; the gate is re-armed for the next BeginDelete of a/1.
+//     D deletes a/1's document and its edges at its bump, and its finish
+//     (DeleteResourceIfSeq) sees the moved mark and hands on a follow-up
+//     delete F, held on entry to BeginDelete. At this point a/1 must be gone
+//     from Elasticsearch and its edges removed: D did the delete.
+//  4. b/x changes again, marking a/1 again, and F is released: F deletes
+//     again at its own bump, hands on one more follow-up, and that one,
+//     with no change after it, hard-deletes the row.
+//
+// Before, a delete whose tombstone's mark moved was superseded and deleted
+// nothing, edges included: under steady child traffic every delete round was
+// superseded by the next Parent mark and a/1 stayed searchable.
+func (t *TestSuite) Test_Owner_DeletedParentMarkedByItsChild_IsDeletedByItsDelete() {
+	t.setResourceConfig(DefaultResourceConfig)
+	ctx := t.T().Context()
+	a1 := model.Resource{Type: "a", Id: "1"}
+
+	gated := newGatingStore(t.store)
+	x := t.newIndexer(DefaultResourceConfig, core.Config{Store: gated})
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	t.createAWithChildBX(x, waitCtx)
+
+	// childChanges registers a change of b/x on the suite's indexer, not X,
+	// whose WaitForIdle would wait on the held delete, and requires it to
+	// have marked the tombstone a/1 as its Parent, leaving it to its owner.
+	bxVersion := int64(1)
+	childChanges := func() {
+		before := t.staleSeq("a", "1")
+		owner, _ := t.ownerColumns("a", "1")
+		bxVersion++
+		t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+			ResourceType: "b", ResourceID: "x", Kind: core.ChangeUpdated, Version: bxVersion,
+		}))
+		t.worker.Drain(ctx)
+		t.Require().Greater(t.staleSeq("a", "1"), before, "b/x's registration marks a/1 through the edge a/1 -> b/x")
+		var deleted bool
+		t.Require().NoError(t.pool.QueryRow(ctx,
+			`SELECT deleted FROM resources WHERE type='a' AND id='1'`).Scan(&deleted))
+		t.Require().True(deleted, "the Parent mark keeps a/1 a tombstone")
+		after, _ := t.ownerColumns("a", "1")
+		t.Require().Equal(owner, after, "the Parent mark leaves a/1 to the delete that owns it")
+	}
+
+	// 1. D is held on entry to BeginDelete. The deferred release frees a
+	// delete still held when the test fails, before AfterTest and X's
+	// shutdown.
+	reached := gated.armBeginDelete(a1)
+	defer gated.releaseBeginDelete()
+	t.fakeProvider.DeleteResource("a", "1")
+	t.Require().NoError(x.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeDeleted,
+	}))
+	t.awaitGate(reached, "D, the owned delete of a/1, to reach BeginDelete")
+
+	// 2. The child marks the tombstone.
+	childChanges()
+
+	// 3. D runs; its follow-up F is held.
+	reached = gated.passBeginDelete()
+	t.awaitGate(reached, "F, D's follow-up delete of a/1, to reach BeginDelete")
+	t.Require().False(t.docExists("a", "1"), "D, whose tombstone a child marked, must still delete a/1's document")
+	_, ok := t.docFields(core.IndexName("a", 1), "1")
+	t.Require().False(ok, "D must delete a/1's document from every version's index")
+	t.Require().Empty(t.childEdges("a", "1"), "D must remove a/1's edges")
+	t.Require().Equal(1, gated.removeCalls(a1), "D removed a/1's edges")
+	t.Require().Equal(1, t.resourceRowCount("a", "1"), "D's finish keeps the tombstone for F: its mark moved")
+
+	// 4. The child marks the tombstone again; F runs, and the follow-up it
+	// hands on finishes the delete.
+	childChanges()
+	gated.releaseBeginDelete()
+	t.Require().NoError(x.WaitForIdle(waitCtx))
+
+	t.Require().Equal(3, gated.removeCalls(a1), "F and its follow-up each removed a/1's edges again")
+	t.Require().Equal(0, t.resourceRowCount("a", "1"), "the last follow-up, with no change after it, hard-deletes a/1's row")
+	t.Require().False(t.docExists("a", "1"), "a/1 stays deleted")
+	t.Require().Empty(t.childEdges("a", "1"), "a/1's edges stay removed")
+	var relations int
+	t.Require().NoError(t.pool.QueryRow(ctx,
+		`SELECT count(*) FROM relations WHERE resource='a' AND resource_id='1'`).Scan(&relations))
+	t.Require().Zero(relations, "no relations row of a/1 is left")
+}
+
 // Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired: an instance claims a/1
 // (MarkStale with a lease) and crashes before submitting. A sweep while the
 // claim's lease is live skips a/1: it builds nothing. Once the lease has
