@@ -1,6 +1,8 @@
 package server
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -79,6 +81,16 @@ func TestNotifyChangeBatch_NilNotification_InvalidArgument(t *testing.T) {
 		Notifications: []*index.ChangeNotification{{ResourceType: "a", ResourceId: "1"}, nil},
 	}))
 	require.Equal(t, connect.CodeInvalidArgument, connect.CodeOf(err))
+}
+
+func TestMapAppError_RegistrationAborted(t *testing.T) {
+	// As the Indexer returns it: the Store's wrap of the Postgres error, wrapped again.
+	err := mapAppError(fmt.Errorf("registering 2 changes: %w: %w", core.ErrRegistrationAborted, errors.New("deadlock detected (SQLSTATE 40P01)")))
+
+	var connectErr *connect.Error
+	require.ErrorAs(t, err, &connectErr)
+	require.Equal(t, connect.CodeAborted, connectErr.Code())
+	require.Equal(t, "registration aborted by a concurrent change; retry it", connectErr.Message())
 }
 
 func TestMapAppError_InvalidArgument(t *testing.T) {

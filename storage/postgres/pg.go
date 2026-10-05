@@ -13,6 +13,7 @@ import (
 	"github.com/theleeeo/laika/model"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -235,12 +236,12 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 
 // RegisterChanges records a batch of changes in one statement, so each
 // accepted item's version, its stale mark and its Parents' marks commit
-// together or not at all. Before writing, it locks the existing rows it may
-// mark — the items and their Parents — in (type, id) order, as MarkStale and
-// the owner statements lock theirs, so none of them deadlock over existing
-// rows; it upserts the items in that order too, which narrows the one case no
-// lock covers, new rows two statements insert at once. The item upsert's
-// WHERE is the stale-version check: a delete or a version-0 item is always
+// together or not at all. Before writing, it locks the rows it may mark —
+// the items and their Parents — in (type, id) order, as MarkStale and the
+// owner statements lock theirs, so none of them deadlock over rows that exist
+// when the statement starts. Rows created or removed concurrently can still
+// deadlock it, and it then returns core.ErrRegistrationAborted (seam S4).
+// The item upsert's WHERE is the stale-version check: a delete or a version-0 item is always
 // accepted, a versioned one only when strictly newer. Parents are found from
 // the accepted items only, so a stale item marks nothing; accepted in-batch
 // items are excluded from the Parent mark because one statement may modify a
@@ -347,7 +348,7 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		types, ids, deleted, versions, metaJSON, lease.Microseconds(),
 	)
 	if err != nil {
-		return core.Registered{}, err
+		return core.Registered{}, abortedRegistration(err)
 	}
 	defer rows.Close()
 
@@ -374,9 +375,19 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		out.Items[*ord-1] = core.RegisteredItem{Accepted: true, StaleSeq: *staleSeq, Token: token}
 	}
 	if err := rows.Err(); err != nil {
-		return core.Registered{}, err
+		return core.Registered{}, abortedRegistration(err)
 	}
 	return out, nil
+}
+
+// abortedRegistration wraps a deadlock abort (SQLSTATE 40P01) as
+// core.ErrRegistrationAborted, keeping the Postgres error; any other error
+// is returned as it is.
+func abortedRegistration(err error) error {
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "40P01" {
+		return fmt.Errorf("%w: %w", core.ErrRegistrationAborted, err)
+	}
+	return err
 }
 
 var _ core.Store = (*Store)(nil)
@@ -413,9 +424,9 @@ const lockedInput = `locked AS MATERIALIZED (
 //
 // A lease above zero also claims each row without a live owner, as
 // RegisterChanges does, and returns those; a lease of zero leaves the owner
-// columns alone and returns nil. Either way the existing rows are locked in
-// (type, id) order before any is marked, so concurrent marks and
-// registrations don't deadlock.
+// columns alone and returns nil. Either way the rows are locked in (type, id)
+// order before any is marked, so it doesn't deadlock over rows that exist when
+// it starts; rows created or removed concurrently still can (seam S4).
 func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -510,7 +521,7 @@ func ownedArrays(owned []core.Owned) (types, ids []string, tokens []int64) {
 
 // RenewOwners renews the lease of every given ownership whose token is still
 // the row's owner token and returns those: the ownerships still held. It
-// locks the rows in (type, id) order first, so it can't deadlock with a mark.
+// locks the rows in (type, id) order first, as the marks do (seam S4).
 func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Owned, error) {
 	if len(owned) == 0 {
 		return nil, nil
@@ -544,7 +555,7 @@ func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Own
 
 // ReleaseOwners drops every given ownership whose token is still the row's
 // owner token. The stale mark stays for the next change or the sweep. It
-// locks the rows in (type, id) order first, so it can't deadlock with a mark.
+// locks the rows in (type, id) order first, as the marks do (seam S4).
 func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 	if len(owned) == 0 {
 		return nil

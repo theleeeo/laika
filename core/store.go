@@ -2,10 +2,17 @@ package core
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/theleeeo/laika/model"
 )
+
+// ErrRegistrationAborted is returned by Store.RegisterChanges when a
+// concurrent statement made the Store abort the registration, as Postgres
+// aborts one of two statements that deadlock: nothing of it was committed and
+// it can be retried whole.
+var ErrRegistrationAborted = errors.New("registration aborted")
 
 type Store interface {
 	GetChildResources(ctx context.Context, parentResource model.Resource) ([]model.Resource, error)
@@ -33,7 +40,9 @@ type Store interface {
 	// each accepted item's version (or tombstone), stale mark and metadata,
 	// and the stale marks of the accepted items' Parents, commit together or
 	// not at all. See Registration for what is accepted. The items must name
-	// distinct resources; the caller validates that.
+	// distinct resources; the caller validates that. A registration aborted
+	// over a concurrent statement returns an error wrapping
+	// ErrRegistrationAborted.
 	//
 	// Every row it marks — accepted items and Parents — is claimed in the
 	// same update when it has no owner or its owner's lease (lease, measured

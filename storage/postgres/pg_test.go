@@ -1343,6 +1343,60 @@ func TestRegisterChanges_ItemsThatAreEachOthersParentsDoNotDeadlock(t *testing.T
 	}
 }
 
+// A row no statement saw at its start can't be locked in order, so two
+// registrations can still deadlock over new rows: x and y, each the other's
+// Parent, without resources rows. A gate holds an uncommitted insert of z.
+// The registration of y and z inserts y and queues behind the gate on z; the
+// registration of x inserts x and queues behind y's insert to mark y. Once
+// the gate commits, the first marks x, which the second holds, and Postgres
+// aborts one of them: that one returns core.ErrRegistrationAborted.
+func TestRegisterChanges_ADeadlockOverNewRowsReturnsErrRegistrationAborted(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1))
+	x, y, z := model.Resource{Type: "dn-x", Id: id}, model.Resource{Type: "dn-y", Id: id}, model.Resource{Type: "dn-z", Id: id}
+	relate(t, [2]model.Resource{x, y}, [2]model.Resource{y, x})
+
+	g := openGate(t, testPool, `INSERT INTO resources (type, id) VALUES ($1, $2) RETURNING pg_backend_pid()`, z.Type, z.Id)
+	errs := make(chan error, 2)
+	register := func(items ...model.Resource) {
+		regs := make([]core.Registration, len(items))
+		for i, res := range items {
+			regs[i] = core.Registration{Resource: res, Version: 1}
+		}
+		go func() {
+			_, err := st.RegisterChanges(ctx, regs, time.Minute)
+			errs <- err
+		}()
+	}
+	register(y, z)
+	g.waitForWaiters(t, 1)
+	register(x)
+	g.waitForWaiters(t, 2)
+	g.release()
+
+	var aborted []error
+	for range 2 {
+		select {
+		case err := <-errs:
+			if err != nil {
+				aborted = append(aborted, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a registration did not finish after the gate committed")
+		}
+	}
+	if len(aborted) != 1 {
+		t.Fatalf("errors %v: want exactly one registration aborted", aborted)
+	}
+	if !errors.Is(aborted[0], core.ErrRegistrationAborted) {
+		t.Fatalf("error %v: want it to wrap core.ErrRegistrationAborted", aborted[0])
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](aborted[0]); !ok || pgErr.Code != "40P01" {
+		t.Fatalf("error %v: want the Postgres deadlock error kept", aborted[0])
+	}
+}
+
 func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)

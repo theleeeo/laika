@@ -94,6 +94,9 @@ func mapAppError(err error) error {
 	if errors.Is(err, core.ErrStaleVersion) {
 		return connect.NewError(connect.CodeFailedPrecondition, errors.New("stale version"))
 	}
+	if errors.Is(err, core.ErrRegistrationAborted) {
+		return connect.NewError(connect.CodeAborted, errors.New("registration aborted by a concurrent change; retry it"))
+	}
 	if invalidArgsErr, ok := errors.AsType[*core.InvalidArgumentError](err); ok {
 		return connect.NewError(connect.CodeInvalidArgument, errors.New(invalidArgsErr.Msg))
 	}
