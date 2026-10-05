@@ -43,7 +43,10 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq
 		return fmt.Errorf("clean up relations for %s/%s: %w", p.ResourceType, p.ResourceID, err)
 	}
 
-	logger.Info("deleted document")
+	// Elasticsearch rejects a delete below a newer document's version and
+	// SearchBackend.Delete returns nil for it, so this claims no deletion: the
+	// ES client logs each document it actually deleted.
+	logger.Info("delete path finished", slog.Int64("buildSeq", buildSeq))
 	return nil
 }
 
