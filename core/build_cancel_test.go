@@ -50,8 +50,8 @@ func (s *cancellingStore) BeginDelete(context.Context, model.Resource, int64) (D
 	return DeleteBegun{}, nil
 }
 
-func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int) error {
-	return nil
+func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int, map[string]string) (map[string]string, error) {
+	return nil, nil
 }
 func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil

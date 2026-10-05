@@ -391,7 +391,11 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 	}
 	return err
 }
-func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
+func (s *recordingStore) ReplaceEdges(ctx context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, _ map[string]string) (map[string]string, error) {
+	return nil, s.replaceEdges(ctx, r, buildSeq, sets, declared)
+}
+
+func (s *recordingStore) replaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
 	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: sets, declared: declared}
 	s.mu.Lock()
 	s.recordLocked("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq)

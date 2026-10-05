@@ -23,8 +23,15 @@ type BuildRequest struct {
 // BuildDoc is the intermediate document flowing through the aggregation plan.
 // It carries the final doc, the resolved data for chained relations, and root info.
 type BuildDoc struct {
-	Root     model.Resource
+	Root model.Resource
+	// Metadata is the fetch context flowing down the plan: the request's,
+	// which relation fetches decorate with. It is not the resource's own.
 	Metadata map[string]string
+	// ResourceMetadata is the resource's own metadata as the plan reports it
+	// — the actor a later build of the resource fetches as — or nil when the
+	// plan doesn't know. Core stores it as the resource's row metadata when
+	// the row has none; see core.Store.ReplaceEdges.
+	ResourceMetadata map[string]string
 
 	Doc      map[string]any
 	Resolved map[string][]map[string]any

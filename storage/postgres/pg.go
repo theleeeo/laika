@@ -157,7 +157,11 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 // version 2, stamped 10 and undeclared. That is harmless: the leftover set
 // only adds edges — extra fanout to this resource — until the next live
 // build, which declares its versions, prunes it.
-func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
+func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
+	return nil, s.replaceEdges(ctx, resource, buildSeq, sets, declared)
+}
+
+func (s *Store) replaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
 	children := make(map[int][]model.Resource, len(sets))
 	for _, set := range sets {
 		if _, dup := children[set.SchemaVersion]; dup {

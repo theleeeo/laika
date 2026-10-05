@@ -39,7 +39,17 @@ type Store interface {
 	// below buildSeq are dropped with their edges. The live build, which runs
 	// every configured plan, passes the config's versions; a rebuild passes
 	// nil.
-	ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error
+	//
+	// reported is the resource's own metadata as the build's plans report it
+	// (projection.BuildDoc.ResourceMetadata). When it is non-empty, the same
+	// transaction stores it as the resource row's metadata if the row has
+	// none (NULL or empty), whatever the Build Sequence guard decided for the
+	// sets; metadata the row holds — a registration's, or an earlier report —
+	// is never overwritten. A nil or empty reported writes nothing. A row
+	// that is gone is not recreated. It returns the row's metadata as the
+	// transaction leaves it, nil when the row has none or is gone: the
+	// resource's own metadata, which the build's drift re-mark carries.
+	ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) (map[string]string, error)
 
 	// RegisterChanges records a batch of changes in one atomic statement:
 	// each accepted item's version (or tombstone), stale mark and metadata,

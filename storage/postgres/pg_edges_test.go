@@ -101,10 +101,17 @@ func requireSets(t *testing.T, res model.Resource, want map[int]stored) {
 	}
 }
 
+// replaceErr runs ReplaceEdges with no reported metadata and returns only its
+// error.
+func replaceErr(ctx context.Context, st *Store, res model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int) error {
+	_, err := st.ReplaceEdges(ctx, res, buildSeq, sets, declared, nil)
+	return err
+}
+
 // replace runs ReplaceEdges and fails the test on error.
 func replace(t *testing.T, st *Store, res model.Resource, buildSeq int64, declared []int, sets ...core.EdgeSet) {
 	t.Helper()
-	if err := st.ReplaceEdges(context.Background(), res, buildSeq, sets, declared); err != nil {
+	if _, err := st.ReplaceEdges(context.Background(), res, buildSeq, sets, declared, nil); err != nil {
 		t.Fatalf("ReplaceEdges %s/%s at %d: %v", res.Type, res.Id, buildSeq, err)
 	}
 }
@@ -184,7 +191,7 @@ func TestReplaceEdges_RejectsAVersionNamedTwice(t *testing.T) {
 	c := func(id string) model.Resource { return model.Resource{Type: "re6c", Id: id} }
 	p := model.Resource{Type: "re6", Id: "p"}
 
-	err := st.ReplaceEdges(context.Background(), p, 5, []core.EdgeSet{edgeSet(1, c("a")), edgeSet(2), edgeSet(1, c("b"))}, nil)
+	_, err := st.ReplaceEdges(context.Background(), p, 5, []core.EdgeSet{edgeSet(1, c("a")), edgeSet(2), edgeSet(1, c("b"))}, nil, nil)
 	if err == nil {
 		t.Fatal("a sets slice naming version 1 twice must be rejected")
 	}
@@ -362,7 +369,7 @@ func TestReplaceEdges_ConcurrentReplacesEndWithTheHigherSequencesSet(t *testing.
 			children := map[int64]model.Resource{10: c("lo"), 20: c("hi")}
 			call := func(seq int64) func() error {
 				return func() error {
-					return st.ReplaceEdges(ctx, p, seq, []core.EdgeSet{edgeSet(1, children[seq], c("shared"))}, nil)
+					return replaceErr(ctx, st, p, seq, []core.EdgeSet{edgeSet(1, children[seq], c("shared"))}, nil)
 				}
 			}
 
@@ -386,8 +393,8 @@ func TestReplaceEdges_DifferentDeclaredSetsDoNotDeadlock(t *testing.T) {
 
 	// X queues on version 2 first: it replaces 2 at 10 and drops 3
 	// (stamped 1). Y then drops 2 (stamped 10, not above 11) and stores 3.
-	x := func() error { return st.ReplaceEdges(ctx, p, 10, []core.EdgeSet{edgeSet(2, c("x"))}, []int{2}) }
-	y := func() error { return st.ReplaceEdges(ctx, p, 11, []core.EdgeSet{edgeSet(3, c("y"))}, []int{3}) }
+	x := func() error { return replaceErr(ctx, st, p, 10, []core.EdgeSet{edgeSet(2, c("x"))}, []int{2}) }
+	y := func() error { return replaceErr(ctx, st, p, 11, []core.EdgeSet{edgeSet(3, c("y"))}, []int{3}) }
 	queueBehind(t, lockEdgeSet(t, p, 2), x, y)
 
 	requireSets(t, p, map[int]stored{3: stamped(11, c("y"))})
@@ -431,7 +438,7 @@ func TestRemoveResource_DoesNotDeadlockWithAReplace(t *testing.T) {
 	// The replace queues on version 1 first, writes both versions and
 	// commits; the remove then removes both.
 	rep := func() error {
-		return st.ReplaceEdges(ctx, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
+		return replaceErr(ctx, st, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
 	}
 	rm := func() error { return st.RemoveResource(ctx, p, math.MaxInt64) }
 	queueBehind(t, lockEdgeSet(t, p, 1), rep, rm)
@@ -452,7 +459,7 @@ func TestRemoveResource_DoesNotDeadlockWithAReplaceHoldingTheLowerVersion(t *tes
 	replace(t, st, p, 1, nil, edgeSet(1, c("a")), edgeSet(2, c("b")))
 
 	rep := func() error {
-		return st.ReplaceEdges(ctx, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
+		return replaceErr(ctx, st, p, 5, []core.EdgeSet{edgeSet(2, c("y")), edgeSet(1, c("x"))}, nil)
 	}
 	rm := func() error { return st.RemoveResource(ctx, p, math.MaxInt64) }
 	queueBehind(t, lockEdgeSet(t, p, 2), rep, rm)
@@ -483,7 +490,7 @@ func TestReplaceEdgesAndRemoveResource_WaitUnderARepeatableReadDefault(t *testin
 	st := repeatableReadStore(t)
 	c := func(id string) model.Resource { return model.Resource{Type: "re15c", Id: id} }
 	repAt := func(p model.Resource, seq int64, child string) func() error {
-		return func() error { return st.ReplaceEdges(ctx, p, seq, []core.EdgeSet{edgeSet(1, c(child))}, nil) }
+		return func() error { return replaceErr(ctx, st, p, seq, []core.EdgeSet{edgeSet(1, c(child))}, nil) }
 	}
 
 	t.Run("replace behind a replace", func(t *testing.T) {

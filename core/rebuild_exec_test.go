@@ -354,7 +354,11 @@ func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource,
 	return FollowUp{}, nil
 }
 
-func (s *rebuildRecordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
+func (s *rebuildRecordingStore) ReplaceEdges(ctx context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, _ map[string]string) (map[string]string, error) {
+	return nil, s.replaceEdges(ctx, r, buildSeq, sets, declared)
+}
+
+func (s *rebuildRecordingStore) replaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, fmt.Sprintf("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq))

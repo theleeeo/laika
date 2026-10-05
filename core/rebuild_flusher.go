@@ -324,7 +324,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			at[it.version] = len(sets)
 			sets = append(sets, set)
 		}
-		if err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil); err != nil {
+		if _, err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil, nil); err != nil {
 			// The replace may have failed because the walk's context ended;
 			// fail marks on a detached context all the same.
 			slog.Warn("failed to replace edges; failing the resource", slog.String("id", id), slog.String("error", err.Error()))

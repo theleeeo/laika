@@ -241,7 +241,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	for i, p := range plans {
 		declared[i] = p.Version
 	}
-	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared); err != nil {
+	if _, err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, nil); err != nil {
 		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
