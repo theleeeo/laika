@@ -1076,19 +1076,17 @@ func TestBeginBuild_ARowCreatedWhileItWaitsGetsAHigherBuildIdx(t *testing.T) {
 
 // BeginDelete's UPDATE that waited for a concurrent write of its tombstone
 // re-evaluates against the committed row, drawing its value then: it lands
-// above the number that write left.
+// above the number that write left. The gate locks the tombstone first;
+// BeginDelete starts and queues behind it; only then does the gate draw a
+// number into build_idx, keeping the row a tombstone, and commit. A
+// BeginDelete that drew its value before it waited would hold a number
+// below the gate's.
 func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	res := model.Resource{Type: "bd4", Id: "1"}
 	tombstone(t, st, res)
 	g := lockRow(t, testPool, res)
-	var written int64
-	if err := g.tx.QueryRow(ctx,
-		`UPDATE resources SET build_idx = nextval('change_sequence') WHERE type=$1 AND id=$2 RETURNING build_idx`,
-		res.Type, res.Id).Scan(&written); err != nil {
-		t.Fatalf("write in the gate: %v", err)
-	}
 	type result struct {
 		d   core.DeleteBegun
 		err error
@@ -1099,6 +1097,12 @@ func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
 		done <- result{d, err}
 	}()
 	g.waitForWaiters(t, 1)
+	var written int64
+	if err := g.tx.QueryRow(ctx,
+		`UPDATE resources SET build_idx = nextval('change_sequence') WHERE type=$1 AND id=$2 AND deleted RETURNING build_idx`,
+		res.Type, res.Id).Scan(&written); err != nil {
+		t.Fatalf("write in the gate: %v", err)
+	}
 	g.release()
 	select {
 	case got := <-done:
@@ -1107,6 +1111,9 @@ func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
 		}
 		if got.d.Superseded || got.d.BuildIdx <= written {
 			t.Fatalf("got %+v, want not superseded, a BuildIdx above %d the waited-for write left", got.d, written)
+		}
+		if _, idx, _, _, deleted := row(t, res); idx != got.d.BuildIdx || !deleted {
+			t.Fatalf("build_idx %d deleted %v, want the returned BuildIdx %d on a tombstone", idx, deleted, got.d.BuildIdx)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("BeginDelete did not finish after the gate committed")
@@ -2429,9 +2436,10 @@ func highest(t *testing.T, res model.Resource) int64 {
 }
 
 // retire gives res a history — registrations with and without a claim,
-// builds, a MarkStale — then tombstones it and hard-deletes it as an owned
-// delete finishes. It returns the greatest number the row carried or a call
-// returned for it.
+// builds, a MarkStale — then tombstones it, bumps its Build Sequence with
+// BeginDelete and hard-deletes it, as an owned delete runs. The bump is the
+// row's last and highest number. It returns the greatest number the row
+// carried or a call returned for it.
 func retire(t *testing.T, st *Store, res model.Resource) int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -2462,6 +2470,12 @@ func retire(t *testing.T, st *Store, res model.Resource) int64 {
 		t.Fatalf("retire %v: the delete must claim the row after the lease expired: %+v", res, del)
 	}
 	see(del.StaleSeq, del.Token, highest(t, res))
+
+	bump := beginDelete(t, st, res, del.Token)
+	if bump.Superseded || bump.BuildIdx <= high {
+		t.Fatalf("retire %v: BeginDelete %+v, want not superseded, a BuildIdx above every earlier number %d", res, bump, high)
+	}
+	see(bump.BuildIdx, highest(t, res))
 
 	f, err := st.DeleteResourceIfSeq(ctx, res, del.StaleSeq, del.Token)
 	if err != nil {
