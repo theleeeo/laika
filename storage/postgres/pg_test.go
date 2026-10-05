@@ -42,7 +42,15 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "postgres endpoint: %v\n", err)
 		os.Exit(1)
 	}
-	pool, err := pgxpool.New(ctx, fmt.Sprintf("postgres://user:pass@%s/indexer", endpoint))
+	cfg, err := pgxpool.ParseConfig(fmt.Sprintf("postgres://user:pass@%s/indexer", endpoint))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pgxpool config: %v\n", err)
+		os.Exit(1)
+	}
+	// A gate test holds gates and blocked statements while it polls on
+	// another connection; the default max(4, NumCPU) can starve that poll.
+	cfg.MaxConns = 16
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pgxpool: %v\n", err)
 		os.Exit(1)
@@ -1133,10 +1141,13 @@ func waitBehindGates(t *testing.T, n int, gates ...*gate) {
 	for i, g := range gates {
 		pids[i] = g.pid
 	}
-	deadline := time.Now().Add(10 * time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
 	for {
 		var got int
-		if err := testPool.QueryRow(context.Background(),
+		// The deadline bounds the wait for a pool connection too.
+		if err := testPool.QueryRow(ctx,
 			`WITH RECURSIVE w(pid) AS (
 			     SELECT pid FROM pg_stat_activity WHERE pg_blocking_pids(pid) && $1::int[]
 			     UNION
