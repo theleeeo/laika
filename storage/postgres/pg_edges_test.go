@@ -207,6 +207,47 @@ func TestRemoveResource_RemovesEveryVersionsEdgesAndSets(t *testing.T) {
 	requireSets(t, q, map[int]stored{1: stamped(5, c("a"))})
 }
 
+// A delete removes only the edge sets its Build Sequence covers: a set
+// stamped above it was written by a newer build, of a recreate, and stays
+// with its edges, as ReplaceEdges leaves a set stamped above its build.
+func TestRemoveResource_RemovesOnlySetsStampedAtOrBelowItsSequence(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	c := func(id string) model.Resource { return model.Resource{Type: "re16c", Id: id} }
+	p := model.Resource{Type: "re16", Id: "p"}
+	replace(t, st, p, 10, nil, edgeSet(1, c("a"), c("b")))
+	replace(t, st, p, 30, nil, edgeSet(2, c("b"), c("c")))
+	remove := func(buildSeq int64) {
+		t.Helper()
+		if err := st.RemoveResource(ctx, p, buildSeq); err != nil {
+			t.Fatalf("RemoveResource at %d: %v", buildSeq, err)
+		}
+	}
+
+	remove(5)
+	requireSets(t, p, map[int]stored{1: stamped(10, c("a"), c("b")), 2: stamped(30, c("b"), c("c"))})
+
+	remove(20)
+	requireSets(t, p, map[int]stored{2: stamped(30, c("b"), c("c"))})
+	children, err := st.GetChildResources(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sortResources(children)
+	if want := []model.Resource{c("b"), c("c")}; !reflect.DeepEqual(children, want) {
+		t.Errorf("children of p: got %v, want %v: version 2's alone", children, want)
+	}
+	if parents, err := st.GetParentResources(ctx, c("a")); err != nil || len(parents) != 0 {
+		t.Errorf("parents of a: got %v (%v), want none: version 1's edge is gone", parents, err)
+	}
+	if parents, err := st.GetParentResources(ctx, c("b")); err != nil || !reflect.DeepEqual(parents, []model.Resource{p}) {
+		t.Errorf("parents of b: got %v (%v), want p through version 2", parents, err)
+	}
+
+	remove(30)
+	requireSets(t, p, map[int]stored{})
+}
+
 func TestGetParentAndChildResources_ReturnTheUnionAcrossVersions(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
@@ -243,11 +284,15 @@ func TestRegisterChanges_MarksAParentOnceWhenTwoVersionsHoldTheEdge(t *testing.T
 
 	got := register(t, st, core.Registration{Resource: child, Version: 1, Metadata: meta("c")})
 
-	if _, _, seq, since, _ := row(t, p); seq != 1 || since == nil {
-		t.Errorf("Parent must be marked exactly once: stale_seq=%d (want 1) since=%v", seq, since)
+	// Marking p once per edge would fail the statement: ON CONFLICT DO UPDATE
+	// cannot affect a row twice. One entry in Parents, claimed under the
+	// row's new stale_seq, is the one mark.
+	_, _, seq, since, _ := row(t, p)
+	if seq <= 0 || since == nil {
+		t.Errorf("Parent must be marked: stale_seq=%d since=%v", seq, since)
 	}
-	if len(got.Parents) != 1 || got.Parents[0].Resource != p {
-		t.Errorf("Parents: got %+v, want p once", got.Parents)
+	if len(got.Parents) != 1 || got.Parents[0].Resource != p || got.Parents[0].Token != seq {
+		t.Errorf("Parents: got %+v, want p once, claimed with its stale_seq %d", got.Parents, seq)
 	}
 }
 

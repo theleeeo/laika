@@ -1,18 +1,23 @@
 -- The Change Sequence: drawn by every RegisterChanges item (an accepted one
--- keeps it as its change_seq), every BeginBuild and every Rebuild walk start
--- (NextChangeSeq). The drift check compares a resource's change_seq with
--- the start of the build that fetched it, so nextval order must be real-time
--- order across sessions (CACHE 1: no per-session blocks) and the sequence
--- must never wrap below existing stamps (NO CYCLE: exhausting it fails
--- registrations loudly).
+-- keeps it as its change_seq and its stale_seq), every other stale mark (a
+-- marked Parent, a MarkStale row: its stale_seq), every BeginBuild (its
+-- build_idx, which is also the build's start), every BeginDelete (its
+-- build_idx) and every Rebuild walk start (NextChangeSeq). The drift check
+-- compares a resource's change_seq with the start of the build that fetched
+-- it, so nextval order must be real-time order across sessions (CACHE 1: no
+-- per-session blocks) and the sequence must never wrap below existing stamps
+-- (NO CYCLE: exhausting it fails registrations loudly). Because build_idx and
+-- stale_seq come from it too, both keep rising across a hard delete and a
+-- recreate of a row: a recreated resource is built above every Elasticsearch
+-- version its old document had, and no token of the old row matches it.
 CREATE SEQUENCE IF NOT EXISTS change_sequence AS bigint INCREMENT BY 1 CACHE 1 NO CYCLE;
 
 CREATE TABLE IF NOT EXISTS resources (
     type VARCHAR NOT NULL,
     id VARCHAR NOT NULL,
     version BIGINT NOT NULL DEFAULT 0,
-    build_idx BIGINT NOT NULL DEFAULT 0,
-    stale_seq BIGINT NOT NULL DEFAULT 0,
+    build_idx BIGINT NOT NULL DEFAULT 0,    -- Build Sequence: Change Sequence value of the last BeginBuild or BeginDelete; 0 = never built
+    stale_seq BIGINT NOT NULL DEFAULT 0,    -- Change Sequence value of the last stale mark; 0 = never marked
     change_seq BIGINT NOT NULL DEFAULT 0,   -- Change Sequence value of the last accepted change; 0 = never changed
     stale_since TIMESTAMPTZ,                -- NULL = clean
     deleted BOOLEAN NOT NULL DEFAULT false,
@@ -37,7 +42,6 @@ CREATE TABLE IF NOT EXISTS relations (
 	related_resource_id VARCHAR NOT NULL,
 	UNIQUE (resource, resource_id, schema_version, related_resource, related_resource_id)
 );
-CREATE INDEX IF NOT EXISTS idx_resource ON relations (resource, resource_id);
 CREATE INDEX IF NOT EXISTS idx_related_resource ON relations (related_resource, related_resource_id);
 
 -- One row per stored edge set: a resource's edges of one Schema Version, as
@@ -53,21 +57,25 @@ CREATE TABLE IF NOT EXISTS edge_sets (
     PRIMARY KEY (type, id, schema_version)
 );
 
--- Keep the Change Sequence ahead of every stamp. A sequence behind the stamps
--- — recreated, RESTARTed, or left behind by a restore of the table alone —
--- would hand out starts below existing change_seq values, and every parent
--- of such a child would drift on every build until it caught up. Raise it to
--- max(change_seq) only when its next value would not exceed that; an empty
--- table, rows that never changed, or a sequence already ahead are left alone,
--- so applying this file never moves the sequence backwards. The next value is
--- last_value + 1 once called, but last_value itself on a fresh or RESTARTed
--- sequence (is_called false).
+-- Keep the Change Sequence ahead of every number drawn from it. A sequence
+-- behind them — recreated, RESTARTed, or left behind by a restore of the
+-- table alone — would hand out starts below existing change_seq values, so
+-- every parent of such a child would drift on every build until it caught
+-- up, and would repeat build_idx and stale_seq values rows already carry: a
+-- build below its document's Elasticsearch version loses its write, and a
+-- repeated stale_seq can match a token or a captured mark it doesn't belong
+-- to. Raise it to the largest change_seq, build_idx or stale_seq only when
+-- its next value would not exceed that; an empty table, rows never changed,
+-- built or marked, or a sequence already ahead are left alone, so applying
+-- this file never moves the sequence backwards. The next value is last_value
+-- + 1 once called, but last_value itself on a fresh or RESTARTed sequence
+-- (is_called false).
 DO $$
 DECLARE
     stamped bigint;
     next_value bigint;
 BEGIN
-    SELECT max(change_seq) INTO stamped FROM resources;
+    SELECT greatest(max(change_seq), max(build_idx), max(stale_seq)) INTO stamped FROM resources;
     SELECT CASE WHEN is_called THEN last_value + 1 ELSE last_value END
         INTO next_value FROM change_sequence;
     IF stamped >= next_value THEN

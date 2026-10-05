@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os"
 	"reflect"
 	"sort"
@@ -107,7 +108,7 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, seq1, since1, _ := row(t, res)
-	if seq1 != 1 || since1 == nil {
+	if seq1 <= 0 || since1 == nil {
 		t.Fatalf("after first mark: seq=%d since=%v", seq1, since1)
 	}
 
@@ -116,8 +117,8 @@ func TestMarkStale_InsertsAndBumps_PreservesOldestTimestamp(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, seq2, since2, _ := row(t, res)
-	if seq2 != 2 {
-		t.Fatalf("after second mark: seq=%d", seq2)
+	if seq2 <= seq1 {
+		t.Fatalf("after second mark: seq=%d, want above the first mark's %d", seq2, seq1)
 	}
 	if !since2.Equal(*since1) {
 		t.Fatalf("stale_since must keep the oldest timestamp: was %v, now %v", since1, since2)
@@ -131,22 +132,25 @@ func TestMarkStale_BatchWithDuplicates(t *testing.T) {
 	other := model.Resource{Type: "msd", Id: "other"}
 
 	// One batch where dup appears TWICE: must not error (ON CONFLICT DO UPDATE
-	// cannot affect the same row twice in one statement without deduping).
+	// cannot affect the same row twice in one statement without deduping), so
+	// the statement marks each row once.
+	before := start(t, st)
 	if _, err := st.MarkStale(ctx, []model.Resource{dup, other, dup}, nil, 0); err != nil {
 		t.Fatalf("MarkStale with duplicate resources in one batch: %v", err)
 	}
+	after := start(t, st)
 
 	_, _, dupSeq, dupSince, _ := row(t, dup)
-	if dupSeq != 1 {
-		t.Fatalf("duplicated resource must count as ONE logical mark: stale_seq=%d", dupSeq)
+	if dupSeq <= before || dupSeq >= after {
+		t.Fatalf("duplicated resource must count as ONE logical mark: stale_seq=%d, want a mark between %d and %d, drawn around the call", dupSeq, before, after)
 	}
 	if dupSince == nil {
 		t.Fatal("duplicated resource must have stale_since set")
 	}
 
 	_, _, otherSeq, otherSince, _ := row(t, other)
-	if otherSeq != 1 || otherSince == nil {
-		t.Fatalf("other resource wrong: seq=%d since=%v", otherSeq, otherSince)
+	if otherSeq <= before || otherSeq >= after || otherSeq == dupSeq || otherSince == nil {
+		t.Fatalf("other resource wrong: seq=%d since=%v, want a mark of its own between %d and %d (dup's is %d)", otherSeq, otherSince, before, after, dupSeq)
 	}
 }
 
@@ -191,16 +195,17 @@ func TestBeginBuild_BumpsBuildIdx_ReturnsStaleSeq(t *testing.T) {
 		t.Fatal(err)
 	}
 	buildIdx, staleSeq := begun.BuildIdx, begun.StaleSeq
-	if buildIdx != 1 || staleSeq != 1 {
-		t.Fatalf("got buildIdx=%d staleSeq=%d, want 1, 1", buildIdx, staleSeq)
+	_, rowIdx, rowSeq, _, _ := row(t, res)
+	if buildIdx <= 0 || buildIdx != rowIdx || staleSeq != rowSeq {
+		t.Fatalf("got buildIdx=%d staleSeq=%d, want the row's build_idx %d (above 0) and stale_seq %d", buildIdx, staleSeq, rowIdx, rowSeq)
 	}
 	begun2, err := st.BeginBuild(ctx, res, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	buildIdx2 := begun2.BuildIdx
-	if buildIdx2 != 2 {
-		t.Fatalf("build_idx must increment: got %d", buildIdx2)
+	if _, rowIdx, _, _, _ := row(t, res); buildIdx2 <= buildIdx || buildIdx2 != rowIdx {
+		t.Fatalf("build_idx must increment: got %d after %d, row holds %d", buildIdx2, buildIdx, rowIdx)
 	}
 }
 
@@ -209,10 +214,11 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "cs", Id: "1"}
 
-	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil { // seq=1
+	if _, err := st.MarkStale(ctx, []model.Resource{res}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ClearStale(ctx, res, 1); err != nil {
+	_, _, seq, _, _ := row(t, res)
+	if err := st.ClearStale(ctx, res, seq); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, since, _ := row(t, res)
@@ -221,9 +227,10 @@ func TestClearStale_GuardedBySeq(t *testing.T) {
 	}
 
 	// Re-mark twice: clear with a stale seq must be a no-op.
-	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0) // seq=2
-	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0) // seq=3
-	if err := st.ClearStale(ctx, res, 2); err != nil {
+	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0)
+	_, _, seq, _, _ = row(t, res)
+	_, _ = st.MarkStale(ctx, []model.Resource{res}, nil, 0)
+	if err := st.ClearStale(ctx, res, seq); err != nil {
 		t.Fatal(err)
 	}
 	_, _, _, since, _ = row(t, res)
@@ -236,12 +243,12 @@ func TestRegisterChanges_DeleteTombstonesAndResetsVersion(t *testing.T) {
 	st := NewStore(testPool)
 	res := model.Resource{Type: "md", Id: "1"}
 
-	register(t, st, core.Registration{Resource: res, Version: 5}) // seq=1
+	created := register(t, st, core.Registration{Resource: res, Version: 5}).Items[0].StaleSeq
 	got := register(t, st, core.Registration{Resource: res, Deleted: true})
 	seq := got.Items[0].StaleSeq
 	version, _, staleSeq, since, deleted := row(t, res)
-	if !got.Items[0].Accepted || !deleted || since == nil || staleSeq != seq || seq != 2 {
-		t.Fatalf("tombstone wrong: accepted=%v deleted=%v since=%v seq=%d ret=%d", got.Items[0].Accepted, deleted, since, staleSeq, seq)
+	if !got.Items[0].Accepted || !deleted || since == nil || staleSeq != seq || seq <= created {
+		t.Fatalf("tombstone wrong: accepted=%v deleted=%v since=%v seq=%d ret=%d (want above the create's %d)", got.Items[0].Accepted, deleted, since, staleSeq, seq, created)
 	}
 	if version != 0 {
 		t.Fatalf("a delete must reset version so a re-create is never 'stale': version=%d", version)
@@ -286,8 +293,9 @@ func TestDeleteResourceIfSeq_GuardedHardDelete(t *testing.T) {
 
 	// Not-deleted rows are never hard-deleted even with matching seq.
 	res2 := model.Resource{Type: "dr", Id: "2"}
-	_, _ = st.MarkStale(ctx, []model.Resource{res2}, nil, 0) // seq=1, deleted=false
-	if _, err := st.DeleteResourceIfSeq(ctx, res2, 1, 0); err != nil {
+	_, _ = st.MarkStale(ctx, []model.Resource{res2}, nil, 0) // deleted=false
+	_, _, seq2, _, _ := row(t, res2)
+	if _, err := st.DeleteResourceIfSeq(ctx, res2, seq2, 0); err != nil {
 		t.Fatal(err)
 	}
 	_ = testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res2.Type, res2.Id).Scan(&n)
@@ -308,7 +316,8 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	if _, err := st.MarkStale(ctx, []model.Resource{oldRes}, map[string]string{"fiber_operator_id": "op-1"}, 0); err != nil {
 		t.Fatal(err)
 	}
-	register(t, st, core.Registration{Resource: delRes, Deleted: true})
+	_, _, oldSeq, _, _ := rowIn(t, pool, oldRes)
+	delSeq := register(t, st, core.Registration{Resource: delRes, Deleted: true}).Items[0].StaleSeq
 	expireOwner(t, pool, delRes) // the registration claimed it; a live lease would hide it
 	backdateIn(t, pool, oldRes, "10 minutes")
 	backdateIn(t, pool, delRes, "5 minutes")
@@ -322,9 +331,9 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) != 1 || first[0].Resource != oldRes || first[0].Deleted || first[0].StaleSeq != 1 ||
+	if len(first) != 1 || first[0].Resource != oldRes || first[0].Deleted || first[0].StaleSeq != oldSeq ||
 		first[0].Metadata["fiber_operator_id"] != "op-1" {
-		t.Fatalf("limit 1: got %+v, want old alone (oldest first), not deleted, seq 1, with the metadata stored at MarkStale", first)
+		t.Fatalf("limit 1: got %+v, want old alone (oldest first), not deleted, seq %d, with the metadata stored at MarkStale", first, oldSeq)
 	}
 
 	// The first call claimed old, so its live lease hides it now; new is
@@ -333,8 +342,8 @@ func TestListStale_CutoffOrderLimitAndDeletedFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rest) != 1 || rest[0].Resource != delRes || !rest[0].Deleted || rest[0].StaleSeq != 1 {
-		t.Fatalf("second call: got %+v, want del alone, Deleted, seq 1", rest)
+	if len(rest) != 1 || rest[0].Resource != delRes || !rest[0].Deleted || rest[0].StaleSeq != delSeq {
+		t.Fatalf("second call: got %+v, want del alone, Deleted, seq %d", rest, delSeq)
 	}
 }
 
@@ -466,7 +475,10 @@ func TestRegisterChanges_CommitsAcceptedItemsAndMarksParentsOnce(t *testing.T) {
 
 	seed(t, stale, 5, 0, false)
 	seed(t, staleParent, 9, 0, false)
-	seed(t, p1, 0, 3, false)
+	// p1 carries an earlier mark, drawn from the Change Sequence so no later
+	// mark can collide with it.
+	p1Seeded := start(t, st)
+	seed(t, p1, 0, p1Seeded, false)
 	seed(t, p2, 0, 0, false)
 	p1Since := backdate(t, p1)
 	relate(t,
@@ -488,25 +500,33 @@ func TestRegisterChanges_CommitsAcceptedItemsAndMarksParentsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The accepted items are new, unowned rows: each mark claims them.
-	wantItems := []core.RegisteredItem{{Accepted: false}, {Accepted: true, StaleSeq: 1, Token: 1}, {Accepted: true, StaleSeq: 1, Token: 1}, {Accepted: true, StaleSeq: 1, Token: 1}, {Accepted: false}}
-	if len(got.Items) != len(wantItems) {
-		t.Fatalf("Items: got %d, want %d", len(got.Items), len(wantItems))
+	// The accepted items are new, unowned rows: each mark claims them, under
+	// the row's new stale_seq.
+	wantAccepted := []bool{false, true, true, true, false}
+	if len(got.Items) != len(wantAccepted) {
+		t.Fatalf("Items: got %d, want %d", len(got.Items), len(wantAccepted))
 	}
-	for i, w := range wantItems {
-		if got.Items[i] != w {
-			t.Errorf("Items[%d]: got %+v, want %+v", i, got.Items[i], w)
+	for i, accepted := range wantAccepted {
+		it := got.Items[i]
+		if !accepted {
+			if it != (core.RegisteredItem{}) {
+				t.Errorf("Items[%d]: got %+v, want rejected", i, it)
+			}
+			continue
+		}
+		if !it.Accepted || it.StaleSeq <= 0 || it.Token != it.StaleSeq {
+			t.Errorf("Items[%d]: got %+v, want accepted, claimed with its StaleSeq as the token", i, it)
 		}
 	}
 
-	for _, c := range []struct {
+	for i, c := range []struct {
 		res     model.Resource
 		version int64
 		meta    string
 	}{{fresh, 1, "new"}, {inParent, 2, "q"}, {child, 3, "child"}} {
 		version, _, seq, since, deleted := row(t, c.res)
-		if version != c.version || seq != 1 || since == nil || deleted {
-			t.Errorf("%s: version=%d seq=%d since=%v deleted=%v; want version %d, seq 1 (one mark), marked", c.res.Id, version, seq, since, deleted, c.version)
+		if version != c.version || seq != got.Items[i+1].StaleSeq || since == nil || deleted {
+			t.Errorf("%s: version=%d seq=%d since=%v deleted=%v; want version %d, seq %d (its item's StaleSeq), marked", c.res.Id, version, seq, since, deleted, c.version, got.Items[i+1].StaleSeq)
 		}
 		if m := metadataOf(t, c.res); m["k"] != c.meta {
 			t.Errorf("%s: metadata %v, want its own %q", c.res.Id, m, c.meta)
@@ -519,16 +539,21 @@ func TestRegisterChanges_CommitsAcceptedItemsAndMarksParentsOnce(t *testing.T) {
 	if _, _, seq, since, _ := row(t, p2); seq != 0 || since != nil {
 		t.Errorf("Parent of the stale item must not be marked: seq=%d since=%v", seq, since)
 	}
-	if _, _, seq, since, _ := row(t, p1); seq != 4 || since == nil {
-		t.Errorf("shared Parent must be marked exactly once: seq=%d (want 4) since=%v", seq, since)
+	// A Parent marked twice in one statement would fail it (ON CONFLICT DO
+	// UPDATE cannot affect a row twice), so a single entry in Parents and a
+	// moved seq show the one mark.
+	_, _, p1Seq, since, _ := row(t, p1)
+	if p1Seq <= p1Seeded || since == nil {
+		t.Errorf("shared Parent must be marked: seq=%d (want above %d) since=%v", p1Seq, p1Seeded, since)
 	} else if !since.Equal(p1Since) {
 		t.Errorf("Parent mark must keep the oldest stale_since: was %v, now %v", p1Since, since)
 	}
 	if m := metadataOf(t, p1); m["k"] != "child" {
 		t.Errorf("shared Parent metadata %v, want the last accepted child's (child)", m)
 	}
-	if version, _, seq, since, _ := row(t, staleParent); version != 9 || seq != 1 || since == nil {
-		t.Errorf("rejected in-batch item must still be marked as a Parent, version untouched: version=%d seq=%d since=%v", version, seq, since)
+	staleParentVersion, _, staleParentSeq, staleParentSince, _ := row(t, staleParent)
+	if staleParentVersion != 9 || staleParentSeq <= 0 || staleParentSince == nil {
+		t.Errorf("rejected in-batch item must still be marked as a Parent, version untouched: version=%d seq=%d since=%v", staleParentVersion, staleParentSeq, staleParentSince)
 	}
 	if m := metadataOf(t, staleParent); m["k"] != "new" {
 		t.Errorf("rejected in-batch Parent metadata %v, want its child's (new)", m)
@@ -545,8 +570,8 @@ func TestRegisterChanges_CommitsAcceptedItemsAndMarksParentsOnce(t *testing.T) {
 		t.Errorf("Parents: got %+v, want p1 (child) and rejected-parent (new) only", got.Parents)
 	}
 	// Both Parents were unowned: the mark claims them under their new stale_seq.
-	if parents[p1].Token != 4 || parents[staleParent].Token != 1 {
-		t.Errorf("Parent tokens: p1 %d (want 4), rejected-parent %d (want 1)", parents[p1].Token, parents[staleParent].Token)
+	if parents[p1].Token != p1Seq || parents[staleParent].Token != staleParentSeq {
+		t.Errorf("Parent tokens: p1 %d (want %d), rejected-parent %d (want %d)", parents[p1].Token, p1Seq, parents[staleParent].Token, staleParentSeq)
 	}
 }
 
@@ -554,8 +579,11 @@ func TestRegisterChanges_Version0UntombstonesAndDeleteTombstones(t *testing.T) {
 	st := NewStore(testPool)
 	r := func(id string) model.Resource { return model.Resource{Type: "rc2", Id: id} }
 	tomb, live, fresh := r("tomb"), r("live"), r("fresh")
-	seed(t, tomb, 4, 1, true)
-	seed(t, live, 7, 2, false)
+	// Earlier marks, drawn from the Change Sequence so no later mark can
+	// collide with them.
+	tombSeeded, liveSeeded := start(t, st), start(t, st)
+	seed(t, tomb, 4, tombSeeded, true)
+	seed(t, live, 7, liveSeeded, false)
 	tombSince := backdate(t, tomb)
 
 	got := register(t, st,
@@ -564,14 +592,14 @@ func TestRegisterChanges_Version0UntombstonesAndDeleteTombstones(t *testing.T) {
 		core.Registration{Resource: fresh, Version: 0},
 	)
 
-	// All three rows are unowned: each mark claims its row.
-	want := []core.RegisteredItem{{Accepted: true, StaleSeq: 2, Token: 2}, {Accepted: true, StaleSeq: 3, Token: 3}, {Accepted: true, StaleSeq: 1, Token: 1}}
-	for i, w := range want {
-		if got.Items[i] != w {
-			t.Errorf("Items[%d]: got %+v, want %+v", i, got.Items[i], w)
+	// All three rows are unowned: each mark claims its row under its new
+	// stale_seq, above the one it had.
+	for i, earlier := range []int64{tombSeeded, liveSeeded, 0} {
+		if it := got.Items[i]; !it.Accepted || it.StaleSeq <= earlier || it.Token != it.StaleSeq {
+			t.Errorf("Items[%d]: got %+v, want accepted with a StaleSeq above %d, claimed with it as the token", i, it, earlier)
 		}
 	}
-	if version, _, seq, since, deleted := row(t, tomb); deleted || version != 4 || seq != 2 || since == nil {
+	if version, _, seq, since, deleted := row(t, tomb); deleted || version != 4 || seq != got.Items[0].StaleSeq || since == nil {
 		t.Errorf("version-0 item must untombstone and mark: deleted=%v version=%d seq=%d since=%v", deleted, version, seq, since)
 	} else if !since.Equal(tombSince) {
 		t.Errorf("item mark must keep the oldest stale_since: was %v, now %v", tombSince, since)
@@ -579,13 +607,13 @@ func TestRegisterChanges_Version0UntombstonesAndDeleteTombstones(t *testing.T) {
 	if m := metadataOf(t, tomb); m["k"] != "a" {
 		t.Errorf("untombstoned metadata %v", m)
 	}
-	if version, _, seq, since, deleted := row(t, live); !deleted || version != 0 || seq != 3 || since == nil {
+	if version, _, seq, since, deleted := row(t, live); !deleted || version != 0 || seq != got.Items[1].StaleSeq || since == nil {
 		t.Errorf("delete must tombstone, reset version and mark: deleted=%v version=%d seq=%d since=%v", deleted, version, seq, since)
 	}
 	if m := metadataOf(t, live); m["k"] != "b" {
 		t.Errorf("tombstone must store its own metadata: %v", m)
 	}
-	if version, _, seq, since, deleted := row(t, fresh); deleted || version != 0 || seq != 1 || since == nil {
+	if version, _, seq, since, deleted := row(t, fresh); deleted || version != 0 || seq != got.Items[2].StaleSeq || since == nil {
 		t.Errorf("new version-0 item: deleted=%v version=%d seq=%d since=%v", deleted, version, seq, since)
 	}
 	if m := metadataOf(t, fresh); m != nil {
@@ -598,14 +626,17 @@ func TestRegisterChanges_StatementFailureCommitsNothing(t *testing.T) {
 	st := NewStore(testPool)
 	r := func(id string) model.Resource { return model.Resource{Type: "rc3", Id: id} }
 	item, fresh, parent := r("item"), r("fresh"), r("parent")
+	// The Parent's mark is drawn from the Change Sequence, so the statement's
+	// own mark can't collide with it.
+	parentSeq := start(t, st)
 	seed(t, item, 1, 0, false)
-	seed(t, parent, 0, 1, false)
+	seed(t, parent, 0, parentSeq, false)
 	relate(t, [2]model.Resource{parent, item})
 
 	// Only the Parent's mark violates this, so the items' rows are written
 	// earlier in the same statement before it fails.
-	if _, err := testPool.Exec(ctx,
-		`ALTER TABLE resources ADD CONSTRAINT rc3_fail CHECK (type <> 'rc3' OR id <> 'parent' OR stale_seq < 2)`); err != nil {
+	if _, err := testPool.Exec(ctx, fmt.Sprintf(
+		`ALTER TABLE resources ADD CONSTRAINT rc3_fail CHECK (type <> 'rc3' OR id <> 'parent' OR stale_seq = %d)`, parentSeq)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
@@ -629,8 +660,8 @@ func TestRegisterChanges_StatementFailureCommitsNothing(t *testing.T) {
 	if n != 0 {
 		t.Error("new item's row must not be committed")
 	}
-	if _, _, seq, _, _ := row(t, parent); seq != 1 {
-		t.Errorf("Parent seq changed: %d", seq)
+	if _, _, seq, _, _ := row(t, parent); seq != parentSeq {
+		t.Errorf("Parent seq changed: %d, want %d", seq, parentSeq)
 	}
 }
 
@@ -650,8 +681,8 @@ func TestRegisterChanges_DeleteMarksItsParents(t *testing.T) {
 	if _, _, childSeq, _, deleted := row(t, child); !deleted || got.Items[0] != (core.RegisteredItem{Accepted: true, StaleSeq: childSeq}) {
 		t.Errorf("delete item: got %+v, want accepted with its row's seq %d and no token (deleted=%v)", got.Items[0], childSeq, deleted)
 	}
-	if _, _, seq, since, _ := row(t, parent); seq != parentSeq+1 || since == nil {
-		t.Errorf("Parent of the deleted item must be marked once: seq=%d (want %d) since=%v", seq, parentSeq+1, since)
+	if _, _, seq, since, _ := row(t, parent); seq <= parentSeq || since == nil {
+		t.Errorf("Parent of the deleted item must be marked: seq=%d (want above %d) since=%v", seq, parentSeq, since)
 	}
 	if m := metadataOf(t, parent); m["k"] != "M" {
 		t.Errorf("Parent metadata %v, want the delete's (M)", m)
@@ -901,6 +932,187 @@ func TestBeginBuild_TakesItsStartFromTheChangeSequence(t *testing.T) {
 	}
 }
 
+// The Build Sequence is drawn from the Change Sequence: one value per call
+// (the package's tests run one at a time, so nothing else draws between the
+// test's own draws), returned as both BuildIdx and Start, on a new row as on
+// an existing one.
+func TestBeginBuild_DrawsItsBuildIdxFromTheChangeSequence(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := model.Resource{Type: "cq7", Id: "built"}
+
+	for _, why := range []string{"a new row", "an existing row"} {
+		before := start(t, st)
+		begun, err := st.BeginBuild(ctx, res, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after := start(t, st)
+		if begun.BuildIdx != before+1 || after != before+2 || begun.Start != begun.BuildIdx {
+			t.Fatalf("%s: BuildIdx %d Start %d, want the one value drawn between %d and %d, as both", why, begun.BuildIdx, begun.Start, before, after)
+		}
+		if _, idx, _, _, _ := row(t, res); idx != begun.BuildIdx {
+			t.Fatalf("%s: build_idx %d, want the returned BuildIdx %d", why, idx, begun.BuildIdx)
+		}
+	}
+}
+
+// A writer that waits for an existing row's lock draws its number after the
+// wait, so of two writers of one row the one that locks it later carries
+// the higher number: a later build pairs the later stale_seq with the
+// version that wins in Elasticsearch. A gate holds the row while the call
+// queues behind it, the test draws a value, and the call's number must be
+// above that value.
+func TestDraws_AnExistingRowsNumberIsDrawnAfterItsLock(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "dl9", Id: id} }
+	staleSeqOf := func(res model.Resource) int64 { _, _, seq, _, _ := row(t, res); return seq }
+
+	for _, c := range []struct {
+		name string
+		res  model.Resource // the row the gate holds
+		call func() (int64, error)
+	}{
+		{"BeginBuild", r("build"), func() (int64, error) {
+			b, err := st.BeginBuild(ctx, r("build"), 0)
+			return b.BuildIdx, err
+		}},
+		{"MarkStale lease 0", r("mark0"), func() (int64, error) {
+			_, err := st.MarkStale(ctx, []model.Resource{r("mark0")}, nil, 0)
+			return staleSeqOf(r("mark0")), err
+		}},
+		{"MarkStale with a lease", r("mark"), func() (int64, error) {
+			_, err := st.MarkStale(ctx, []model.Resource{r("mark")}, nil, time.Minute)
+			return staleSeqOf(r("mark")), err
+		}},
+		{"RegisterChanges item", r("item"), func() (int64, error) {
+			got, err := st.RegisterChanges(ctx, []core.Registration{{Resource: r("item")}}, time.Minute)
+			if err != nil {
+				return 0, err
+			}
+			return got.Items[0].StaleSeq, nil
+		}},
+		{"RegisterChanges Parent", r("parent"), func() (int64, error) {
+			_, err := st.RegisterChanges(ctx, []core.Registration{{Resource: r("child")}}, time.Minute)
+			return staleSeqOf(r("parent")), err
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			seed(t, c.res, 0, 0, false)
+			if c.res == r("parent") {
+				relate(t, [2]model.Resource{c.res, r("child")})
+			}
+			g := lockRow(t, testPool, c.res)
+			type result struct {
+				n   int64
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				n, err := c.call()
+				done <- result{n, err}
+			}()
+			g.waitForWaiters(t, 1)
+			drawn := start(t, st)
+			g.release()
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+				if got.n <= drawn {
+					t.Fatalf("number %d, want above %d drawn while the call waited for the row lock", got.n, drawn)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("the call did not finish after the gate committed")
+			}
+		})
+	}
+}
+
+// A BeginBuild that queues behind a concurrent creation of its row — a row
+// its snapshot could not see, so no lock was taken before the draw — still
+// ends above every number the creator left: it draws again under the lock
+// when the value it drew is not above them.
+func TestBeginBuild_ARowCreatedWhileItWaitsGetsAHigherBuildIdx(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := model.Resource{Type: "dl10", Id: "created"}
+	g := openGate(t, testPool,
+		`INSERT INTO resources (type, id) VALUES ($1, $2) RETURNING pg_backend_pid()`, res.Type, res.Id)
+	type result struct {
+		b   core.BuildBegun
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		b, err := st.BeginBuild(ctx, res, 0)
+		done <- result{b, err}
+	}()
+	g.waitForWaiters(t, 1)
+	var creator int64
+	if err := g.tx.QueryRow(ctx,
+		`UPDATE resources SET build_idx = nextval('change_sequence') WHERE type=$1 AND id=$2 RETURNING build_idx`,
+		res.Type, res.Id).Scan(&creator); err != nil {
+		t.Fatalf("write in the gate: %v", err)
+	}
+	g.release()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.b.BuildIdx <= creator || got.b.Start != got.b.BuildIdx {
+			t.Fatalf("BuildIdx %d Start %d, want above the creator's build_idx %d, as the Start too", got.b.BuildIdx, got.b.Start, creator)
+		}
+		if _, idx, _, _, _ := row(t, res); idx != got.b.BuildIdx {
+			t.Fatalf("build_idx %d, want the returned BuildIdx %d", idx, got.b.BuildIdx)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginBuild did not finish after the gate committed")
+	}
+}
+
+// BeginDelete's UPDATE that waited for a concurrent write of its tombstone
+// re-evaluates against the committed row, drawing its value then: it lands
+// above the number that write left.
+func TestBeginDelete_DrawsAboveAWriteItWaitedFor(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := model.Resource{Type: "bd4", Id: "1"}
+	seq := tombstone(t, st, res)
+	g := lockRow(t, testPool, res)
+	var written int64
+	if err := g.tx.QueryRow(ctx,
+		`UPDATE resources SET build_idx = nextval('change_sequence') WHERE type=$1 AND id=$2 RETURNING build_idx`,
+		res.Type, res.Id).Scan(&written); err != nil {
+		t.Fatalf("write in the gate: %v", err)
+	}
+	type result struct {
+		d   core.DeleteBegun
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		d, err := st.BeginDelete(ctx, res, seq, 0)
+		done <- result{d, err}
+	}()
+	g.waitForWaiters(t, 1)
+	g.release()
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.d.Superseded || got.d.BuildIdx <= written {
+			t.Fatalf("got %+v, want not superseded, a BuildIdx above %d the waited-for write left", got.d, written)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginDelete did not finish after the gate committed")
+	}
+}
+
 func TestSchema_RaisesAChangeSequenceLeftBehindTheStamps(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -938,6 +1150,48 @@ func TestSchema_RaisesAChangeSequenceLeftBehindTheStamps(t *testing.T) {
 	}
 }
 
+// build_idx and stale_seq are drawn from the Change Sequence too, so the
+// guard keeps it ahead of them as well: a sequence behind either would hand
+// a recreated row numbers below those its old row carried.
+func TestSchema_RaisesAChangeSequenceLeftBehindABuildIdxOrStaleSeq(t *testing.T) {
+	for _, column := range []string{"build_idx", "stale_seq"} {
+		for _, tc := range []struct {
+			name    string
+			restart bool
+		}{
+			// The column is ahead of the sequence, which is ahead of change_seq.
+			{"behind", false},
+			// Next value exactly the column's: is_called is false, so a draw
+			// would not exceed it.
+			{"restart at the number", true},
+		} {
+			t.Run(column+"/"+tc.name, func(t *testing.T) {
+				ctx := context.Background()
+				st, pool := isolatedStore(t)
+				res := model.Resource{Type: "cq8", Id: "1"}
+				register(t, st, core.Registration{Resource: res, Version: 1})
+				var ahead int64
+				if err := pool.QueryRow(ctx,
+					`UPDATE resources SET `+column+` = change_seq + 100 WHERE type=$1 AND id=$2 RETURNING `+column,
+					res.Type, res.Id).Scan(&ahead); err != nil {
+					t.Fatal(err)
+				}
+				if tc.restart {
+					if _, err := pool.Exec(ctx, fmt.Sprintf(`ALTER SEQUENCE change_sequence RESTART WITH %d`, ahead)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := applySchema(ctx, pool); err != nil {
+					t.Fatal(err)
+				}
+				if next := start(t, st); next <= ahead {
+					t.Fatalf("after re-applying the schema the next value %d must exceed the %s %d", next, column, ahead)
+				}
+			})
+		}
+	}
+}
+
 func TestSchema_LeavesTheChangeSequenceAloneWhenEmptyOrAhead(t *testing.T) {
 	ctx := context.Background()
 	st, pool := isolatedStore(t)
@@ -954,11 +1208,12 @@ func TestSchema_LeavesTheChangeSequenceAloneWhenEmptyOrAhead(t *testing.T) {
 
 	reapply("fresh sequence, empty table")
 
-	// Rows that never changed: change_seq 0 is below anything handed out.
+	// Rows that never changed: change_seq 0 is below anything handed out,
+	// and a mark's stale_seq, when drawn from the sequence, is behind it.
 	if _, err := st.MarkStale(ctx, []model.Resource{{Type: "cq6", Id: "marked"}}, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	reapply("fresh sequence, only unchanged rows")
+	reapply("only unchanged rows")
 
 	// Starts taken with no stamped row: the sequence is ahead.
 	start(t, st)
@@ -1205,8 +1460,11 @@ func raceOnRow(t *testing.T, res model.Resource, mark func(i int) (int64, error)
 }
 
 // requireOneClaim fails unless exactly one token is non-zero, it is the
-// row's owner token, and the row was marked wantSeq times in all.
-func requireOneClaim(t *testing.T, res model.Resource, tokens [2]int64, wantSeq int64) {
+// row's owner token, and the row was marked by both calls: the claim is the
+// first to lock the row, and a mark draws its value after it locks an
+// existing row, so the other call's mark leaves a stale_seq above the
+// winner's token.
+func requireOneClaim(t *testing.T, res model.Resource, tokens [2]int64) {
 	t.Helper()
 	winner, claims := int64(0), 0
 	for _, tok := range tokens {
@@ -1220,8 +1478,8 @@ func requireOneClaim(t *testing.T, res model.Resource, tokens [2]int64, wantSeq 
 	if o := ownerOf(t, testPool, res); o.seq != winner {
 		t.Fatalf("owner_seq %d, want the winner's token %d", o.seq, winner)
 	}
-	if _, _, seq, _, _ := row(t, res); seq != wantSeq {
-		t.Fatalf("stale_seq %d, want %d: both marks must bump it", seq, wantSeq)
+	if _, _, seq, _, _ := row(t, res); seq <= winner {
+		t.Fatalf("stale_seq %d, want above the winner's token %d: both marks must move it, the later one higher", seq, winner)
 	}
 }
 
@@ -1242,7 +1500,7 @@ func TestClaim_ExactlyOneOfTwoConcurrentMarks(t *testing.T) {
 			}
 			return owned[0].Token, nil
 		})
-		requireOneClaim(t, res, tokens, 2)
+		requireOneClaim(t, res, tokens)
 	})
 
 	t.Run("RegisterChanges item", func(t *testing.T) {
@@ -1258,7 +1516,7 @@ func TestClaim_ExactlyOneOfTwoConcurrentMarks(t *testing.T) {
 			}
 			return got.Items[0].Token, nil
 		})
-		requireOneClaim(t, res, tokens, 2)
+		requireOneClaim(t, res, tokens)
 	})
 
 	t.Run("RegisterChanges Parent", func(t *testing.T) {
@@ -1277,7 +1535,7 @@ func TestClaim_ExactlyOneOfTwoConcurrentMarks(t *testing.T) {
 			}
 			return got.Parents[0].Token, nil
 		})
-		requireOneClaim(t, parent, tokens, 2)
+		requireOneClaim(t, parent, tokens)
 	})
 }
 
@@ -1316,6 +1574,9 @@ func TestRegisterChanges_ItemsThatAreEachOthersParentsDoNotDeadlock(t *testing.T
 		g.release()
 	}
 
+	itemSeq := map[model.Resource]int64{}     // each row's mark as an item
+	itemToken := map[model.Resource]int64{}   // each row's claim as an item, 0 if none
+	parentToken := map[model.Resource]int64{} // each row's claim as a Parent, 0 if none
 	for range 2 {
 		select {
 		case r := <-results:
@@ -1332,13 +1593,27 @@ func TestRegisterChanges_ItemsThatAreEachOthersParentsDoNotDeadlock(t *testing.T
 			if len(r.got.Parents) != 1 || r.got.Parents[0].Resource != parent {
 				t.Fatalf("register %v: Parents %+v, want %v alone", r.item, r.got.Parents, parent)
 			}
+			itemSeq[r.item] = r.got.Items[0].StaleSeq
+			itemToken[r.item] = r.got.Items[0].Token
+			parentToken[parent] = r.got.Parents[0].Token
 		case <-time.After(10 * time.Second):
 			t.Fatal("a registration did not finish after the gates committed")
 		}
 	}
+	// Each row is marked twice, as item and as Parent. The registrations run
+	// one after the other: the first claims both its rows, the second, under
+	// those live leases, claims neither and writes both rows last. So the
+	// first one's item row holds the second one's Parent mark, not its item
+	// mark; the second one's item row holds that item mark, not the first
+	// one's Parent claim.
 	for _, res := range []model.Resource{a, b} {
-		if version, _, seq, since, _ := row(t, res); version != 1 || seq != 2 || since == nil {
-			t.Fatalf("%v: version %d stale_seq %d stale_since %v, want version 1, marked twice (as item and as Parent)", res, version, seq, since)
+		version, _, seq, since, _ := row(t, res)
+		markedTwice := seq > itemSeq[res] // the first registration's item, marked again as Parent
+		if itemToken[res] == 0 {          // the second registration's item, claimed before as Parent
+			markedTwice = seq == itemSeq[res] && parentToken[res] != 0 && parentToken[res] < seq
+		}
+		if version != 1 || since == nil || !markedTwice {
+			t.Fatalf("%v: version %d stale_seq %d stale_since %v (item mark %d, item claim %d, Parent claim %d), want version 1, marked twice (as item and as Parent)", res, version, seq, since, itemSeq[res], itemToken[res], parentToken[res])
 		}
 	}
 }
@@ -1407,8 +1682,9 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(owned) != 1 || owned[0] != (core.Owned{Resource: res, Token: 1}) {
-			t.Fatalf("first mark of an unowned row: owned %+v, want it claimed with token 1", owned)
+		_, _, first, _, _ := row(t, res)
+		if len(owned) != 1 || owned[0] != (core.Owned{Resource: res, Token: first}) || first <= 0 {
+			t.Fatalf("first mark of an unowned row: owned %+v, want it claimed with its stale_seq %d as the token", owned, first)
 		}
 		claimed := ownerOf(t, testPool, res)
 
@@ -1417,12 +1693,13 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(owned) != 1 || owned[0] != (core.Owned{Resource: other, Token: 1}) {
-			t.Fatalf("owned %+v, want only the unowned row, token 1", owned)
+		if _, _, otherSeq, _, _ := row(t, other); len(owned) != 1 || owned[0] != (core.Owned{Resource: other, Token: otherSeq}) {
+			t.Fatalf("owned %+v, want only the unowned row, token its stale_seq %d", owned, otherSeq)
 		}
 		requireOwner(t, testPool, res, claimed, "a mark under a live lease must leave the owner")
-		if _, _, seq, since, _ := row(t, res); seq != 2 || since == nil || metadataOf(t, res)["k"] != "2" {
-			t.Fatalf("a mark under a live lease still marks: seq %d (want 2) since %v metadata %v", seq, since, metadataOf(t, res))
+		_, _, second, since, _ := row(t, res)
+		if second <= first || since == nil || metadataOf(t, res)["k"] != "2" {
+			t.Fatalf("a mark under a live lease still marks: seq %d (want above %d) since %v metadata %v", second, first, since, metadataOf(t, res))
 		}
 
 		expireOwner(t, testPool, res)
@@ -1430,21 +1707,24 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(owned) != 1 || owned[0] != (core.Owned{Resource: res, Token: 3}) {
-			t.Fatalf("mark after the lease expired: owned %+v, want it claimed with the new stale_seq 3", owned)
+		_, _, third, _, _ := row(t, res)
+		if len(owned) != 1 || owned[0] != (core.Owned{Resource: res, Token: third}) || third <= second {
+			t.Fatalf("mark after the lease expired: owned %+v, want it claimed with the new stale_seq %d (above %d)", owned, third, second)
 		}
-		requireFreshOwner(t, testPool, res, 3)
+		requireFreshOwner(t, testPool, res, third)
 	})
 
 	t.Run("RegisterChanges item", func(t *testing.T) {
 		res := model.Resource{Type: "cl-ri", Id: "1"}
-		if it := register(t, st, core.Registration{Resource: res, Metadata: meta("1")}).Items[0]; it != (core.RegisteredItem{Accepted: true, StaleSeq: 1, Token: 1}) {
-			t.Fatalf("first registration: %+v, want claimed with token 1", it)
+		first := register(t, st, core.Registration{Resource: res, Metadata: meta("1")}).Items[0]
+		if !first.Accepted || first.StaleSeq <= 0 || first.Token != first.StaleSeq {
+			t.Fatalf("first registration: %+v, want claimed with its StaleSeq as the token", first)
 		}
 		claimed := ownerOf(t, testPool, res)
 
-		if it := register(t, st, core.Registration{Resource: res, Metadata: meta("2")}).Items[0]; it != (core.RegisteredItem{Accepted: true, StaleSeq: 2}) {
-			t.Fatalf("registration under a live lease: %+v, want accepted, seq 2, no token", it)
+		second := register(t, st, core.Registration{Resource: res, Metadata: meta("2")}).Items[0]
+		if !second.Accepted || second.StaleSeq <= first.StaleSeq || second.Token != 0 {
+			t.Fatalf("registration under a live lease: %+v, want accepted, seq above %d, no token", second, first.StaleSeq)
 		}
 		requireOwner(t, testPool, res, claimed, "a mark under a live lease must leave the owner")
 		if m := metadataOf(t, res); m["k"] != "2" {
@@ -1452,10 +1732,11 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 		}
 
 		expireOwner(t, testPool, res)
-		if it := register(t, st, core.Registration{Resource: res}).Items[0]; it != (core.RegisteredItem{Accepted: true, StaleSeq: 3, Token: 3}) {
-			t.Fatalf("registration after the lease expired: %+v, want claimed with token 3", it)
+		third := register(t, st, core.Registration{Resource: res}).Items[0]
+		if !third.Accepted || third.StaleSeq <= second.StaleSeq || third.Token != third.StaleSeq {
+			t.Fatalf("registration after the lease expired: %+v, want claimed with its StaleSeq (above %d) as the token", third, second.StaleSeq)
 		}
-		requireFreshOwner(t, testPool, res, 3)
+		requireFreshOwner(t, testPool, res, third.Token)
 	})
 
 	t.Run("RegisterChanges Parent", func(t *testing.T) {
@@ -1470,8 +1751,9 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 			return got.Parents[0]
 		}
 
-		if p := parentOf(register(t, st, core.Registration{Resource: child, Metadata: meta("1")})); p.Token != 1 {
-			t.Fatalf("first mark of the unowned Parent: token %d, want 1", p.Token)
+		first := parentOf(register(t, st, core.Registration{Resource: child, Metadata: meta("1")})).Token
+		if _, _, seq, _, _ := row(t, parent); first <= 0 || first != seq {
+			t.Fatalf("first mark of the unowned Parent: token %d, want its new stale_seq %d", first, seq)
 		}
 		claimed := ownerOf(t, testPool, parent)
 
@@ -1479,15 +1761,17 @@ func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {
 			t.Fatalf("Parent under a live lease: token %d, want 0", p.Token)
 		}
 		requireOwner(t, testPool, parent, claimed, "a mark under a live lease must leave the owner")
-		if _, _, seq, _, _ := row(t, parent); seq != 2 || metadataOf(t, parent)["k"] != "2" {
-			t.Fatalf("a Parent mark under a live lease still marks: seq %d (want 2) metadata %v", seq, metadataOf(t, parent))
+		_, _, second, _, _ := row(t, parent)
+		if second <= first || metadataOf(t, parent)["k"] != "2" {
+			t.Fatalf("a Parent mark under a live lease still marks: seq %d (want above %d) metadata %v", second, first, metadataOf(t, parent))
 		}
 
 		expireOwner(t, testPool, parent)
-		if p := parentOf(register(t, st, core.Registration{Resource: child})); p.Token != 3 {
-			t.Fatalf("Parent after the lease expired: token %d, want the new stale_seq 3", p.Token)
+		third := parentOf(register(t, st, core.Registration{Resource: child})).Token
+		if _, _, seq, _, _ := row(t, parent); third <= second || third != seq {
+			t.Fatalf("Parent after the lease expired: token %d, want the new stale_seq %d (above %d)", third, seq, second)
 		}
-		requireFreshOwner(t, testPool, parent, 3)
+		requireFreshOwner(t, testPool, parent, third)
 	})
 }
 
@@ -1528,13 +1812,14 @@ func TestFinishOwned_UnchangedSeqClearsMarkAndOwnership(t *testing.T) {
 		res   model.Resource
 		token int64
 	}{{mine, tok}, {theirs, theirTok + 1}} {
-		f, err := st.FinishOwned(ctx, c.res, 1, c.token)
+		_, _, marked, _, _ := row(t, c.res)
+		f, err := st.FinishOwned(ctx, c.res, marked, c.token)
 		if err != nil {
 			t.Fatal(err)
 		}
 		requireFollowUp(t, f, core.FollowUp{})
-		if _, _, seq, since, _ := row(t, c.res); seq != 1 || since != nil {
-			t.Fatalf("%s: unchanged seq must clear the mark: seq %d since %v", c.res.Id, seq, since)
+		if _, _, seq, since, _ := row(t, c.res); seq != marked || since != nil {
+			t.Fatalf("%s: unchanged seq must clear the mark: seq %d (was %d) since %v", c.res.Id, seq, marked, since)
 		}
 		requireOwner(t, testPool, c.res, owner{}, "an unchanged seq must clear the ownership")
 	}
@@ -1554,14 +1839,19 @@ func TestFinishOwned_MovedSeqReclaimsForAFollowUp(t *testing.T) {
 		// The lease ran out meanwhile: matching ignores lease liveness.
 		expireOwner(t, testPool, res)
 
+		_, _, moved, _, _ := row(t, res)
+		if moved <= tok {
+			t.Fatalf("the changes must move stale_seq above the token %d, got %d", tok, moved)
+		}
+
 		f, err := st.FinishOwned(ctx, res, tok, tok)
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireFollowUp(t, f, core.FollowUp{Token: tok + 2, Metadata: meta("m2")})
-		requireFreshOwner(t, testPool, res, tok+2)
-		if _, _, seq, since, _ := row(t, res); seq != tok+2 || since == nil {
-			t.Fatalf("a re-claim keeps the mark: seq %d since %v", seq, since)
+		requireFollowUp(t, f, core.FollowUp{Token: moved, Metadata: meta("m2")})
+		requireFreshOwner(t, testPool, res, moved)
+		if _, _, seq, since, _ := row(t, res); seq != moved || since == nil {
+			t.Fatalf("a re-claim keeps the mark: seq %d (want %d) since %v", seq, moved, since)
 		}
 	})
 
@@ -1570,13 +1860,17 @@ func TestFinishOwned_MovedSeqReclaimsForAFollowUp(t *testing.T) {
 		seq := register(t, st, core.Registration{Resource: res, Deleted: true, Metadata: meta("del")}).Items[0].StaleSeq
 		tok := own(t, testPool, res)
 		markUnclaimed(t, st, meta("again"), res) // a mark that keeps the tombstone
+		_, _, moved, _, _ := row(t, res)
+		if moved <= seq {
+			t.Fatalf("the mark must move stale_seq above %d, got %d", seq, moved)
+		}
 
 		f, err := st.FinishOwned(ctx, res, seq, tok)
 		if err != nil {
 			t.Fatal(err)
 		}
-		requireFollowUp(t, f, core.FollowUp{Token: seq + 1, Metadata: meta("again"), Deleted: true})
-		requireFreshOwner(t, testPool, res, seq+1)
+		requireFollowUp(t, f, core.FollowUp{Token: moved, Metadata: meta("again"), Deleted: true})
+		requireFreshOwner(t, testPool, res, moved)
 	})
 }
 
@@ -1588,6 +1882,7 @@ func TestFinishOwned_LostTokenChangesNothing(t *testing.T) {
 	tok := own(t, testPool, res)
 	markUnclaimed(t, st, meta("m"), res) // seq moved
 	want := ownerOf(t, testPool, res)
+	_, _, moved, _, _ := row(t, res)
 
 	for _, token := range []int64{tok + 1, 0} {
 		f, err := st.FinishOwned(ctx, res, tok, token)
@@ -1596,8 +1891,8 @@ func TestFinishOwned_LostTokenChangesNothing(t *testing.T) {
 		}
 		requireFollowUp(t, f, core.FollowUp{})
 		requireOwner(t, testPool, res, want, fmt.Sprintf("token %d does not match", token))
-		if _, _, seq, since, _ := row(t, res); seq != tok+1 || since == nil {
-			t.Fatalf("token %d does not match: the mark must stay, seq %d since %v", token, seq, since)
+		if _, _, seq, since, _ := row(t, res); seq != moved || since == nil {
+			t.Fatalf("token %d does not match: the mark must stay, seq %d (want %d) since %v", token, seq, moved, since)
 		}
 	}
 }
@@ -1611,19 +1906,20 @@ func TestDeleteResourceIfSeq_RecreateDuringDeleteIsReclaimed(t *testing.T) {
 
 	// The recreate lands while the delete is in flight: the owner is live,
 	// so it claims nothing and rides on the delete's follow-up.
-	if it := register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("re")}).Items[0]; it != (core.RegisteredItem{Accepted: true, StaleSeq: seq + 1}) {
-		t.Fatalf("recreate under the delete's live lease: %+v, want accepted, seq %d, no token", it, seq+1)
+	re := register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("re")}).Items[0]
+	if !re.Accepted || re.StaleSeq <= seq || re.Token != 0 {
+		t.Fatalf("recreate under the delete's live lease: %+v, want accepted, seq above %d, no token", re, seq)
 	}
 
 	f, err := st.DeleteResourceIfSeq(ctx, res, seq, tok)
 	if err != nil {
 		t.Fatal(err)
 	}
-	requireFollowUp(t, f, core.FollowUp{Token: seq + 1, Metadata: meta("re")})
-	if _, _, staleSeq, since, deleted := row(t, res); deleted || staleSeq != seq+1 || since == nil {
-		t.Fatalf("the recreated row must stay marked: deleted %v seq %d since %v", deleted, staleSeq, since)
+	requireFollowUp(t, f, core.FollowUp{Token: re.StaleSeq, Metadata: meta("re")})
+	if _, _, staleSeq, since, deleted := row(t, res); deleted || staleSeq != re.StaleSeq || since == nil {
+		t.Fatalf("the recreated row must stay marked: deleted %v seq %d (want %d) since %v", deleted, staleSeq, re.StaleSeq, since)
 	}
-	requireFreshOwner(t, testPool, res, seq+1)
+	requireFreshOwner(t, testPool, res, re.StaleSeq)
 }
 
 func TestDeleteResourceIfSeq_LostTokenChangesNothing(t *testing.T) {
@@ -1632,7 +1928,7 @@ func TestDeleteResourceIfSeq_LostTokenChangesNothing(t *testing.T) {
 	res := model.Resource{Type: "dr3", Id: "1"}
 	seq := register(t, st, core.Registration{Resource: res, Deleted: true}).Items[0].StaleSeq
 	tok := own(t, testPool, res)
-	register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("re")})
+	recreated := register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("re")}).Items[0].StaleSeq
 	want := ownerOf(t, testPool, res)
 
 	f, err := st.DeleteResourceIfSeq(ctx, res, seq, tok+1)
@@ -1641,8 +1937,8 @@ func TestDeleteResourceIfSeq_LostTokenChangesNothing(t *testing.T) {
 	}
 	requireFollowUp(t, f, core.FollowUp{})
 	requireOwner(t, testPool, res, want, "a token that does not match")
-	if _, _, staleSeq, since, deleted := row(t, res); deleted || staleSeq != seq+1 || since == nil {
-		t.Fatalf("the recreated row must stay as it was: deleted %v seq %d since %v", deleted, staleSeq, since)
+	if _, _, staleSeq, since, deleted := row(t, res); deleted || staleSeq != recreated || since == nil {
+		t.Fatalf("the recreated row must stay as it was: deleted %v seq %d (want %d) since %v", deleted, staleSeq, recreated, since)
 	}
 }
 
@@ -1654,14 +1950,16 @@ func TestBeginBuild_RenewsOnlyAMatchingToken(t *testing.T) {
 	tok := own(t, testPool, res)
 	expired := owner{seq: tok, since: expireOwner(t, testPool, res)}
 
-	for i, token := range []int64{tok + 1, 0, tok} {
+	var prevIdx int64
+	for _, token := range []int64{tok + 1, 0, tok} {
 		begun, err := st.BeginBuild(ctx, res, token)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if begun.BuildIdx != int64(i+1) || begun.StaleSeq != tok {
-			t.Fatalf("token %d: BuildIdx %d StaleSeq %d, want %d and %d", token, begun.BuildIdx, begun.StaleSeq, i+1, tok)
+		if begun.BuildIdx <= prevIdx || begun.StaleSeq != tok {
+			t.Fatalf("token %d: BuildIdx %d StaleSeq %d, want a BuildIdx above %d and StaleSeq %d", token, begun.BuildIdx, begun.StaleSeq, prevIdx, tok)
 		}
+		prevIdx = begun.BuildIdx
 		if token != tok {
 			requireOwner(t, testPool, res, expired, fmt.Sprintf("token %d does not match", token))
 		}
@@ -1760,7 +2058,7 @@ func TestReleaseOwners_DropsOnlyMatchingTokensAndKeepsTheMark(t *testing.T) {
 	matchTok := own(t, testPool, match)
 	own(t, testPool, mismatch)
 	mismatchOwner := ownerOf(t, testPool, mismatch)
-	_, _, _, since, _ := row(t, match)
+	_, _, matchSeq, since, _ := row(t, match)
 
 	if err := st.ReleaseOwners(ctx, []core.Owned{
 		{Resource: match, Token: matchTok},
@@ -1769,8 +2067,8 @@ func TestReleaseOwners_DropsOnlyMatchingTokensAndKeepsTheMark(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireOwner(t, testPool, match, owner{}, "a matching token is released")
-	if _, _, seq, after, _ := row(t, match); seq != 1 || after == nil || !after.Equal(*since) || metadataOf(t, match)["k"] != "m" {
-		t.Fatalf("release must keep the mark: seq %d since %v (was %v) metadata %v", seq, after, since, metadataOf(t, match))
+	if _, _, seq, after, _ := row(t, match); seq != matchSeq || after == nil || !after.Equal(*since) || metadataOf(t, match)["k"] != "m" {
+		t.Fatalf("release must keep the mark: seq %d (was %d) since %v (was %v) metadata %v", seq, matchSeq, after, since, metadataOf(t, match))
 	}
 	requireOwner(t, testPool, mismatch, mismatchOwner, "a token that does not match")
 
@@ -1784,13 +2082,13 @@ func TestClearStale_ClearsOwnershipOnlyWithTheMark(t *testing.T) {
 	st := NewStore(testPool)
 	cleared, moved := model.Resource{Type: "cs2", Id: "cleared"}, model.Resource{Type: "cs2", Id: "moved"}
 	markUnclaimed(t, st, nil, cleared, moved)
-	own(t, testPool, cleared)
-	own(t, testPool, moved)
-	markUnclaimed(t, st, nil, moved) // seq 2
+	marked := map[model.Resource]int64{cleared: own(t, testPool, cleared), moved: own(t, testPool, moved)}
+	markUnclaimed(t, st, nil, moved) // seq moves
 	movedOwner := ownerOf(t, testPool, moved)
 
+	// Each finishes with the stale_seq of the first mark.
 	for _, res := range []model.Resource{cleared, moved} {
-		if err := st.ClearStale(ctx, res, 1); err != nil {
+		if err := st.ClearStale(ctx, res, marked[res]); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1994,15 +2292,16 @@ func TestFinishOwned_MarkCommittedWhileWaitingIsReclaimed(t *testing.T) {
 	// FinishOwned must see the moved stale_seq and re-claim instead of
 	// clearing the mark the change just made.
 	f := commitWhileWaiting(t, res,
-		`UPDATE resources SET stale_seq = stale_seq + 1, metadata = '{"k": "m"}', stale_since = COALESCE(stale_since, now())
+		`UPDATE resources SET stale_seq = nextval('change_sequence'), metadata = '{"k": "m"}', stale_since = COALESCE(stale_since, now())
 		 WHERE type=$1 AND id=$2`,
 		func() (core.FollowUp, error) { return st.FinishOwned(ctx, res, tok, tok) })
 
-	if _, _, seq, since, _ := row(t, res); seq != tok+1 || since == nil {
-		t.Fatalf("the mark committed during the finish must stay: seq %d since %v", seq, since)
+	_, _, seq, since, _ := row(t, res)
+	if seq <= tok || since == nil {
+		t.Fatalf("the mark committed during the finish must stay: seq %d (was %d) since %v", seq, tok, since)
 	}
-	requireFollowUp(t, f, core.FollowUp{Token: tok + 1, Metadata: meta("m")})
-	requireFreshOwner(t, testPool, res, tok+1)
+	requireFollowUp(t, f, core.FollowUp{Token: seq, Metadata: meta("m")})
+	requireFreshOwner(t, testPool, res, seq)
 }
 
 func TestDeleteResourceIfSeq_RecreateCommittedWhileWaitingIsReclaimed(t *testing.T) {
@@ -2019,7 +2318,7 @@ func TestDeleteResourceIfSeq_RecreateCommittedWhileWaitingIsReclaimed(t *testing
 	// the recreate commits. The delete must see the moved stale_seq, keep the
 	// row and re-claim it for the recreate's build.
 	f := commitWhileWaiting(t, res,
-		`UPDATE resources SET stale_seq = stale_seq + 1, deleted = false, version = 1, metadata = '{"k": "m"}'
+		`UPDATE resources SET stale_seq = nextval('change_sequence'), deleted = false, version = 1, metadata = '{"k": "m"}'
 		 WHERE type=$1 AND id=$2`,
 		func() (core.FollowUp, error) { return st.DeleteResourceIfSeq(ctx, res, tok, tok) })
 
@@ -2027,11 +2326,12 @@ func TestDeleteResourceIfSeq_RecreateCommittedWhileWaitingIsReclaimed(t *testing
 	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("the recreated row must survive the delete: %d rows (%v)", n, err)
 	}
-	if version, _, seq, since, deleted := row(t, res); deleted || version != 1 || seq != tok+1 || since == nil {
-		t.Fatalf("the recreated row must stay marked: deleted %v version %d seq %d since %v", deleted, version, seq, since)
+	version, _, seq, since, deleted := row(t, res)
+	if deleted || version != 1 || seq <= tok || since == nil {
+		t.Fatalf("the recreated row must stay marked: deleted %v version %d seq %d (was %d) since %v", deleted, version, seq, tok, since)
 	}
-	requireFollowUp(t, f, core.FollowUp{Token: tok + 1, Metadata: meta("m")})
-	requireFreshOwner(t, testPool, res, tok+1)
+	requireFollowUp(t, f, core.FollowUp{Token: seq, Metadata: meta("m")})
+	requireFreshOwner(t, testPool, res, seq)
 }
 
 func TestClaim_LeaseIsMeasuredFromOwnerSince(t *testing.T) {
@@ -2042,20 +2342,21 @@ func TestClaim_LeaseIsMeasuredFromOwnerSince(t *testing.T) {
 		st := NewStore(testPool)
 		live, expired := model.Resource{Type: "lm", Id: "live"}, model.Resource{Type: "lm", Id: "expired"}
 		markUnclaimed(t, st, nil, live, expired)
-		own(t, testPool, live)
-		own(t, testPool, expired)
-		liveOwner := owner{seq: 1, since: backdateOwner(t, testPool, live, "30 seconds")}
+		liveOwner := owner{seq: own(t, testPool, live)}
+		expiredTok := own(t, testPool, expired)
+		liveOwner.since = backdateOwner(t, testPool, live, "30 seconds")
 		backdateOwner(t, testPool, expired, "2 minutes")
 
 		owned, err := st.MarkStale(ctx, []model.Resource{live, expired}, nil, time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(owned) != 1 || owned[0] != (core.Owned{Resource: expired, Token: 2}) {
-			t.Fatalf("owned %+v, want only the 2-minute-old owner's row, claimed at its new stale_seq 2", owned)
+		_, _, newSeq, _, _ := row(t, expired)
+		if len(owned) != 1 || owned[0] != (core.Owned{Resource: expired, Token: newSeq}) || newSeq <= expiredTok {
+			t.Fatalf("owned %+v, want only the 2-minute-old owner's row, claimed at its new stale_seq %d (above %d)", owned, newSeq, expiredTok)
 		}
 		requireOwner(t, testPool, live, liveOwner, "a 30-second-old owner is live under a one-minute lease")
-		requireFreshOwner(t, testPool, expired, 2)
+		requireFreshOwner(t, testPool, expired, newSeq)
 	})
 
 	t.Run("ListStale", func(t *testing.T) {
@@ -2073,5 +2374,323 @@ func TestClaim_LeaseIsMeasuredFromOwnerSince(t *testing.T) {
 		}
 		requireOwner(t, pool, live, liveOwner, "a live owner is not claimed")
 		requireFreshOwner(t, pool, expired, 1)
+	})
+}
+
+// ---- Numbers drawn from the Change Sequence ----
+
+// exists reports whether res has a row.
+func exists(t *testing.T, res model.Resource) bool {
+	t.Helper()
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&n); err != nil {
+		t.Fatalf("count %s/%s: %v", res.Type, res.Id, err)
+	}
+	return n > 0
+}
+
+// rowJSON reads res's row whole, every column, to compare it before and
+// after a call; nil when it has no row.
+func rowJSON(t *testing.T, res model.Resource) map[string]any {
+	t.Helper()
+	var m map[string]any
+	err := testPool.QueryRow(context.Background(),
+		`SELECT to_jsonb(r) FROM resources r WHERE type=$1 AND id=$2`, res.Type, res.Id).Scan(&m)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read row %s/%s: %v", res.Type, res.Id, err)
+	}
+	return m
+}
+
+// highest reads the greatest number res's row carries: its build_idx,
+// stale_seq, owner_seq and change_seq.
+func highest(t *testing.T, res model.Resource) int64 {
+	t.Helper()
+	var n int64
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT GREATEST(build_idx, stale_seq, COALESCE(owner_seq, 0), change_seq) FROM resources WHERE type=$1 AND id=$2`,
+		res.Type, res.Id).Scan(&n); err != nil {
+		t.Fatalf("read numbers %s/%s: %v", res.Type, res.Id, err)
+	}
+	return n
+}
+
+// retire gives res a history — registrations with and without a claim,
+// builds, a MarkStale — then tombstones it and hard-deletes it as an owned
+// delete finishes. It returns the greatest number the row carried or a call
+// returned for it.
+func retire(t *testing.T, st *Store, res model.Resource) int64 {
+	t.Helper()
+	ctx := context.Background()
+	var high int64
+	see := func(ns ...int64) {
+		for _, n := range ns {
+			high = max(high, n)
+		}
+	}
+
+	first := register(t, st, core.Registration{Resource: res, Version: 1}).Items[0]
+	if first.Token == 0 {
+		t.Fatalf("retire %v: the first registration must claim the row: %+v", res, first)
+	}
+	see(first.StaleSeq, first.Token)
+	see(register(t, st, core.Registration{Resource: res, Version: 2}).Items[0].StaleSeq) // under the live lease
+	for range 2 {
+		b, err := st.BeginBuild(ctx, res, first.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		see(b.BuildIdx, b.StaleSeq, b.Start)
+	}
+	markUnclaimed(t, st, nil, res)
+	expireOwner(t, testPool, res)
+	del := register(t, st, core.Registration{Resource: res, Deleted: true}).Items[0]
+	if del.Token == 0 {
+		t.Fatalf("retire %v: the delete must claim the row after the lease expired: %+v", res, del)
+	}
+	see(del.StaleSeq, del.Token, highest(t, res))
+
+	f, err := st.DeleteResourceIfSeq(ctx, res, del.StaleSeq, del.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireFollowUp(t, f, core.FollowUp{})
+	if exists(t, res) {
+		t.Fatalf("retire %v: the delete must hard-delete the row", res)
+	}
+	return high
+}
+
+// A hard delete must not reset the numbers: every writer's first number on
+// a recreated row is above every number its old row carried, so a build,
+// delete or owner of the old row can never match or outrank the new one.
+func TestRecreate_FirstNumbersAreAboveEveryNumberOfTheDeletedRow(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "rn", Id: id} }
+
+	t.Run("RegisterChanges", func(t *testing.T) {
+		res := r("registered")
+		high := retire(t, st, res)
+
+		it := register(t, st, core.Registration{Resource: res, Version: 1}).Items[0]
+		if !it.Accepted || it.StaleSeq <= high || it.Token != it.StaleSeq {
+			t.Fatalf("recreate: %+v, want accepted and claimed with a StaleSeq above the old row's %d", it, high)
+		}
+		begun, err := st.BeginBuild(ctx, res, it.Token)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if begun.BuildIdx <= high || begun.Start != begun.BuildIdx {
+			t.Fatalf("first build: BuildIdx %d Start %d, want a BuildIdx above the old row's %d, as the Start too", begun.BuildIdx, begun.Start, high)
+		}
+	})
+
+	t.Run("BeginBuild", func(t *testing.T) {
+		// A rebuild walk reaching the gone id inserts the row.
+		res := r("built")
+		high := retire(t, st, res)
+
+		begun, err := st.BeginBuild(ctx, res, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if begun.BuildIdx <= high || begun.Start != begun.BuildIdx {
+			t.Fatalf("first build: BuildIdx %d Start %d, want a BuildIdx above the old row's %d, as the Start too", begun.BuildIdx, begun.Start, high)
+		}
+		markUnclaimed(t, st, nil, res)
+		if _, _, seq, _, _ := row(t, res); seq <= high {
+			t.Fatalf("first mark: stale_seq %d, want above the old row's %d", seq, high)
+		}
+	})
+
+	t.Run("MarkStale lease 0", func(t *testing.T) {
+		res := r("marked")
+		high := retire(t, st, res)
+
+		markUnclaimed(t, st, nil, res)
+		if _, _, seq, _, _ := row(t, res); seq <= high {
+			t.Fatalf("first mark: stale_seq %d, want above the old row's %d", seq, high)
+		}
+	})
+
+	t.Run("MarkStale with a lease", func(t *testing.T) {
+		claimed := r("claimed")
+		high := retire(t, st, claimed)
+
+		owned, err := st.MarkStale(ctx, []model.Resource{claimed}, nil, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(owned) != 1 || owned[0].Resource != claimed || owned[0].Token <= high {
+			t.Fatalf("first mark: owned %+v, want the row claimed with a token above the old row's %d", owned, high)
+		}
+		if _, _, seq, _, _ := row(t, claimed); seq != owned[0].Token {
+			t.Fatalf("first mark: stale_seq %d, want the token %d", seq, owned[0].Token)
+		}
+	})
+
+	t.Run("Parent", func(t *testing.T) {
+		parent, child := r("parent"), model.Resource{Type: "rn-c", Id: "child"}
+		replace(t, st, parent, 1, nil, edgeSet(1, child))
+		high := retire(t, st, parent)
+		// The old row's delete removed its edges; a build of the recreated
+		// parent writes them again before its row is.
+		if err := st.RemoveResource(ctx, parent, math.MaxInt64); err != nil {
+			t.Fatal(err)
+		}
+		replace(t, st, parent, high+1, nil, edgeSet(1, child))
+
+		got := register(t, st, core.Registration{Resource: child, Version: 1})
+		if len(got.Parents) != 1 || got.Parents[0].Resource != parent || got.Parents[0].Token <= high {
+			t.Fatalf("Parents %+v, want the parent claimed with a token above the old row's %d", got.Parents, high)
+		}
+		if _, _, seq, _, _ := row(t, parent); seq != got.Parents[0].Token {
+			t.Fatalf("parent's stale_seq %d, want the token %d", seq, got.Parents[0].Token)
+		}
+	})
+}
+
+// beginDelete runs BeginDelete and fails the test on error.
+func beginDelete(t *testing.T, st *Store, res model.Resource, staleSeq, token int64) core.DeleteBegun {
+	t.Helper()
+	got, err := st.BeginDelete(context.Background(), res, staleSeq, token)
+	if err != nil {
+		t.Fatalf("BeginDelete %s/%s: %v", res.Type, res.Id, err)
+	}
+	return got
+}
+
+// tombstone creates res, builds it, and tombstones it with a delete
+// registration that claims the row, as a notified delete starts. It returns
+// the delete's mark, which is also its owner token.
+func tombstone(t *testing.T, st *Store, res model.Resource) int64 {
+	t.Helper()
+	register(t, st, core.Registration{Resource: res, Version: 1})
+	if _, err := st.BeginBuild(context.Background(), res, 0); err != nil {
+		t.Fatal(err)
+	}
+	expireOwner(t, testPool, res)
+	del := register(t, st, core.Registration{Resource: res, Deleted: true}).Items[0]
+	if !del.Accepted || del.Token == 0 || del.Token != del.StaleSeq {
+		t.Fatalf("tombstone %v: %+v, want the delete accepted and claimed", res, del)
+	}
+	return del.StaleSeq
+}
+
+func TestBeginDelete_BumpsTheBuildSequenceOfATombstone(t *testing.T) {
+	st := NewStore(testPool)
+	res := model.Resource{Type: "bd1", Id: "1"}
+	seq := tombstone(t, st, res)
+	expireOwner(t, testPool, res) // an unrenewed owner_since stays this one
+	earlier := highest(t, res)
+	before := rowJSON(t, res)
+	drawn := start(t, st)
+
+	got := beginDelete(t, st, res, seq, 0)
+	if got.Superseded || got.BuildIdx <= earlier || got.BuildIdx <= drawn {
+		t.Fatalf("got %+v, want not superseded, a BuildIdx above every number of the row (%d) and above %d drawn before the call", got, earlier, drawn)
+	}
+	if _, idx, _, _, _ := row(t, res); idx != got.BuildIdx {
+		t.Fatalf("build_idx %d, want the returned BuildIdx %d", idx, got.BuildIdx)
+	}
+	after := rowJSON(t, res)
+	delete(before, "build_idx")
+	delete(after, "build_idx")
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("only build_idx may change:\n before %v\n after  %v", before, after)
+	}
+}
+
+func TestBeginDelete_RenewsOnlyAMatchingToken(t *testing.T) {
+	st := NewStore(testPool)
+	res := model.Resource{Type: "bd2", Id: "1"}
+	tok := tombstone(t, st, res)
+	expired := owner{seq: tok, since: expireOwner(t, testPool, res)}
+	_, prev, _, _, _ := row(t, res)
+
+	for _, token := range []int64{tok + 1, 0, tok} {
+		got := beginDelete(t, st, res, tok, token)
+		if got.Superseded || got.BuildIdx <= prev {
+			t.Fatalf("token %d: got %+v, want not superseded, a BuildIdx above %d", token, got, prev)
+		}
+		prev = got.BuildIdx
+		if token != tok {
+			requireOwner(t, testPool, res, expired, fmt.Sprintf("token %d does not match", token))
+		}
+	}
+	requireFreshOwner(t, testPool, res, tok)
+}
+
+func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "bd3", Id: id} }
+	superseded := core.DeleteBegun{Superseded: true}
+
+	t.Run("stale_seq moved", func(t *testing.T) {
+		res := r("moved")
+		tok := tombstone(t, st, res)
+		markUnclaimed(t, st, meta("later"), res) // a later mark that keeps the tombstone
+		expireOwner(t, testPool, res)            // a renewal would show
+		before := rowJSON(t, res)
+
+		if got := beginDelete(t, st, res, tok, tok); got != superseded {
+			t.Fatalf("got %+v, want %+v", got, superseded)
+		}
+		if after := rowJSON(t, res); !reflect.DeepEqual(after, before) {
+			t.Fatalf("a superseded delete must change nothing:\n before %v\n after  %v", before, after)
+		}
+	})
+
+	t.Run("recreated", func(t *testing.T) {
+		res := r("recreated")
+		tok := tombstone(t, st, res)
+		re := register(t, st, core.Registration{Resource: res, Version: 2}).Items[0]
+		if !re.Accepted {
+			t.Fatalf("recreate: %+v, want accepted", re)
+		}
+		expireOwner(t, testPool, res)
+		before := rowJSON(t, res)
+
+		// Even at the live row's current stale_seq: the row is not a tombstone.
+		if got := beginDelete(t, st, res, re.StaleSeq, tok); got != superseded {
+			t.Fatalf("got %+v, want %+v", got, superseded)
+		}
+		if after := rowJSON(t, res); !reflect.DeepEqual(after, before) {
+			t.Fatalf("a superseded delete must change nothing:\n before %v\n after  %v", before, after)
+		}
+	})
+
+	t.Run("hard-deleted", func(t *testing.T) {
+		res := r("gone")
+		tok := tombstone(t, st, res)
+		if _, err := st.DeleteResourceIfSeq(ctx, res, tok, tok); err != nil {
+			t.Fatal(err)
+		}
+		if exists(t, res) {
+			t.Fatal("the finished delete must hard-delete the row")
+		}
+
+		if got := beginDelete(t, st, res, tok, tok); got != superseded {
+			t.Fatalf("got %+v, want %+v", got, superseded)
+		}
+		if exists(t, res) {
+			t.Fatal("a superseded delete must not create a row")
+		}
+	})
+
+	t.Run("never existed", func(t *testing.T) {
+		res := r("never")
+		if got := beginDelete(t, st, res, start(t, st), 0); got != superseded {
+			t.Fatalf("got %+v, want %+v", got, superseded)
+		}
+		if exists(t, res) {
+			t.Fatal("a superseded delete must not create a row")
+		}
 	})
 }

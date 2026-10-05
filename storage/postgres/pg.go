@@ -73,39 +73,51 @@ func (s *Store) GetChildResources(ctx context.Context, parentResource model.Reso
 	return children, rows.Err()
 }
 
-// RemoveResource removes every stored edge set of resource, with its edges,
-// in one transaction. It first locks the sets in ascending schema_version
-// order, as ReplaceEdges does, so the two never deadlock, and then removes
-// exactly the versions it locked: a version a concurrent replace stores
-// after the lock statement's snapshot is left to that replace, as if it ran
-// after this removal. The transaction is pinned to READ COMMITTED, whatever
-// the server default: a lock that waited for a concurrent replace then locks
-// the row that replace committed, where REPEATABLE READ would fail it with a
-// serialization error. (The removal itself is unguarded; ordering it against
-// a build is L2.1's.)
+// RemoveResource removes the stored edge sets of a deleted resource that
+// are not stamped above the deleting path's Build Sequence buildSeq, with
+// their edges, in one transaction. It first locks every set of the resource
+// in ascending schema_version order, as ReplaceEdges does, so the two never
+// deadlock, and then removes those of the locked versions whose build_seq is
+// at or below buildSeq. A set stamped above it was written by a build that
+// began after the delete — of a recreated resource — and stays, as
+// ReplaceEdges leaves a set stamped above the build that offers it. A
+// version a concurrent replace stores after the lock statement's snapshot is
+// left to that replace, as if it ran after this removal. The transaction is
+// pinned to READ COMMITTED, whatever the server default: a lock that waited
+// for a concurrent replace then locks, and reads the stamp of, the row that
+// replace committed, where REPEATABLE READ would fail it with a serialization
+// error.
 func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, buildSeq int64) error {
 	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT schema_version FROM edge_sets WHERE type=$1 AND id=$2
+			`SELECT schema_version, build_seq FROM edge_sets WHERE type=$1 AND id=$2
 			 ORDER BY schema_version FOR UPDATE`,
 			resource.Type, resource.Id,
 		)
 		if err != nil {
 			return err
 		}
-		locked, err := pgx.CollectRows(rows, pgx.RowTo[int32])
-		if err != nil || len(locked) == 0 {
+		var removable []int32
+		var version int32
+		var stamp int64
+		_, err = pgx.ForEachRow(rows, []any{&version, &stamp}, func() error {
+			if stamp <= buildSeq {
+				removable = append(removable, version)
+			}
+			return nil
+		})
+		if err != nil || len(removable) == 0 {
 			return err
 		}
 		if _, err := tx.Exec(ctx,
 			`DELETE FROM relations WHERE resource=$1 AND resource_id=$2 AND schema_version = ANY($3::int[])`,
-			resource.Type, resource.Id, locked,
+			resource.Type, resource.Id, removable,
 		); err != nil {
 			return err
 		}
 		_, err = tx.Exec(ctx,
 			`DELETE FROM edge_sets WHERE type=$1 AND id=$2 AND schema_version = ANY($3::int[])`,
-			resource.Type, resource.Id, locked,
+			resource.Type, resource.Id, removable,
 		)
 		return err
 	})
@@ -251,17 +263,24 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // order.
 //
 // Every accepted row — upsert, version-0 item or delete — is stamped with a
-// fresh Change Sequence value; a rejected item and a marked Parent keep
-// theirs. The value is drawn for every input row, so a rejected item leaves
-// a gap in the sequence, which the drift check doesn't mind.
+// fresh Change Sequence value, which is both its change_seq and its mark's
+// stale_seq; a rejected item keeps its row's, and a marked Parent keeps its
+// change_seq and takes a fresh value of its own as stale_seq. The values are
+// drawn after the locks (drawn, and parents_drawn after it, follow locked), so
+// an existing row's marks take them in the order they lock it, each above
+// every number the row carried; a row created concurrently is not locked
+// before the draw (see drawnInput). An item's value is drawn for every input
+// row, so a rejected item leaves a gap in the sequence, which the drift check
+// doesn't mind.
 //
 // Every row the statement marks — accepted item or Parent — is also claimed
 // for a Build owner when it has none or its owner's lease has expired: the
 // claim is decided in the upsert's SET, under the row lock ON CONFLICT takes,
-// so of two concurrent marks of one row only the first to lock it claims.
-// RETURNING sees only the new row (Postgres 17 has no RETURNING OLD), so a
-// claim reads as owner_seq = stale_seq: an owner that was not replaced holds
-// an older stale_seq, since marks only ever bump it.
+// so of two concurrent marks of one row only the first to lock it claims, and
+// sets owner_seq to the mark's own stale_seq value. RETURNING sees only the
+// new row (Postgres 17 has no RETURNING OLD), so a claim reads as owner_seq =
+// stale_seq: an owner that was not replaced holds an older stale_seq, since
+// every mark sets a value never drawn before.
 func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, lease time.Duration) (core.Registered, error) {
 	if len(items) == 0 {
 		return core.Registered{}, nil
@@ -303,10 +322,14 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		     ORDER BY r.type, r.id
 		     FOR UPDATE OF r
 		 ),
+		 drawn AS MATERIALIZED (
+		     SELECT input.*, nextval('change_sequence') AS seq
+		     FROM input CROSS JOIN (SELECT count(*) FROM locked) AS l
+		 ),
 		 accepted AS (
 		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata, change_seq, owner_seq, owner_since)
-		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence'), 1, now()
-		     FROM input CROSS JOIN (SELECT count(*) FROM locked) AS l
+		     SELECT t, i, v, del, seq, now(), meta, seq, seq, now()
+		     FROM drawn
 		     ORDER BY t, i
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET version = CASE WHEN EXCLUDED.deleted THEN 0
@@ -314,10 +337,10 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		                        ELSE EXCLUDED.version END,
 		         deleted = EXCLUDED.deleted,
 		         change_seq = EXCLUDED.change_seq,
-		         stale_seq = r.stale_seq + 1,
+		         stale_seq = EXCLUDED.stale_seq,
 		         stale_since = COALESCE(r.stale_since, now()),
 		         metadata = EXCLUDED.metadata,
-		         owner_seq = CASE WHEN `+claimable("$6")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_seq = CASE WHEN `+claimable("$6")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
 		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
 		     WHERE EXCLUDED.deleted OR EXCLUDED.version = 0 OR r.version < EXCLUDED.version
 		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed
@@ -331,14 +354,17 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		     WHERE NOT EXISTS (SELECT 1 FROM accepted a2 WHERE a2.type = rel.resource AND a2.id = rel.resource_id)
 		     ORDER BY rel.resource, rel.resource_id, input.ord DESC
 		 ),
+		 parents_drawn AS MATERIALIZED (
+		     SELECT t, i, meta, nextval('change_sequence') AS seq FROM parents
+		 ),
 		 marked AS (
 		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
-		     SELECT t, i, 1, now(), meta, 1, now() FROM parents
+		     SELECT t, i, seq, now(), meta, seq, now() FROM parents_drawn
 		     ON CONFLICT (type, id) DO UPDATE
-		     SET stale_seq = r.stale_seq + 1,
+		     SET stale_seq = EXCLUDED.stale_seq,
 		         stale_since = COALESCE(r.stale_since, now()),
 		         metadata = EXCLUDED.metadata,
-		         owner_seq = CASE WHEN `+claimable("$6")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_seq = CASE WHEN `+claimable("$6")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
 		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
 		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed, r.metadata
 		 )
@@ -417,17 +443,36 @@ const lockedInput = `locked AS MATERIALIZED (
 		     FOR UPDATE OF r
 		 )`
 
-// MarkStale durably records build intent for the given resources: bump
-// stale_seq and set stale_since — keeping the OLDEST timestamp, so
-// "stale for too long" measures the oldest unserved change. The notification
-// metadata is stored alongside the mark (last mark wins) so a sweep-recovered
-// build runs with the same context an inline build would have.
+// drawnInput is the CTE named drawn that MarkStale's marks follow lockedInput
+// with: each distinct resource of the arrays $1 and $2 once, with the Change
+// Sequence value seq its mark sets as stale_seq (and a claim as owner_seq).
+// It joins (SELECT count(*) FROM locked), so each value is drawn after every
+// lock is taken: an existing row's marks take their values in the order they
+// lock it, each above every number the row carried. A row created by a
+// transaction still uncommitted when the statement started is not in locked,
+// so a mark of it can draw before that creator's numbers and write a lower
+// stale_seq; the guards only compare stale_seq and owner tokens for
+// equality, and the value is unique, so that costs nothing. MATERIALIZED
+// draws each value once, however often the write reads seq.
+const drawnInput = `drawn AS MATERIALIZED (
+		     SELECT x.t, x.i, nextval('change_sequence') AS seq
+		     FROM (SELECT DISTINCT t, i FROM unnest($1::text[], $2::text[]) AS u(t, i)) AS x
+		     CROSS JOIN (SELECT count(*) FROM locked) AS l
+		 )`
+
+// MarkStale durably records build intent for the given resources: set
+// stale_seq to a fresh Change Sequence value and set stale_since — keeping
+// the OLDEST timestamp, so "stale for too long" measures the oldest unserved
+// change. The notification metadata is stored alongside the mark (last mark
+// wins) so a sweep-recovered build runs with the same context an inline
+// build would have.
 //
 // A lease above zero also claims each row without a live owner, as
-// RegisterChanges does, and returns those; a lease of zero leaves the owner
-// columns alone and returns nil. Either way the rows are locked in (type, id)
-// order before any is marked, so it doesn't deadlock over rows that exist when
-// it starts; rows created or removed concurrently still can (seams S4).
+// RegisterChanges does, with owner_seq set to the mark's stale_seq, and
+// returns those; a lease of zero leaves the owner columns alone and returns
+// nil. Either way the rows are locked in (type, id) order before any is
+// marked, so it doesn't deadlock over rows that exist when it starts; rows
+// created or removed concurrently still can (seams S4).
 func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -440,13 +485,12 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 	}
 	if lease <= 0 {
 		_, err := s.pool.Exec(ctx,
-			`WITH `+lockedInput+`
+			`WITH `+lockedInput+`, `+drawnInput+`
 			 INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
-			 SELECT DISTINCT t, i, 1, now(), $3::jsonb
-			 FROM unnest($1::text[], $2::text[]) AS x(t, i) CROSS JOIN (SELECT count(*) FROM locked) AS l
+			 SELECT t, i, seq, now(), $3::jsonb FROM drawn
 			 ORDER BY t, i
 			 ON CONFLICT (type, id) DO UPDATE
-			 SET stale_seq = r.stale_seq + 1,
+			 SET stale_seq = EXCLUDED.stale_seq,
 			     stale_since = COALESCE(r.stale_since, now()),
 			     metadata = EXCLUDED.metadata`,
 			types, ids, metadata,
@@ -454,17 +498,16 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`WITH `+lockedInput+`,
+		`WITH `+lockedInput+`, `+drawnInput+`,
 		 marked AS (
 		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
-		     SELECT DISTINCT t, i, 1, now(), $3::jsonb, 1, now()
-		     FROM unnest($1::text[], $2::text[]) AS x(t, i) CROSS JOIN (SELECT count(*) FROM locked) AS l
+		     SELECT t, i, seq, now(), $3::jsonb, seq, now() FROM drawn
 		     ORDER BY t, i
 		     ON CONFLICT (type, id) DO UPDATE
-		     SET stale_seq = r.stale_seq + 1,
+		     SET stale_seq = EXCLUDED.stale_seq,
 		         stale_since = COALESCE(r.stale_since, now()),
 		         metadata = EXCLUDED.metadata,
-		         owner_seq = CASE WHEN `+claimable("$4")+` THEN r.stale_seq + 1 ELSE r.owner_seq END,
+		         owner_seq = CASE WHEN `+claimable("$4")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
 		         owner_since = CASE WHEN `+claimable("$4")+` THEN now() ELSE r.owner_since END
 		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq
 		 )
@@ -486,31 +529,68 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 	return owned, rows.Err()
 }
 
-// BeginBuild atomically bumps the Build Sequence (ES external_gte OCC version),
-// captures the current stale_seq for the race-safe finish at the end of the
-// build, and takes the build's start from the Change Sequence in the same
-// statement. It leaves the row's change_seq alone: a build is not a change.
-// A token that is the row's owner token renews the owner's lease.
+// BeginBuild bumps the Build Sequence (ES external_gte OCC version) to a
+// fresh Change Sequence value, which is also the build's start for the drift
+// check, and captures the current stale_seq for the race-safe finish at the
+// end of the build, in one statement. The value is drawn after an existing
+// row is locked (locked), so of two concurrent builds the one that locks the
+// row later carries the higher Build Sequence along with the later
+// stale_seq, and a recreated row's first build is above every version its
+// old document had. A row its snapshot could not see — created by a
+// transaction still uncommitted when it started — is locked only by ON
+// CONFLICT, after the draw; the update then draws again, under the lock,
+// when the first value is not above every number the creator left, so the
+// guarantee holds there too at the cost of a gap. It leaves the row's
+// change_seq alone: a build is not a change. A token that is the row's owner
+// token renews the owner's lease.
 func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token int64) (core.BuildBegun, error) {
 	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
-		`INSERT INTO resources AS r (type, id, build_idx)
-		 VALUES ($1, $2, 1)
+		`WITH locked AS MATERIALIZED (
+		     SELECT 1 FROM resources WHERE type=$1 AND id=$2 FOR UPDATE
+		 )
+		 INSERT INTO resources AS r (type, id, build_idx)
+		 SELECT $1, $2, nextval('change_sequence') FROM (SELECT count(*) FROM locked) AS l
 		 ON CONFLICT (type, id) DO UPDATE
-		 SET build_idx = r.build_idx + 1,
+		 SET build_idx = CASE
+		         WHEN EXCLUDED.build_idx > GREATEST(r.build_idx, r.stale_seq, r.change_seq, COALESCE(r.owner_seq, 0))
+		         THEN EXCLUDED.build_idx ELSE nextval('change_sequence') END,
 		     owner_since = CASE WHEN $3::bigint <> 0 AND r.owner_seq = $3 THEN now() ELSE r.owner_since END
-		 RETURNING build_idx, stale_seq, nextval('change_sequence')`,
+		 RETURNING build_idx, stale_seq`,
 		resource.Type, resource.Id, token,
-	).Scan(&b.BuildIdx, &b.StaleSeq, &b.Start)
+	).Scan(&b.BuildIdx, &b.StaleSeq)
 	if err != nil {
 		return core.BuildBegun{}, err
 	}
+	b.Start = b.BuildIdx
 	return b, nil
 }
 
-// BeginDelete: see core.Store. Contract stub, implemented by L2.1 lane A.
+// BeginDelete bumps a tombstone's Build Sequence to a fresh Change Sequence
+// value in one guarded UPDATE, only while its stale_seq is still staleSeq
+// and it is still deleted; a non-zero token that is the row's owner token
+// renews the owner's lease. No row updated — a later mark moved stale_seq, a
+// recreate cleared deleted, or the row is gone — reports the delete
+// Superseded and changes nothing. An UPDATE that waited for a concurrent
+// write re-checks its guard against the committed row and draws its value
+// then, so the bump lands above every number that write left.
 func (s *Store) BeginDelete(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.DeleteBegun, error) {
-	return core.DeleteBegun{}, errors.New("BeginDelete: not implemented")
+	var d core.DeleteBegun
+	err := s.pool.QueryRow(ctx,
+		`UPDATE resources
+		 SET build_idx = nextval('change_sequence'),
+		     owner_since = CASE WHEN $4::bigint <> 0 AND owner_seq = $4 THEN now() ELSE owner_since END
+		 WHERE type=$1 AND id=$2 AND stale_seq=$3 AND deleted
+		 RETURNING build_idx`,
+		resource.Type, resource.Id, staleSeq, token,
+	).Scan(&d.BuildIdx)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return core.DeleteBegun{Superseded: true}, nil
+	}
+	if err != nil {
+		return core.DeleteBegun{}, err
+	}
+	return d, nil
 }
 
 // ownedArrays splits ownerships into the parallel arrays the owner
