@@ -501,7 +501,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					}, seq); err != nil {
 						logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
 						fl.fail(ctx, id)
+						continue
 					}
+					// The page may have been fetched before seq was taken (a
+					// fresh BeginBuild above): a recreate built and settled
+					// in between wrote below seq, and the delete removed it.
+					// Check the root against the walk start, as a root the
+					// walk settles checks itself (driftBase.checkRoot); a hit
+					// or a failed check re-marks and re-builds it — at worst
+					// a redundant build.
+					fl.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: doc.Root, Start: walkStart}}})
 					continue
 				}
 

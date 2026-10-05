@@ -846,6 +846,102 @@ func TestRebuildAll_NilDoc_DeletesAtTheResourcesSequence(t *testing.T) {
 	})
 }
 
+// A plan walk fetches a page before it begins the resources on it, so a
+// resource listed without data can be recreated, built and settled before
+// the walk's delete runs at a higher Build Sequence and removes it (ruling
+// R8). The delete is therefore followed by the drift check of its root
+// against the walk start, as a root the walk settles checks itself: a change
+// accepted after the walk start — or a failed check — re-marks the root and
+// re-builds it; no change re-marks nothing.
+func TestRebuildAll_NilDoc_DeleteIsFollowedByTheRootsDriftCheck(t *testing.T) {
+	// The walk lists 1 with data and 2 without; a live build of 2 finds it
+	// recreated.
+	walk := func() *staticExecuter {
+		return &staticExecuter{
+			docs: []projection.BuildDoc{productDocWith("1"), nilDoc("2")},
+			byID: map[string][]projection.BuildDoc{"2": {productDocWith("2")}},
+		}
+	}
+	// nilChecks is every drift check of root 2 alone from the walk start.
+	nilChecks := func(st *rebuildRecordingStore) int {
+		n := 0
+		for _, batch := range walkChecks(st) {
+			if fmt.Sprint(batch) == fmt.Sprint([]ChangeCheck{{product("2"), 1001}}) {
+				n++
+			}
+		}
+		return n
+	}
+
+	for name, setup := range map[string]func(st *rebuildRecordingStore){
+		"changed after the walk start": func(st *rebuildRecordingStore) {
+			st.driftChildren = map[string]bool{"2": true}
+			st.driftBudget.Store(1)
+		},
+		"drift check fails": func(st *rebuildRecordingStore) {
+			st.errChildren = map[string]bool{"2": true}
+			st.errBudget.Store(1)
+		},
+	} {
+		t.Run(name+": re-marks, then re-builds", func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, 2 at 43
+			setup(st)
+			if err := rebuildAllProducts(t, st, walk()); err != nil {
+				t.Fatal(err)
+			}
+
+			calls := st.callsSnapshot()
+			if n := nilChecks(st); n != 1 {
+				t.Fatalf("the deleted root must be checked once from the walk start, got %d: %v", n, st.checksSnapshot())
+			}
+			remove := callIndexes(calls, "RemoveResource:product/2:43")
+			marks := callIndexes(calls, "MarkStale:product/2")
+			begins := callIndexes(calls, "BeginBuild:product/2")
+			if len(remove) != 1 || len(marks) != 1 || marks[0] < remove[0] {
+				t.Fatalf("the delete must be followed by one re-mark of its root: %v", calls)
+			}
+			if len(begins) != 2 || begins[1] < marks[0] {
+				t.Fatalf("the re-mark must claim and re-build the root: %v", calls)
+			}
+			if len(callIndexes(calls, "MarkStale:product/1")) != 0 {
+				t.Fatalf("an unchanged root must not be re-marked: %v", calls)
+			}
+		})
+	}
+
+	t.Run("re-mark fails: fails the root", func(t *testing.T) {
+		st := &rebuildRecordingStore{driftChildren: map[string]bool{"2": true}, markErrs: map[string]int{"product/2": 1}}
+		st.driftBudget.Store(1)
+		if err := rebuildAllProducts(t, st, walk()); err == nil {
+			t.Fatal("a rebuild whose deleted root could not be re-marked must report failure")
+		}
+
+		calls := st.callsSnapshot()
+		failed, marked := callIndexes(calls, "MarkStaleFailed:product/2"), callIndexes(calls, "MarkStale:product/2")
+		if len(failed) != 1 || len(marked) != 1 || marked[0] < failed[0] {
+			t.Fatalf("a failed re-mark must fail the root, which marks it stale for the sweep: %v", calls)
+		}
+		if len(callIndexes(calls, "BeginBuild:product/2")) != 1 {
+			t.Fatalf("a failed re-mark claims nothing and re-builds nothing: %v", calls)
+		}
+	})
+
+	t.Run("no change after the walk start: no re-mark", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		if err := rebuildAllProducts(t, st, walk()); err != nil {
+			t.Fatal(err)
+		}
+
+		calls := st.callsSnapshot()
+		if n := nilChecks(st); n != 1 {
+			t.Fatalf("the deleted root must be checked once from the walk start, got %d: %v", n, st.checksSnapshot())
+		}
+		if countPrefix(calls, "MarkStale:") != 0 || len(callIndexes(calls, "BeginBuild:product/2")) != 1 {
+			t.Fatalf("no change after the walk start re-marks and re-builds nothing: %v", calls)
+		}
+	})
+}
+
 func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"cX": true}}
 	st.driftBudget.Store(2)
