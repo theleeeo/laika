@@ -8,10 +8,12 @@ package tests
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/model"
 )
 
 // Test_Recreate_WithinGCDeletes_IndexesNewData: a/1 is created and built
@@ -269,4 +271,118 @@ func (t *TestSuite) Test_Recreate_LateNotifiedDelete_KeepsRecreatedDocument() {
 	t.Require().Equal("new", fields["field1"], "the recreated document keeps B's data")
 	t.Require().Equal([]string{"b/x"}, t.childEdges("a", "1"),
 		"D's edge removal must leave the edge set B stored at a higher Build Sequence")
+}
+
+// deleteCountingBackend is a SearchBackend that counts Delete calls per
+// docID before delegating.
+type deleteCountingBackend struct {
+	core.SearchBackend
+
+	mu      sync.Mutex
+	deletes map[string]int
+}
+
+// Delete implements [core.SearchBackend].
+func (b *deleteCountingBackend) Delete(ctx context.Context, index, docID string, version int64) error {
+	b.mu.Lock()
+	if b.deletes == nil {
+		b.deletes = map[string]int{}
+	}
+	b.deletes[docID]++
+	b.mu.Unlock()
+	return b.SearchBackend.Delete(ctx, index, docID, version)
+}
+
+// deleteCalls returns how many Delete calls of docID ran on b.
+func (b *deleteCountingBackend) deleteCalls(docID string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.deletes[docID]
+}
+
+// Test_Recreate_DeleteLeaseLapsedBeforeBump_AbortsAndKeepsDocument: a/1 with
+// child b/x is created and built ("old") on X, then removed at the source and
+// its ChangeDeleted registered on X. a/1's Build Sequence is now N. The
+// interleaving, forced through the gated store:
+//
+//  1. X claims the tombstone and submits its owned delete D. D's pool task
+//     renews D's lease at dequeue, and D is held on entry to BeginDelete —
+//     before its Build Sequence bump.
+//  2. D's lease lapses (owner_since is backdated past it).
+//  3. a/1 is recreated at the source ("new", child b/x still related) and its
+//     ChangeCreated is registered on the suite's indexer: the lapsed lease
+//     lets the mark claim the row under a new owner token, and the
+//     recreate's owned build R begins at N+1, writes the "new" document,
+//     stores the edge set a/1 -> b/x and finishes, clearing the mark.
+//  4. D is released into BeginDelete: stale_seq is no longer D's and the row
+//     is no longer a tombstone, so D is superseded and aborts. It issues no
+//     ES delete and removes no edges, and as it no longer owns the row, its
+//     finish neither re-claims it nor submits a follow-up.
+//
+// Without the abort D would bump the Build Sequence to N+2, above R's N+1,
+// and its versioned ES delete and bounded edge removal would both be
+// accepted: the recreated document and R's edge set would go, with the mark
+// already cleared — lost until the next change. The recreate is registered on
+// the suite's indexer, not X, because X.WaitForIdle would wait on the held
+// D. No sweep runs: the final state is what the inline work alone left.
+func (t *TestSuite) Test_Recreate_DeleteLeaseLapsedBeforeBump_AbortsAndKeepsDocument() {
+	t.setResourceConfig(DefaultResourceConfig)
+	ctx := t.T().Context()
+	a1 := model.Resource{Type: "a", Id: "1"}
+
+	gated := newGatingStore(t.store)
+	backend := &deleteCountingBackend{SearchBackend: elasticsearch.New(t.esClient, true)}
+	x := t.newIndexer(DefaultResourceConfig, core.Config{ES: backend, Store: gated})
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	t.createAWithChildBX(x, waitCtx)
+
+	// 1. D: the owned delete is held on entry to BeginDelete. The deferred
+	// release frees a D still held when the test fails, before AfterTest and
+	// X's shutdown.
+	reached := gated.armBeginDelete(a1)
+	defer gated.releaseBeginDelete()
+	t.fakeProvider.DeleteResource("a", "1")
+	t.Require().NoError(x.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeDeleted,
+	}))
+	t.awaitGate(reached, "D, the owned delete of a/1, to reach BeginDelete")
+	dToken, _ := t.ownerColumns("a", "1")
+	t.Require().NotNil(dToken, "D owns the tombstone")
+
+	// 2. D's lease lapses.
+	_, err := t.pool.Exec(ctx,
+		`UPDATE resources SET owner_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
+
+	// 3. R: the recreate claims the row and is built.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "new"})
+	buildsBefore := t.resourceRebuildCounter("a", "1")
+	t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 2,
+	}))
+	rToken, _ := t.ownerColumns("a", "1")
+	t.Require().NotNil(rToken, "the recreate's mark claimed a/1")
+	t.Require().NotEqual(*dToken, *rToken, "the recreate claimed a/1 under a new owner token: D's lease had lapsed")
+	t.worker.Drain(ctx)
+	t.Require().Equal(buildsBefore+1, t.resourceRebuildCounter("a", "1"), "the recreate's build began")
+	fields, ok := t.docFields(core.IndexName("a", 1), "1")
+	t.Require().True(ok, "the recreate's build indexed a/1")
+	t.Require().Equal("new", fields["field1"])
+	t.Require().Equal([]string{"b/x"}, t.childEdges("a", "1"), "the recreate's build stored the edge a/1 -> b/x")
+
+	// 4. D enters BeginDelete, superseded.
+	gated.releaseBeginDelete()
+	t.Require().NoError(x.WaitForIdle(waitCtx))
+
+	t.Require().Equal(0, backend.deleteCalls("1"), "a superseded delete issues no ES delete")
+	t.Require().Equal(0, gated.removeCalls(a1), "a superseded delete removes no edges")
+	t.Require().Equal(buildsBefore+1, t.resourceRebuildCounter("a", "1"), "D's finish submits no follow-up")
+	t.Require().Equal(1, t.resourceRowCount("a", "1"), "the recreated row stays")
+	t.Require().Nil(t.staleSince("a", "1"), "nothing is left stale for a sweep")
+	fields, ok = t.docFields(core.IndexName("a", 1), "1")
+	t.Require().True(ok, "the delete, superseded before its bump, must leave the recreated document")
+	t.Require().Equal("new", fields["field1"], "the recreated document keeps the recreate's data")
+	t.Require().Equal([]string{"b/x"}, t.childEdges("a", "1"), "the delete must leave the recreate's edge set")
 }
