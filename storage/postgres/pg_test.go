@@ -1122,23 +1122,34 @@ func openGate(t *testing.T, pool *pgxpool.Pool, lock string, args ...any) *gate 
 // backend waiting on anything else does not count.
 func (g *gate) waitForWaiters(t *testing.T, n int) {
 	t.Helper()
+	waitBehindGates(t, n, g)
+}
+
+// waitBehindGates is waitForWaiters for several gates: it polls until n
+// backends wait behind any of them, each counted once.
+func waitBehindGates(t *testing.T, n int, gates ...*gate) {
+	t.Helper()
+	pids := make([]int32, len(gates))
+	for i, g := range gates {
+		pids[i] = g.pid
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var got int
 		if err := testPool.QueryRow(context.Background(),
 			`WITH RECURSIVE w(pid) AS (
-			     SELECT pid FROM pg_stat_activity WHERE $1::int = ANY(pg_blocking_pids(pid))
+			     SELECT pid FROM pg_stat_activity WHERE pg_blocking_pids(pid) && $1::int[]
 			     UNION
 			     SELECT a.pid FROM pg_stat_activity a JOIN w ON w.pid = ANY(pg_blocking_pids(a.pid))
 			 )
-			 SELECT count(*) FROM w`, g.pid).Scan(&got); err != nil {
-			t.Fatalf("read the gate's waiters: %v", err)
+			 SELECT count(*) FROM w`, pids).Scan(&got); err != nil {
+			t.Fatalf("read the gates' waiters: %v", err)
 		}
 		if got >= n {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%d backends waiting behind the gate after 10s, want %d", got, n)
+			t.Fatalf("%d backends waiting behind the gates after 10s, want %d", got, n)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -1257,6 +1268,68 @@ func TestClaim_ExactlyOneOfTwoConcurrentMarks(t *testing.T) {
 		})
 		requireOneClaim(t, parent, tokens, 2)
 	})
+}
+
+var deadlockRuns atomic.Int64
+
+// Two single-item registrations of a and b, each the other's Parent, take
+// the same two rows: an item and then its Parent. Gates hold both rows until
+// both registrations queue behind them, so both reach the rows at once. A
+// registration that locked its item before its Parent would then hold one
+// row and wait for the other, and Postgres would abort one with 40P01; in
+// (type, id) order both queue on a's row and run one after the other.
+func TestRegisterChanges_ItemsThatAreEachOthersParentsDoNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	a, b := model.Resource{Type: "dl-a", Id: id}, model.Resource{Type: "dl-b", Id: id}
+	seed(t, a, 0, 0, false)
+	seed(t, b, 0, 0, false)
+	relate(t, [2]model.Resource{a, b}, [2]model.Resource{b, a})
+
+	gates := []*gate{lockRow(t, testPool, a), lockRow(t, testPool, b)}
+	type result struct {
+		item model.Resource
+		got  core.Registered
+		err  error
+	}
+	results := make(chan result, 2)
+	for _, item := range []model.Resource{a, b} {
+		go func() {
+			got, err := st.RegisterChanges(ctx, []core.Registration{{Resource: item, Version: 1}}, time.Minute)
+			results <- result{item, got, err}
+		}()
+	}
+	waitBehindGates(t, 2, gates...)
+	for _, g := range gates {
+		g.release()
+	}
+
+	for range 2 {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Fatalf("register %v: %v", r.item, r.err)
+			}
+			parent := a
+			if r.item == a {
+				parent = b
+			}
+			if !r.got.Items[0].Accepted {
+				t.Fatalf("register %v: item %+v, want it accepted", r.item, r.got.Items[0])
+			}
+			if len(r.got.Parents) != 1 || r.got.Parents[0].Resource != parent {
+				t.Fatalf("register %v: Parents %+v, want %v alone", r.item, r.got.Parents, parent)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a registration did not finish after the gates committed")
+		}
+	}
+	for _, res := range []model.Resource{a, b} {
+		if version, _, seq, since, _ := row(t, res); version != 1 || seq != 2 || since == nil {
+			t.Fatalf("%v: version %d stale_seq %d stale_since %v, want version 1, marked twice (as item and as Parent)", res, version, seq, since)
+		}
+	}
 }
 
 func TestClaim_LiveLeaseBlocksAndExpiredLeaseYields(t *testing.T) {

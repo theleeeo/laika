@@ -235,13 +235,18 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 
 // RegisterChanges records a batch of changes in one statement, so each
 // accepted item's version, its stale mark and its Parents' marks commit
-// together or not at all. The item upsert's WHERE is the stale-version check:
-// a delete or a version-0 item is always accepted, a versioned one only when
-// strictly newer. Parents are found from the accepted items only, so a stale
-// item marks nothing; accepted in-batch items are excluded from the Parent
-// mark because one statement may modify a row only once, and their own row
-// already carries the mark. A Parent shared by several accepted children
-// stores the metadata of the last one in batch order.
+// together or not at all. Before writing, it locks the existing rows it may
+// mark — the items and their Parents — in (type, id) order, as MarkStale and
+// the owner statements lock theirs, so none of them deadlock over existing
+// rows; it upserts the items in that order too, which narrows the one case no
+// lock covers, new rows two statements insert at once. The item upsert's
+// WHERE is the stale-version check: a delete or a version-0 item is always
+// accepted, a versioned one only when strictly newer. Parents are found from
+// the accepted items only, so a stale item marks nothing; accepted in-batch
+// items are excluded from the Parent mark because one statement may modify a
+// row only once, and their own row already carries the mark. A Parent shared
+// by several accepted children stores the metadata of the last one in batch
+// order.
 //
 // Every accepted row — upsert, version-0 item or delete — is stamped with a
 // fresh Change Sequence value; a rejected item and a marked Parent keep
@@ -285,9 +290,22 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		     FROM unnest($1::text[], $2::text[], $3::bool[], $4::bigint[]) WITH ORDINALITY AS x(t, i, del, v, ord)
 		     JOIN jsonb_array_elements($5::jsonb) WITH ORDINALITY AS m(meta, ord) USING (ord)
 		 ),
+		 locked AS MATERIALIZED (
+		     SELECT r.type FROM resources r
+		     WHERE (r.type, r.id) IN (
+		         SELECT t, i FROM input
+		         UNION
+		         SELECT rel.resource, rel.resource_id FROM input
+		         JOIN relations rel ON rel.related_resource = input.t AND rel.related_resource_id = input.i
+		     )
+		     ORDER BY r.type, r.id
+		     FOR UPDATE OF r
+		 ),
 		 accepted AS (
 		     INSERT INTO resources AS r (type, id, version, deleted, stale_seq, stale_since, metadata, change_seq, owner_seq, owner_since)
-		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence'), 1, now() FROM input
+		     SELECT t, i, v, del, 1, now(), meta, nextval('change_sequence'), 1, now()
+		     FROM input CROSS JOIN (SELECT count(*) FROM locked) AS l
+		     ORDER BY t, i
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET version = CASE WHEN EXCLUDED.deleted THEN 0
 		                        WHEN EXCLUDED.version = 0 THEN r.version
@@ -374,6 +392,19 @@ func claimable(lease string) string {
 	return `(r.owner_seq IS NULL OR r.owner_since IS NULL OR r.owner_since < now() - ` + lease + `::bigint * interval '1 microsecond')`
 }
 
+// lockedInput is the CTE named locked that MarkStale and the owner
+// statements open with: it locks the existing rows named by the type and id
+// arrays $1 and $2 in (type, id) order. The statement's write joins
+// (SELECT count(*) FROM locked), so every lock is taken before its first
+// row is written: Postgres doesn't promise to run a CTE before the parts of
+// the statement that don't read it. MATERIALIZED keeps it from being inlined.
+const lockedInput = `locked AS MATERIALIZED (
+		     SELECT r.type FROM resources r
+		     WHERE (r.type, r.id) IN (SELECT t, i FROM unnest($1::text[], $2::text[]) AS x(t, i))
+		     ORDER BY r.type, r.id
+		     FOR UPDATE OF r
+		 )`
+
 // MarkStale durably records build intent for the given resources: bump
 // stale_seq and set stale_since — keeping the OLDEST timestamp, so
 // "stale for too long" measures the oldest unserved change. The notification
@@ -382,7 +413,9 @@ func claimable(lease string) string {
 //
 // A lease above zero also claims each row without a live owner, as
 // RegisterChanges does, and returns those; a lease of zero leaves the owner
-// columns alone and returns nil.
+// columns alone and returns nil. Either way the existing rows are locked in
+// (type, id) order before any is marked, so concurrent marks and
+// registrations don't deadlock.
 func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
@@ -395,8 +428,11 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 	}
 	if lease <= 0 {
 		_, err := s.pool.Exec(ctx,
-			`INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
-			 SELECT DISTINCT t, i, 1, now(), $3::jsonb FROM unnest($1::text[], $2::text[]) AS x(t, i)
+			`WITH `+lockedInput+`
+			 INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
+			 SELECT DISTINCT t, i, 1, now(), $3::jsonb
+			 FROM unnest($1::text[], $2::text[]) AS x(t, i) CROSS JOIN (SELECT count(*) FROM locked) AS l
+			 ORDER BY t, i
 			 ON CONFLICT (type, id) DO UPDATE
 			 SET stale_seq = r.stale_seq + 1,
 			     stale_since = COALESCE(r.stale_since, now()),
@@ -406,9 +442,12 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
-		`WITH marked AS (
+		`WITH `+lockedInput+`,
+		 marked AS (
 		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
-		     SELECT DISTINCT t, i, 1, now(), $3::jsonb, 1, now() FROM unnest($1::text[], $2::text[]) AS x(t, i)
+		     SELECT DISTINCT t, i, 1, now(), $3::jsonb, 1, now()
+		     FROM unnest($1::text[], $2::text[]) AS x(t, i) CROSS JOIN (SELECT count(*) FROM locked) AS l
+		     ORDER BY t, i
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET stale_seq = r.stale_seq + 1,
 		         stale_since = COALESCE(r.stale_since, now()),
@@ -470,15 +509,17 @@ func ownedArrays(owned []core.Owned) (types, ids []string, tokens []int64) {
 }
 
 // RenewOwners renews the lease of every given ownership whose token is still
-// the row's owner token and returns those: the ownerships still held.
+// the row's owner token and returns those: the ownerships still held. It
+// locks the rows in (type, id) order first, so it can't deadlock with a mark.
 func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Owned, error) {
 	if len(owned) == 0 {
 		return nil, nil
 	}
 	types, ids, tokens := ownedArrays(owned)
 	rows, err := s.pool.Query(ctx,
-		`UPDATE resources r SET owner_since = now()
-		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token)
+		`WITH `+lockedInput+`
+		 UPDATE resources r SET owner_since = now()
+		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token) CROSS JOIN (SELECT count(*) FROM locked) AS l
 		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token
 		 RETURNING r.type, r.id, r.owner_seq`,
 		types, ids, tokens,
@@ -502,15 +543,17 @@ func (s *Store) RenewOwners(ctx context.Context, owned []core.Owned) ([]core.Own
 }
 
 // ReleaseOwners drops every given ownership whose token is still the row's
-// owner token. The stale mark stays for the next change or the sweep.
+// owner token. The stale mark stays for the next change or the sweep. It
+// locks the rows in (type, id) order first, so it can't deadlock with a mark.
 func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 	if len(owned) == 0 {
 		return nil
 	}
 	types, ids, tokens := ownedArrays(owned)
 	_, err := s.pool.Exec(ctx,
-		`UPDATE resources r SET owner_seq = NULL, owner_since = NULL
-		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token)
+		`WITH `+lockedInput+`
+		 UPDATE resources r SET owner_seq = NULL, owner_since = NULL
+		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token) CROSS JOIN (SELECT count(*) FROM locked) AS l
 		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token`,
 		types, ids, tokens,
 	)
