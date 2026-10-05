@@ -111,6 +111,24 @@
 > `RelatedResource` carry identities only (`RelatedResource` field 2 is
 > reserved). Nothing in the build path holds a Child's version.
 
+> **Note (2026-10-05, runbook step L1.7):** the row locks a Store statement
+> takes on several `resources` rows are taken in **(type, id) order**.
+> `RegisterChanges`, `MarkStale`, `RenewOwners` and `ReleaseOwners`
+> (`storage/postgres/pg.go`) each open with a `locked` CTE that takes `FOR
+> UPDATE` on the existing rows they may write — for a registration, its items
+> and the Parents of every item, read from `relations` — `ORDER BY type, id`,
+> and their write depends on it, so every lock is held before the first row is
+> written; their inserts run in the same order. Two registrations whose
+> resources are each other's Parents no longer deadlock. A row the
+> statement's snapshot doesn't see can't be locked ahead, so rows created or
+> removed concurrently can still close a cycle; Postgres then aborts one
+> registration whole, and the Store returns `core.ErrRegistrationAborted`,
+> which `NotifyChange` and `NotifyChangeBatch` answer as `Aborted` for the
+> producer to retry. A new statement or
+> Store transaction that locks several `resources` rows follows the same
+> order. The locks still last one statement and are never held across a
+> fetch.
+
 > _Amended by [ADR 0008](0008-stale-mark-inline-builds-and-temporal-slow-lane.md): the at-least-once re-enqueue leg is now the stale mark + sweep instead of River retries; Build Sequence OCC and the drift check are unchanged._
 
 Multiple indexer instances run concurrently and there is no per-resource lock. Safety against racing rebuilds of the same Parent comes from three independent mechanisms:
