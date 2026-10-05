@@ -7,9 +7,13 @@
 -- it, so nextval order must be real-time order across sessions (CACHE 1: no
 -- per-session blocks) and the sequence must never wrap below existing stamps
 -- (NO CYCLE: exhausting it fails registrations loudly). Because build_idx and
--- stale_seq come from it too, both keep rising across a hard delete and a
--- recreate of a row: a recreated resource is built above every Elasticsearch
--- version its old document had, and no token of the old row matches it.
+-- stale_seq come from it too, their values never repeat, across a hard delete
+-- and a recreate of a row as well, so no token of the old row matches the new
+-- one. build_idx never goes backwards, so a recreated resource is built above
+-- every Elasticsearch version its old document had. stale_seq can: a mark of
+-- a row created by a transaction uncommitted when the mark started can draw a
+-- value below the creator's (seams S14), which costs nothing, since stale_seq
+-- and owner tokens are only compared for equality.
 CREATE SEQUENCE IF NOT EXISTS change_sequence AS bigint INCREMENT BY 1 CACHE 1 NO CYCLE;
 
 CREATE TABLE IF NOT EXISTS resources (
