@@ -511,20 +511,42 @@ func (h signalHandler) Handle(_ context.Context, r slog.Record) error {
 func (h signalHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h signalHandler) WithGroup(string) slog.Handler      { return h }
 
-// While the pool reports pressure, the sweep lists no new page: the first
-// page's probe fills the queue to its high water, and the sweep backs off —
-// several times — without listing the second page until the queue drains.
-func TestReverseSweep_BacksOffWhileThePoolIsPressured(t *testing.T) {
-	backoff := signalLogs(t, reverseSweepBackoffMsg)
-	st := &recordingStore{}
-	seedRows(st, nil, "a", "b", "c", "d")
-	ex := &sweepExecuter{}
-	p := &fakeProbe{}
-	be := &captureBackend{}
+// pressurePool parks the pool's one worker and fills its queue of two to its
+// high water of two, and returns the release that drains it; a cleanup
+// releases it too, so a failing test leaves no worker parked.
+func pressurePool(t *testing.T, idx *Indexer) (release func()) {
+	block, started := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(block) }) }
+	t.Cleanup(release)
+	if !idx.pool.trySubmit(func(context.Context) { close(started); <-block }) {
+		t.Error("parking the worker was refused")
+		return release
+	}
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Error("the worker never picked up the parking task")
+		return release
+	}
+	for range 2 {
+		if !idx.pool.trySubmit(func(context.Context) {}) {
+			t.Error("filling the queue was refused")
+		}
+	}
+	if !idx.pool.pressured() {
+		t.Error("the filled pool must report pressure")
+	}
+	return release
+}
+
+// newPressureIndexer sweeps "product" in pages of two over a pool of one
+// worker whose queue is pressured at two queued tasks.
+func newPressureIndexer(st *recordingStore, p *fakeProbe) *Indexer {
 	idx := mustNew(Config{
 		Resources:      twoVersionResources(),
-		Plans:          map[string][]projection.Plan{"product": {{Version: 1, Executer: ex, Probe: p.probe}}},
-		ES:             be,
+		Plans:          map[string][]projection.Plan{"product": {{Version: 1, Executer: &sweepExecuter{}, Probe: p.probe}}},
+		ES:             &captureBackend{},
 		Store:          st,
 		PoolSize:       1,
 		QueueSize:      2,
@@ -532,57 +554,163 @@ func TestReverseSweep_BacksOffWhileThePoolIsPressured(t *testing.T) {
 		ReverseSweeps:  map[string]ReverseSweepConfig{"product": {PageSize: 2, PageInterval: time.Nanosecond}},
 	})
 	idx.reverseSweepBackoff = time.Millisecond
+	return idx
+}
 
-	// The first probe parks the pool's one worker and fills its queue.
-	block, started := make(chan struct{}), make(chan struct{})
-	var fill sync.Once
-	p.answer = func(_ context.Context, ids []string, _ map[string]string) ([]string, error) {
-		fill.Do(func() {
-			if !idx.pool.trySubmit(func(context.Context) { close(started); <-block }) {
-				t.Error("parking the worker was refused")
+// While the pool reports pressure, the sweep lists no new page: it backs off
+// — several times — and lists nothing more until the queue drains, whether
+// the pressure was there before its first page or arose during a page.
+func TestReverseSweep_BacksOffWhileThePoolIsPressured(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// midRun pressures the pool from the first page's probe; otherwise
+		// it is pressured before the sweep starts.
+		midRun bool
+		// listedWhilePressured is the listing the sweep made before it
+		// backed off.
+		listedWhilePressured []string
+	}{
+		"before the first page": {listedWhilePressured: nil},
+		"after a page":          {midRun: true, listedWhilePressured: []string{"ListResources:product::2"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			backoff := signalLogs(t, reverseSweepBackoffMsg)
+			st := &recordingStore{}
+			seedRows(st, nil, "a", "b", "c", "d")
+			p := &fakeProbe{}
+			idx := newPressureIndexer(st, p)
+
+			var release func()
+			if tc.midRun {
+				var fill sync.Once
+				p.answer = func(_ context.Context, ids []string, _ map[string]string) ([]string, error) {
+					fill.Do(func() { release = pressurePool(t, idx) })
+					return ids, nil
+				}
+			} else {
+				release = pressurePool(t, idx)
 			}
-			<-started
-			for range 2 {
-				if !idx.pool.trySubmit(func(context.Context) {}) {
-					t.Error("filling the queue was refused")
+
+			type outcome struct {
+				res ReverseSweepResult
+				err error
+			}
+			done := make(chan outcome, 1)
+			go func() {
+				res, err := idx.ReverseSweepNow(t.Context(), "product")
+				done <- outcome{res, err}
+			}()
+
+			for range 3 {
+				select {
+				case <-backoff:
+				case o := <-done:
+					t.Fatalf("the sweep finished while the pool was pressured: %+v", o)
 				}
 			}
+			if got := callsWithPrefix(st, "ListResources"); !slices.Equal(got, tc.listedWhilePressured) {
+				t.Fatalf("no page may be listed while the pool is pressured: got %v, want %v", got, tc.listedWhilePressured)
+			}
+
+			release()
+			o := <-done
+			if o.err != nil {
+				t.Fatal(o.err)
+			}
+			waitIdle(t, idx)
+			if want := (ReverseSweepResult{Listed: 4}); o.res != want {
+				t.Fatalf("result: got %+v, want %+v", o.res, want)
+			}
+			if got, want := p.probedIDs(), []string{"a", "b", "c", "d"}; !slices.Equal(got, want) {
+				t.Fatalf("once the queue drained the sweep must go on: probed %v, want %v", got, want)
+			}
 		})
-		return ids, nil
 	}
+}
 
-	type outcome struct {
-		res ReverseSweepResult
-		err error
-	}
-	done := make(chan outcome, 1)
-	go func() {
-		res, err := idx.ReverseSweepNow(context.Background(), "product")
-		done <- outcome{res, err}
-	}()
+// A suspect whose row has a live owner is marked — its stale_seq moves, for
+// the owner's finish to see and follow up — and counted, but the mark claims
+// nothing, so the sweep builds nothing of it.
+func TestReverseSweep_SuspectWithALiveOwner_IsMarkedButNotBuilt(t *testing.T) {
+	const liveOwner = 99
+	owned := product("owned")
+	st := &recordingStore{}
+	seedRows(st, nil, "owned")
+	st.mu.Lock()
+	st.rows[owned].owner = liveOwner
+	st.mu.Unlock()
+	p := &fakeProbe{answer: func(context.Context, []string, map[string]string) ([]string, error) { return nil, nil }}
+	ex := &sweepExecuter{}
+	idx, _ := newSweepIndexer(st, ex, p, ReverseSweepConfig{})
 
-	for range 3 {
-		select {
-		case <-backoff:
-		case o := <-done:
-			t.Fatalf("the sweep finished while the pool was pressured: %+v", o)
-		}
-	}
-	if got := callsWithPrefix(st, "ListResources"); !slices.Equal(got, []string{"ListResources:product::2"}) {
-		t.Fatalf("no page may be listed while the pool is pressured: %v", got)
-	}
-
-	close(block)
-	o := <-done
-	if o.err != nil {
-		t.Fatal(o.err)
+	got, err := idx.ReverseSweepNow(t.Context(), "product")
+	if err != nil {
+		t.Fatal(err)
 	}
 	waitIdle(t, idx)
-	if want := (ReverseSweepResult{Listed: 4}); o.res != want {
-		t.Fatalf("result: got %+v, want %+v", o.res, want)
+
+	if want := (ReverseSweepResult{Listed: 1, Suspects: 1}); got != want {
+		t.Fatalf("result: got %+v, want %+v", got, want)
 	}
-	if got, want := p.probedIDs(), []string{"a", "b", "c", "d"}; !slices.Equal(got, want) {
-		t.Fatalf("once the queue drained the sweep must go on: probed %v, want %v", got, want)
+	r, _ := st.row(owned)
+	if !r.stale || r.staleSeq == 0 || r.owner != liveOwner {
+		t.Fatalf("the owned suspect must be marked under a new stale_seq and keep its owner, got %+v", r)
+	}
+	if len(callsWithPrefix(st, "BeginBuild:product/owned:")) != 0 || len(ex.requestsFor("owned")) != 0 {
+		t.Fatalf("the sweep must not build a suspect its owner holds: %v", st.callsSnapshot())
+	}
+}
+
+// groupByMetadata puts rows with equal metadata — nil and empty alike, maps
+// built separately alike — in one group, in the order each group first
+// appears; the group without metadata is probed with nil.
+func TestGroupByMetadata(t *testing.T) {
+	row := func(id string, md map[string]string) ListedResource {
+		return ListedResource{Resource: product(id), Metadata: md}
+	}
+	for name, tc := range map[string]struct {
+		page []ListedResource
+		want []probeGroup
+	}{
+		"nil and empty share the nil group": {
+			page: []ListedResource{row("a", nil), row("b", map[string]string{}), row("c", nil)},
+			want: []probeGroup{{metadata: nil, ids: []string{"a", "b", "c"}}},
+		},
+		"empty first is still probed with nil": {
+			page: []ListedResource{row("a", map[string]string{}), row("b", nil)},
+			want: []probeGroup{{metadata: nil, ids: []string{"a", "b"}}},
+		},
+		"equal maps built separately share a group": {
+			page: []ListedResource{
+				row("a", map[string]string{"actor": "A", "org": "1"}),
+				row("b", map[string]string{"actor": "B"}),
+				row("c", map[string]string{"org": "1", "actor": "A"}),
+				row("d", nil),
+			},
+			want: []probeGroup{
+				{metadata: map[string]string{"actor": "A", "org": "1"}, ids: []string{"a", "c"}},
+				{metadata: map[string]string{"actor": "B"}, ids: []string{"b"}},
+				{metadata: nil, ids: []string{"d"}},
+			},
+		},
+		"a separator inside a value is not a key boundary": {
+			page: []ListedResource{
+				row("a", map[string]string{"k": `v";"x"="y`}),
+				row("b", map[string]string{"k": "v", "x": "y"}),
+			},
+			want: []probeGroup{
+				{metadata: map[string]string{"k": `v";"x"="y`}, ids: []string{"a"}},
+				{metadata: map[string]string{"k": "v", "x": "y"}, ids: []string{"b"}},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := groupByMetadata(tc.page)
+			if !slices.EqualFunc(got, tc.want, func(a, b probeGroup) bool {
+				return (a.metadata == nil) == (b.metadata == nil) && maps.Equal(a.metadata, b.metadata) && slices.Equal(a.ids, b.ids)
+			}) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 

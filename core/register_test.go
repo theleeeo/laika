@@ -93,11 +93,8 @@ type recordingStore struct {
 	replaced   []edgeReplace
 	replaceErr error
 	onReplace  func(edgeReplace)
-	// markErr fails every MarkStale after recording it. onList, when set,
-	// runs at the start of every ListResources, outside the lock, with its
-	// after: a test can see where a reverse sweep's page starts.
+	// markErr fails every MarkStale after recording it.
 	markErr error
-	onList  func(after string)
 
 	rows     map[model.Resource]*memRow
 	seq      int64 // the last stale_seq handed out
@@ -402,11 +399,8 @@ func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duratio
 // ListResources follows the contract over the in-memory rows: up to limit
 // live rows of resourceType whose id sorts after after, in id order, each
 // with a copy of its metadata (nil when it has none); tombstones are skipped.
-// It records the call and runs onList first, outside the lock.
+// It records the call.
 func (s *recordingStore) ListResources(_ context.Context, resourceType, after string, limit int) ([]ListedResource, error) {
-	if s.onList != nil {
-		s.onList(after)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recordLocked("ListResources:%s:%s:%d", resourceType, after, limit)
