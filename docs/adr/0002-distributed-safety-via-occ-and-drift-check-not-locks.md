@@ -1,5 +1,19 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-06, runbook step L2.4):** a third durability leg stands
+> beside the ones below and ADR 0008's mark and sweep: the **reverse sweep**
+> ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md)).
+> These legs order and converge the changes Laika hears of; none reaches a
+> resource deleted at its source without a notification, whose documents
+> stayed indexed. The reverse sweep lists a configured type's live rows
+> (`Store.ListResources`), asks the source through a plan's `Probe` which
+> still exist, and marks the rest for owned builds, which delete through the
+> all-plans-nil path. It adds nothing to the legs here: its deletes are
+> builds', versioned at their Build Sequence (the L2.1 note), so a recreate
+> built above one keeps its document, and it takes no lock across a probe or
+> a fetch — `ListResources` locks nothing, and its marks are `MarkStale`'s
+> one statement.
+
 > **Note (2026-10-05, runbook step L2.1):** leg 1 orders **deletes** by the
 > Build Sequence like writes, and the Build Sequence is drawn from the
 > **Change Sequence**.

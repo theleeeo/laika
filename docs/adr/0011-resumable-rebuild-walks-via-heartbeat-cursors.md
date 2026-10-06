@@ -2,6 +2,18 @@
 
 _Accepted, 2026-09-04._
 
+> **Note (2026-10-06, runbook step L2.4):** the reverse sweep
+> ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md))
+> resumes by this pattern — its `RunReverseSweep` activity heartbeats its
+> cursor and re-records it on liveness beats — but the rule that only
+> single-active-plan walks checkpoint does not cover it. The rule is about
+> plan walks, whose multi-plan form holds resources begun but unsettled
+> across plans; the sweep walks no plan. Its cursor is the last id of a page
+> of `resources` rows, reported once that page's suspects are durably
+> marked, so every position it reports is settled whatever the number of
+> plans. Nor does it carry the page-token precondition below: the id is
+> Laika's own, and a delete at the source can't shift it.
+
 > **Note (2026-10-04, runbook step L1.5):** no rebuild wipes or merges edges.
 > Each flush replaces the edge set of each (resource, Schema Version) document
 > it landed, at the resource's Build Sequence

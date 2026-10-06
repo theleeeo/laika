@@ -1,5 +1,22 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-06, runbook step L2.4):** the **reverse sweep**
+> ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md))
+> is a third durability leg beside the mark and the sweep here and ADR
+> 0002's, and it changes delete semantics: a resource deleted at its source
+> without a notification, which until now stayed indexed, is found and
+> deleted. It is a mark-first path, joining those under *Mark-first is the
+> one primitive*: the ids its probe doesn't find at their source go through
+> `scheduleBuild`, so one `MarkStale` marks and claims them before their
+> owned inline builds are submitted, and a build whose every plan finds the
+> resource gone deletes its documents and its row (the L2.2 note). A shed or
+> failed build leaves its mark for `StaleSweep`, so the sweep's cursor passes
+> a page once its suspects are marked. Only those suspects are marked, never
+> the whole type. Its schedules join the slow lane beside `laika-stale-sweep`:
+> one per type configured in `Config.ReverseSweeps`, `laika-reverse-sweep-<type>`,
+> overlap _skip_, each run a `ReverseSweep` workflow with one heartbeating
+> activity.
+
 > **Note (2026-10-06, runbook step L1.8):** a resource's metadata is its own,
 > and a mark carries none to another resource (open point Q16 in laika-dev's
 > `docs/open-points.md`, *Which metadata should a Build owner's follow-up run
