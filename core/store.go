@@ -76,9 +76,9 @@ type Store interface {
 	MarkStale(ctx context.Context, resources []model.Resource, lease time.Duration) ([]Owned, error)
 	// BeginBuild bumps the Build Sequence, captures the current stale_seq and
 	// takes the build's start from the Change Sequence, and reads the row's
-	// metadata. Callers invoke it before the build's fetches. A non-zero token that is the row's owner
-	// token renews its lease (owner_since = now()); 0 is a build that owns
-	// nothing.
+	// metadata. Callers invoke it before the build's fetches. A non-zero
+	// token that is the row's owner token renews its lease (owner_since =
+	// now()); 0 is a build that owns nothing.
 	BeginBuild(ctx context.Context, resource model.Resource, token int64) (BuildBegun, error)
 	// BeginDelete is BeginBuild for a notified delete of a tombstone, run
 	// before it deletes anything: it bumps the row's Build Sequence, which
