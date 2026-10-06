@@ -97,6 +97,11 @@ func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelecto
 // heartbeating as RunRebuild does. Its cursor is the last id of the last page
 // whose suspects were marked: a retried attempt resumes after it instead of
 // re-probing the type from its first id (ADR 0011's pattern, ADR 0012).
+//
+// A failed attempt logs the partial result it got, which Temporal drops. A
+// type the worker's config can't sweep — unknown to Resources, or without a
+// Config.ReverseSweeps entry — fails with a non-retryable error, so the run
+// fails after one attempt.
 func (a *temporalActivities) RunReverseSweep(ctx context.Context, p ReverseSweepParams) (ReverseSweepResult, error) {
 	var start *string
 	if activity.HasHeartbeatDetails(ctx) {
@@ -119,7 +124,19 @@ func (a *temporalActivities) RunReverseSweep(ctx context.Context, p ReverseSweep
 	}
 	checkpoint, stop := heartbeatCursor(ctx, start, a.livenessInterval())
 	defer stop()
-	return sweep(ctx, p.ResourceType, after, checkpoint)
+	res, err := sweep(ctx, p.ResourceType, after, checkpoint)
+	if err != nil {
+		// Temporal drops a failed attempt's result: log what it did.
+		activity.GetLogger(ctx).Warn("reverse sweep attempt failed",
+			"resource_type", p.ResourceType, "error", err,
+			"listed", res.Listed, "suspects", res.Suspects,
+			"failed_probes", res.FailedProbes, "unprobed", res.Unprobed)
+		if errors.Is(err, ErrUnknownResource) || errors.Is(err, errReverseSweepNotEnabled) {
+			// The worker's config can't sweep the type; no retry would.
+			return res, temporal.NewNonRetryableApplicationError(err.Error(), "ReverseSweepNotConfigured", err)
+		}
+	}
+	return res, err
 }
 
 // livenessInterval is heartbeatInterval, or rebuildHeartbeatInterval when it
@@ -208,7 +225,10 @@ func RebuildWalkWorkflow(ctx workflow.Context, sel ResourceSelector) error {
 // ReverseSweepWorkflow runs one pass of a type's reverse sweep as a single
 // long-running, heartbeating activity, with RebuildWalkWorkflow's options: a
 // retried attempt resumes after the last page whose suspects were marked
-// (ADR 0011's pattern, ADR 0012).
+// (ADR 0011's pattern, ADR 0012). The result it returns is the last
+// attempt's: Temporal drops a failed attempt's result, so of a retried run it
+// counts only the work of the attempt that succeeded. A type the worker's
+// config can't sweep fails the run after one attempt (RunReverseSweep).
 func ReverseSweepWorkflow(ctx workflow.Context, p ReverseSweepParams) (ReverseSweepResult, error) {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 24 * time.Hour,

@@ -94,7 +94,11 @@ resource's plans finding it gone.
   activity under `RebuildWalk`'s activity options (24h start-to-close, one-minute heartbeat
   timeout, five attempts). Its body is callable in-process — `ReverseSweepNow`, and
   `ReverseSweepResumable` with a starting id and a checkpoint callback — as `RebuildNow` is
-  `RebuildWalk`'s; calling it for a type without an entry is an error.
+  `RebuildWalk`'s; calling it for a type without an entry, or one the resource configs don't
+  have, is an error. The activity fails such a run with a non-retryable error, since no retry
+  could fix the worker's config: one failed attempt per run, not five. A failed attempt's result
+  is dropped by Temporal, so the activity logs the counts it got, and a retried run's result
+  counts only its last attempt's work.
 - **The app sweeps nothing.** The app's DSL plans have no Probe, so the app configures no
   reverse sweep and creates no schedule. An embedder that writes probes configures its types and
   calls `EnsureReverseSweepSchedules` at startup, beside `EnsureSweepSchedule`.

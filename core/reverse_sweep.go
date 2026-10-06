@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -46,7 +47,9 @@ type ReverseSweepConfig struct {
 	PageInterval time.Duration
 }
 
-// ReverseSweepResult is what one run of a type's reverse sweep did.
+// ReverseSweepResult is what one run of a type's reverse sweep did. Of a run
+// Temporal retried, it counts only the last attempt's work: Temporal drops a
+// failed attempt's result, which RunReverseSweep logs instead.
 type ReverseSweepResult struct {
 	// Listed is the number of rows the run listed.
 	Listed int
@@ -86,6 +89,11 @@ func reverseSweepConfigs(in map[string]ReverseSweepConfig, resources resource.Co
 	}
 	return out, nil
 }
+
+// errReverseSweepNotEnabled is wrapped by the error of a sweep of a type
+// Config.ReverseSweeps has no entry for. RunReverseSweep, like an unknown
+// type, fails it without retrying: no retry could make it succeed.
+var errReverseSweepNotEnabled = errors.New("not enabled in Config.ReverseSweeps")
 
 // reverseSweepBackoffMsg is the Debug message of each wait the sweep makes
 // while the pool reports pressure.
@@ -153,7 +161,7 @@ func (idx *Indexer) ReverseSweepResumable(ctx context.Context, resourceType, aft
 	}
 	cfg, ok := idx.reverseSweeps[resourceType]
 	if !ok {
-		return res, fmt.Errorf("reverse sweep of resource type %q: not enabled in Config.ReverseSweeps", resourceType)
+		return res, fmt.Errorf("reverse sweep of resource type %q: %w", resourceType, errReverseSweepNotEnabled)
 	}
 	probe := firstProbe(idx.plans[resourceType])
 	if probe == nil {

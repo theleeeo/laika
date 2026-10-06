@@ -14,6 +14,7 @@ import (
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 )
 
@@ -371,6 +372,36 @@ func TestRunReverseSweep_ResumesTheIndexersSweepFromHeartbeatCursor(t *testing.T
 	// window: the first is the first page's checkpoint, past the cursor.
 	require.NotEmpty(t, beats, "the sweep's checkpoints must reach the heartbeat")
 	require.Equal(t, "d", beats[0], "the first checkpoint is the last id of the first page after the cursor")
+}
+
+// A type Resources doesn't configure, or one without a Config.ReverseSweeps
+// entry, fails the activity with a non-retryable error: no retry could make
+// it succeed, so a run fails once instead of retrying to its attempt limit.
+func TestRunReverseSweep_UnsweepableTypeFailsNonRetryable(t *testing.T) {
+	st := &recordingStore{}
+	p := &fakeProbe{}
+	idx := mustNew(Config{
+		Resources: twoVersionResources(),
+		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: &sweepExecuter{}, Probe: p.probe}}},
+		ES:        &captureBackend{},
+		Store:     st,
+	})
+
+	for name, typ := range map[string]string{
+		"unknown type":           "ghost",
+		"no ReverseSweeps entry": "product",
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := runReverseSweepEnv(&temporalActivities{idx: idx})
+			_, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: typ})
+			require.Error(t, err)
+			var appErr *temporal.ApplicationError
+			require.True(t, errors.As(err, &appErr), "want an application error, got %T: %v", err, err)
+			require.True(t, appErr.NonRetryable(), "want a non-retryable error, got %v", err)
+		})
+	}
+	require.Empty(t, st.callsSnapshot(), "nothing may be listed")
+	require.Empty(t, p.callsSnapshot(), "nothing may be probed")
 }
 
 // fakeScheduleCreator captures EnsureSweepSchedule's create-if-absent behavior.
