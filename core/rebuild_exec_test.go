@@ -1337,6 +1337,46 @@ func TestRebuildAll_MultiPlan_SightingAfterSettling(t *testing.T) {
 	})
 }
 
+// L2.6 ruling R9: an id a later plan sights first was never asked of the
+// walk's first plan, so its outcomes are not every plan's. When its last
+// expected outcome arrives it is failed — marked for the sweep, whose build
+// runs every plan — never deleted or completed. Plan 1's listing omits X.
+func TestRebuildAll_MultiPlan_FirstSightedByALaterPlan_Fails(t *testing.T) {
+	for _, chunk := range []int{0, 1} {
+		t.Run(fmt.Sprintf("chunk %d: a nil deletes nothing", chunk), func(t *testing.T) {
+			st := &rebuildRecordingStore{}
+			es := &captureBackend{}
+			err := walkProducts(t, st, es, chunk, twoVersionResources(),
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1")}},
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}})
+
+			assertNothingDeleted(t, st, es, "X")
+			assertFailedOnce(t, st, err, "X")
+		})
+
+		t.Run(fmt.Sprintf("chunk %d: a document is written, not cleared", chunk), func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
+			es := &captureBackend{}
+			err := walkProducts(t, st, es, chunk, twoVersionResources(),
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1")}},
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDocWith("X", "c")}})
+
+			assertNothingDeleted(t, st, es, "X")
+			assertFailedOnce(t, st, err, "X")
+			var written []string
+			for _, it := range es.allBulkItems() {
+				if it.ID == "X" {
+					written = append(written, it.Index)
+				}
+			}
+			if !slices.Equal(written, []string{"product_search_v2"}) {
+				t.Fatalf("X's v2 document must be written once, got %v", written)
+			}
+			assertReplaces(t, st, product("X"), 43, []EdgeSet{versionSet(2, "c")})
+		})
+	}
+}
+
 // A multi-plan walk ignores a repeat of an outcome an id already completed
 // on: plan 2's listing repeats X after its document completed X (chunk size
 // 1 flushes each document as it is added), and the repeat is neither written
@@ -1834,30 +1874,33 @@ func TestRebuildAll_ResourceSeenByTwoPlans_KeepsItsFirstWalkStart(t *testing.T) 
 	}
 }
 
-// One chunk can settle roots begun by different walks; each is checked
-// against the start of the walk that first fetched it.
+// One chunk can carry roots begun by different walks; each is checked
+// against the start of the walk that first fetched it. Root 2, which plan 1's
+// listing omitted, is partial (L2.6 ruling R9): checked, then failed rather
+// than completed.
 func TestRebuildAll_ChunkSpanningTwoWalks_ChecksEachRootFromItsOwnWalkStart(t *testing.T) {
 	st := &rebuildRecordingStore{}
 	err := rebuildAllProducts(t, st,
 		&staticExecuter{docs: []projection.BuildDoc{productDocWith("1", "c1")}},
 		&staticExecuter{docs: []projection.BuildDoc{productDocWith("2", "c2"), productDocWith("1")}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("partial root 2 must fail the walk, got %v", err)
 	}
 
 	checks := st.checksSnapshot()
 	if len(checks) != 1 {
-		t.Fatalf("both walks' roots settle in one chunk, one batched check, got %d: %v", len(checks), st.callsSnapshot())
+		t.Fatalf("both walks' roots land in one chunk, one batched check, got %d: %v", len(checks), st.callsSnapshot())
 	}
 	want := []ChangeCheck{{product("1"), 1001}, {product("2"), 1002}, {product("c1"), 1001}, {product("c2"), 1002}}
 	if got := sortedChecks(checks[0]); got != fmt.Sprint(want) {
 		t.Fatalf("checks %s, want %v", got, want)
 	}
 	calls := st.callsSnapshot()
-	for _, id := range []string{"1", "2"} {
-		if len(callIndexes(calls, "ClearStale:product/"+id+":42")) != 1 {
-			t.Fatalf("root %s received every document it expects and must complete: %v", id, calls)
-		}
+	if len(callIndexes(calls, "ClearStale:product/1:42")) != 1 {
+		t.Fatalf("root 1 received every document it expects and must complete: %v", calls)
+	}
+	if countPrefix(calls, "ClearStale:product/2:") != 0 || countPrefix(calls, "MarkStale:product/2") != 1 {
+		t.Fatalf("partial root 2 must be marked, not cleared: %v", calls)
 	}
 }
 

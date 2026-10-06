@@ -377,7 +377,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		}
 		// BeginBuild precedes this root's fetch, so its start covers the
 		// root: only its children are checked.
-		fl.begin(id, begun, driftBase{start: begun.Start}, expected)
+		fl.begin(id, begun, driftBase{start: begun.Start}, expected, false)
 
 		// Same existence rule as the live path (buildOne): all selected plans
 		// run first, and only unanimity decides — a nil from one version must
@@ -453,11 +453,14 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	// documents and edge sets refreshed, others not, and no stale mark. With
 	// one plan, a page boundary is reached only once its resources have
 	// settled or been marked stale.
-	activePlans, activeIdx := 0, -1
+	activePlans, activeIdx, firstActiveIdx := 0, -1, -1
 	for i, p := range plans {
 		if p.Executer != nil {
 			activePlans++
 			activeIdx = i
+			if firstActiveIdx == -1 {
+				firstActiveIdx = i
+			}
 		}
 	}
 	resumable := activePlans == 1
@@ -510,7 +513,12 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 		}
 		// Plan outcomes — a document or a nil — a resource first seen in this
 		// walk still expects: this plan plus the active plans after it —
-		// earlier walks can no longer emit it.
+		// earlier walks can no longer emit it. A resource first seen after
+		// the first active plan's walk was omitted by an earlier listing, so
+		// its outcomes are not every plan's: it is partial and fails rather
+		// than settles (pendingResource.partial). A single-plan walk is never
+		// partial.
+		partial := planIdx != firstActiveIdx
 		expected := 0
 		for _, p := range plans[planIdx:] {
 			if p.Executer != nil {
@@ -572,7 +580,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					// root checks itself too (driftBase.checkRoot). Begun
 					// only on first sighting, a root seen by several plans
 					// keeps the start of the walk that first fetched it.
-					fl.begin(id, begun, driftBase{start: walkStart, checkRoot: true}, expected)
+					fl.begin(id, begun, driftBase{start: walkStart, checkRoot: true}, expected, partial)
 				}
 
 				// Source listed the resource but returned no data: that is

@@ -59,12 +59,22 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 // rebuild's cancellation (a failed resource's mark, salvage).
 const detachedMarkTimeout = 30 * time.Second
 
-// pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped)
-// but not yet settled, failed, or — in a multi-plan walk — settled.
+// pendingResource is a rebuild's entry for one resource: begun (Build
+// Sequence bumped) and unsettled; failed (begun or not), kept until finish;
+// or, in a multi-plan walk, settled and kept with how it settled. A partial
+// entry — first sighted by a plan after the walk's first — is failed instead
+// of settled.
 type pendingResource struct {
 	occVersion int64
 	staleSeq   int64
 	drift      driftBase
+	// partial marks a resource a multi-plan walk first sighted after its
+	// first active plan: the earlier plans' listings omitted it, so its
+	// outcomes are not every plan's and decide nothing. When its last
+	// expected outcome arrives it is failed — marked for the sweep, whose
+	// build runs every plan — never deleted or completed. What its documents
+	// wrote stays written, their edge sets stored.
+	partial bool
 	// remaining counts the plans whose outcome for the resource is still
 	// outstanding: a plan's document counts once it flushed successfully, a
 	// plan's nil (the source listed the resource without data) as the walk
@@ -180,9 +190,17 @@ func (f *rebuildFlusher) root(id string) model.Resource {
 // begin registers a resource after BeginBuild: its Build Sequence and the
 // stale_seq its clear is guarded by come from begun, its drift check measures
 // from drift (begun.Start is not read). expected is the number of plans
-// whose outcome — a flushed document or a nil — settles the resource.
-func (f *rebuildFlusher) begin(id string, begun BuildBegun, drift driftBase, expected int) {
-	f.state[id] = &pendingResource{occVersion: begun.BuildIdx, staleSeq: begun.StaleSeq, drift: drift, remaining: expected}
+// whose outcome — a flushed document or a nil — settles the resource, and
+// partial fails it then instead (pendingResource.partial).
+func (f *rebuildFlusher) begin(id string, begun BuildBegun, drift driftBase, expected int, partial bool) {
+	f.state[id] = &pendingResource{occVersion: begun.BuildIdx, staleSeq: begun.StaleSeq, drift: drift, remaining: expected, partial: partial}
+}
+
+// failPartial fails a partial resource whose last expected outcome arrived.
+func (f *rebuildFlusher) failPartial(ctx context.Context, id string) {
+	slog.Warn("an earlier plan's listing omitted the resource; leaving it stale for the sweep",
+		slog.String("type", f.resourceType), slog.String("id", id))
+	f.fail(ctx, id)
 }
 
 // tracked reports whether the resource has an entry: begun and not yet
@@ -244,7 +262,8 @@ func (f *rebuildFlusher) discard(id string) {
 // walk (keepSettled) — fails: its queued documents are dropped, what already
 // flushed stays written, and the sweep's build, which runs every plan,
 // resolves it. When the last expected plan's nil settles the resource, every
-// plan found it gone and it is deleted (removeGone).
+// plan found it gone and it is deleted (removeGone) — unless it is partial,
+// and the plans that omitted it were never asked: then it fails.
 func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 	p := f.state[id]
 	if p == nil || p.failed || p.settled == deleted {
@@ -262,6 +281,10 @@ func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 	p.sawNil, p.lastCounted = true, version
 	p.remaining--
 	if p.remaining > 0 {
+		return
+	}
+	if p.partial {
+		f.failPartial(ctx, id)
 		return
 	}
 	f.removeGone(ctx, id, p)
@@ -503,11 +526,16 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 
 	f.checkDrift(ctx, driftCheck)
 
-	// Complete resources whose every expected document has flushed. A root
-	// whose drift re-mark failed was failed by checkDrift and is skipped.
+	// Complete resources whose every expected document has flushed — a
+	// partial one fails instead. A root whose drift re-mark failed was
+	// failed by checkDrift and is skipped.
 	for _, it := range chunk {
 		p := f.state[it.ID]
 		if p == nil || p.failed || p.settled != unsettled || p.remaining > 0 {
+			continue
+		}
+		if p.partial {
+			f.failPartial(ctx, it.ID)
 			continue
 		}
 		// Seq-guarded: a notification that landed mid-rebuild — or the drift
