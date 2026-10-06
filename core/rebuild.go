@@ -10,8 +10,12 @@ import (
 // ResourceSelector identifies a set of resources and versions to rebuild.
 type ResourceSelector struct {
 	ResourceType string
-	Versions     []int
-	ResourceIDs  []string
+	// Versions selects the Schema Versions whose plans the rebuild runs;
+	// empty runs every plan. A rebuild that leaves out a version with an
+	// executing plan deletes nothing: a resource its plans all find gone is
+	// left marked stale for the sweep, whose build runs every plan.
+	Versions    []int
+	ResourceIDs []string
 	// Metadata is the rebuild's own fetch context (e.g. the acting tenant),
 	// passed to every provider call its walk makes. It is never stored on a
 	// resource's row: the owned re-builds the walk's drift re-marks claim

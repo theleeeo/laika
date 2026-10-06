@@ -1548,6 +1548,207 @@ func TestRebuildAll_MultiPlan_FailedIDStaysFailed(t *testing.T) {
 	}
 }
 
+// assertHandedOff checks the rebuild left id for the sweep: one stale mark
+// and no other write of it — nothing deleted, written, stored or cleared —
+// and no drift check of it.
+func assertHandedOff(t *testing.T, st *rebuildRecordingStore, es *captureBackend, id string) {
+	t.Helper()
+	assertNothingDeleted(t, st, es, id)
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "MarkStale:product/"+id) != 1 || countPrefix(calls, "MarkStaleFailed:product/"+id) != 0 {
+		t.Fatalf("%s must be marked stale exactly once: %v", id, calls)
+	}
+	if countPrefix(calls, "ClearStale:product/"+id+":") != 0 {
+		t.Fatalf("%s's mark must not be cleared: %v", id, calls)
+	}
+	for _, it := range es.allBulkItems() {
+		if it.ID == id {
+			t.Fatalf("no document of %s may be written: %+v", id, it)
+		}
+	}
+	if got := st.replacedFor(product(id)); len(got) != 0 {
+		t.Fatalf("no edge set of %s may be stored: %+v", id, got)
+	}
+	for _, batch := range st.checksSnapshot() {
+		for _, c := range batch {
+			if c.Resource == product(id) {
+				t.Fatalf("%s gets no drift check: %v", id, st.checksSnapshot())
+			}
+		}
+	}
+}
+
+// L2.7: a rebuild that selects versions runs only their plans, while the
+// sweep's build runs every plan. An id every selected plan finds gone is
+// handed to the sweep — marked stale once, nothing of it deleted, its row
+// included — and is not a failure. v1, which the rebuild doesn't run, still
+// has X.
+func TestRebuild_VersionSelected_AllSelectedPlansNil_LeavesTheIDForTheSweep(t *testing.T) {
+	for name, sel := range map[string]ResourceSelector{
+		"walk":   {ResourceType: "product", Versions: []int{2}},
+		"by ids": {ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"X"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{}
+			es := &captureBackend{}
+			err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
+				&staticExecuter{
+					docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")},
+					byID: map[string][]projection.BuildDoc{"X": {nilDoc("X")}},
+				})
+			if err != nil {
+				t.Fatalf("an id left for the sweep is not a failure, got %v", err)
+			}
+			assertHandedOff(t, st, es, "X")
+		})
+	}
+}
+
+// A rebuild that runs every plan with an executer — no Versions, or a
+// selector naming every such version — still deletes what all of them find
+// gone: every version's document and its edges at X's Build Sequence, and
+// its row.
+func TestRebuild_EveryActivePlanRuns_AllNil_DeletesTheID(t *testing.T) {
+	gone := func() *staticExecuter { return &staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}} }
+	for name, sel := range map[string]ResourceSelector{
+		"walk, no versions":              {ResourceType: "product"},
+		"walk, both versions selected":   {ResourceType: "product", Versions: []int{1, 2}},
+		"by ids, no versions":            {ResourceType: "product", ResourceIDs: []string{"X"}},
+		"by ids, both versions selected": {ResourceType: "product", Versions: []int{1, 2}, ResourceIDs: []string{"X"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41} // X begins at 42
+			es := &captureBackend{}
+			if err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel, gone(), gone()); err != nil {
+				t.Fatal(err)
+			}
+			assertDeletedAt(t, st, es, "X", 42)
+			if calls := st.callsSnapshot(); countPrefix(calls, "DeleteResourceIfSeq:product/X:42") != 1 || countPrefix(calls, "MarkStale:product/X") != 0 {
+				t.Fatalf("X's row must be removed, and X not marked: %v", calls)
+			}
+		})
+	}
+
+	// A plan without an executer runs in no rebuild and no sweep build:
+	// selecting every other version runs every plan that has one.
+	for name, sel := range map[string]ResourceSelector{
+		"walk, every active version selected":   {ResourceType: "product", Versions: []int{2, 3}},
+		"by ids, every active version selected": {ResourceType: "product", Versions: []int{2, 3}, ResourceIDs: []string{"X"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41}
+			es := &captureBackend{}
+			idx := mustNew(Config{Resources: threeVersionResources(), ES: es, Store: st, Plans: map[string][]projection.Plan{"product": {
+				{Version: 1},
+				{Version: 2, Executer: gone()},
+				{Version: 3, Executer: gone()},
+			}}})
+			if err := idx.RebuildNow(t.Context(), []ResourceSelector{sel}); err != nil {
+				t.Fatal(err)
+			}
+			if got := es.deletesSnapshot(); len(got) != 3 {
+				t.Fatalf("X must be deleted from every version's index, got %v", got)
+			}
+			if calls := st.callsSnapshot(); countPrefix(calls, "DeleteResourceIfSeq:product/X:42") != 1 || countPrefix(calls, "MarkStale:product/X") != 0 {
+				t.Fatalf("X's row must be removed, and X not marked: %v", calls)
+			}
+		})
+	}
+}
+
+// A multi-plan walk that selects versions holds an id its selected plans all
+// found gone to that outcome, as it holds a deleted one: a repeat of the nil
+// is ignored, and a document after it fails the id. Plans that disagree fail
+// the id as in any walk. The walk selects versions 2 and 3 of three; v1,
+// which it doesn't run, has X.
+func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testing.T) {
+	walk := func(t *testing.T, st *rebuildRecordingStore, es *captureBackend, v2, v3 []projection.BuildDoc) error {
+		t.Helper()
+		return rebuildSelected(t, st, es, 0, threeVersionResources(), ResourceSelector{ResourceType: "product", Versions: []int{2, 3}},
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
+			&staticExecuter{docs: append([]projection.BuildDoc{productDoc("1")}, v2...)},
+			&staticExecuter{docs: append([]projection.BuildDoc{productDoc("1")}, v3...)})
+	}
+
+	t.Run("both nil, v3 repeats its nil: left for the sweep once", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walk(t, st, es, []projection.BuildDoc{nilDoc("X")}, []projection.BuildDoc{nilDoc("X"), nilDoc("X")})
+		if err != nil {
+			t.Fatalf("an id left for the sweep is not a failure, got %v", err)
+		}
+		assertHandedOff(t, st, es, "X")
+		if n := st.count("BeginBuild:product/X"); n != 1 {
+			t.Fatalf("X is begun once, got %d: %v", n, st.callsSnapshot())
+		}
+	})
+
+	t.Run("both nil, then a v3 document: fails once", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walk(t, st, es, []projection.BuildDoc{nilDoc("X")}, []projection.BuildDoc{nilDoc("X"), productDoc("X")})
+		if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+			t.Fatalf("the walk must report one failed resource, got %v", err)
+		}
+		assertNothingDeleted(t, st, es, "X")
+		calls := st.callsSnapshot()
+		if countPrefix(calls, "MarkStale:product/X") == 0 || countPrefix(calls, "ClearStale:product/X:") != 0 {
+			t.Fatalf("X must stay marked, never cleared: %v", calls)
+		}
+		for _, it := range es.allBulkItems() {
+			if it.ID == "X" {
+				t.Fatalf("a document after the agreed nil must not be written: %+v", it)
+			}
+		}
+		if countPrefix(calls, "ClearStale:product/1:") != 1 {
+			t.Fatalf("root 1 must complete: %v", calls)
+		}
+	})
+
+	t.Run("v2 nil, v3 document: fails once", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walk(t, st, es, []projection.BuildDoc{nilDoc("X")}, []projection.BuildDoc{productDoc("X")})
+		assertNothingDeleted(t, st, es, "X")
+		assertFailedOnce(t, st, err, "X")
+	})
+
+	t.Run("first listed by v3, without data: partial, fails once", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walk(t, st, es, nil, []projection.BuildDoc{nilDoc("X")})
+		assertNothingDeleted(t, st, es, "X")
+		assertFailedOnce(t, st, err, "X")
+	})
+}
+
+// The hand-off's mark is X's only recovery: when it fails, X fails — fail
+// retries the mark — and the rebuild reports it.
+func TestRebuild_VersionSelected_FailedHandOffMark_FailsTheID(t *testing.T) {
+	for name, sel := range map[string]ResourceSelector{
+		"walk":   {ResourceType: "product", Versions: []int{2}},
+		"by ids": {ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"X"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{markErrs: map[string]int{"product/X": 1}}
+			es := &captureBackend{}
+			err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("X")}},
+				&staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}})
+			if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+				t.Fatalf("the rebuild must report one failed resource, got %v", err)
+			}
+			assertNothingDeleted(t, st, es, "X")
+			calls := st.callsSnapshot()
+			failed, marked := callIndexes(calls, "MarkStaleFailed:product/X"), callIndexes(calls, "MarkStale:product/X")
+			if len(failed) != 1 || len(marked) != 1 || marked[0] < failed[0] {
+				t.Fatalf("the failed mark must fail X, which marks it once more: %v", calls)
+			}
+		})
+	}
+}
+
 func TestRebuildAll_ChildDrift_RemarksResourceStale(t *testing.T) {
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"cX": true}}
 	st.driftBudget.Store(2)
@@ -1785,6 +1986,13 @@ func rebuildAllProducts(t *testing.T, st *rebuildRecordingStore, execs ...*stati
 // (0: the default), with the product type configured by resources.
 func walkProducts(t *testing.T, st *rebuildRecordingStore, es *captureBackend, chunkSize int, resources resource.Configs, execs ...*staticExecuter) error {
 	t.Helper()
+	return rebuildSelected(t, st, es, chunkSize, resources, ResourceSelector{ResourceType: "product"}, execs...)
+}
+
+// rebuildSelected is walkProducts for the rebuild sel selects — its versions,
+// its ids.
+func rebuildSelected(t *testing.T, st *rebuildRecordingStore, es *captureBackend, chunkSize int, resources resource.Configs, sel ResourceSelector, execs ...*staticExecuter) error {
+	t.Helper()
 	plans := make([]projection.Plan, len(execs))
 	for i, e := range execs {
 		plans[i] = projection.Plan{Version: i + 1, Executer: e}
@@ -1796,7 +2004,7 @@ func walkProducts(t *testing.T, st *rebuildRecordingStore, es *captureBackend, c
 		Store:            st,
 		RebuildChunkSize: chunkSize,
 	})
-	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}})
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{sel})
 	if werr := idx.WaitForIdle(t.Context()); werr != nil {
 		t.Fatal(werr)
 	}

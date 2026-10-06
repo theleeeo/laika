@@ -340,12 +340,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 	if err != nil {
 		return err
 	}
-	expected := 0
-	for _, p := range plans {
-		if p.Executer != nil {
-			expected++
-		}
-	}
+	expected := countActive(plans)
 
 	// Each id is served once, however often the selector lists it: a repeat
 	// would begin it again over its flusher entry, so a failed id could be
@@ -360,6 +355,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 	}
 
 	fl := newRebuildFlusher(idx, params.ResourceType)
+	fl.mayDelete = idx.runsEveryActivePlan(params.ResourceType, plans)
 
 	for _, id := range ids {
 		if ctx.Err() != nil {
@@ -381,7 +377,8 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 
 		// Same existence rule as the live path (buildOne): all selected plans
 		// run first, and only unanimity decides — a nil from one version must
-		// not delete what another version's plan just built.
+		// not delete what another version's plan just built, nor what an
+		// unselected version's plan would still build.
 		docs, missing, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
 			ResourceID:   id,
@@ -393,10 +390,16 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			continue
 		}
 
-		// Every selected plan agrees: gone at source — delete from all
-		// versions, and the row with them.
+		// Every selected plan agrees: gone at source. A rebuild running
+		// every plan with an Executer deletes it from all versions, and the
+		// row with them; one that selected fewer versions leaves it marked
+		// for the sweep, whose build runs every plan (leaveGone).
 		if len(docs) == 0 && len(missing) > 0 {
 			fl.discard(id)
+			if !fl.mayDelete {
+				fl.leaveGone(ctx, id)
+				continue
+			}
 			if err := idx.handleDelete(ctx, RebuildPayload{
 				ResourceType: params.ResourceType,
 				ResourceID:   id,
@@ -491,6 +494,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	// With several plans an id settles on its last plan's outcome, and a
 	// later sighting is held to it (rebuildFlusher.keepSettled).
 	fl.keepSettled = activePlans > 1
+	fl.mayDelete = idx.runsEveryActivePlan(params.ResourceType, plans)
 
 	// completed is the last fully consumed page boundary. The flusher's
 	// afterFlush hook checkpoints it: right after a flush, everything before
@@ -586,7 +590,8 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				// Source listed the resource but returned no data: that is
 				// this plan's outcome for it. Existence is decided across
 				// every plan, as the live build does: the resource is deleted
-				// only once every expected plan found it gone, and a plan
+				// only once every expected plan found it gone — or left marked
+				// for the sweep, if the walk selected versions — and a plan
 				// that disagrees fails it (rebuildFlusher.gone).
 				if doc.Doc == nil {
 					fl.gone(ctx, id, plan.Version)
