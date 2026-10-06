@@ -247,8 +247,10 @@ func TestRebuildAll_MultiPlan_FlushPerDocument_TheFirstStoredReportWins(t *testi
 }
 
 // The walk's nil-doc delete path drift-checks a root that made no
-// ReplaceEdges and removed its row: its re-mark creates a row without
-// metadata, and the re-build it claims fetches with none, not the walk's.
+// ReplaceEdges, so its row holds no metadata: the re-build its re-mark claims
+// fetches with none, not the walk's. (The fake drops the row at the guarded
+// delete whatever its seq; the real Store keeps it, since the re-mark moved
+// stale_seq. Either way the row holds none.)
 func TestRebuildAll_NilDocDriftRemark_ReBuildsWithNone(t *testing.T) {
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"1": true}}
 	st.driftBudget.Store(1)

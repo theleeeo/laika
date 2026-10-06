@@ -55,8 +55,11 @@ message ChangeNotification {
   string resource_type = 2;
   string resource_id = 3;
 
-  // Arbitrary caller-provided metadata forwarded to provider calls triggered
-  // by this notification (for example tenant, trace, or trigger identifiers).
+  // Arbitrary caller-provided context of the resource (for example tenant,
+  // trace, or trigger identifiers). It is stored on the resource's own row,
+  // replacing what the row held, and every build of the resource that owns
+  // it — inline, follow-up, sweep — passes what the row holds when it begins
+  // to its provider calls. It never reaches the resource's Parents.
   map<string, string> metadata = 4;
 
   // Monotonically increasing version of the resource at the source.
@@ -83,9 +86,10 @@ message ResourceSelector {
   repeated int32 versions = 2;
   repeated string resource_ids = 3;
 
-  // Arbitrary caller-provided metadata forwarded to every provider call the
-  // rebuild makes, exactly like ChangeNotification.metadata on the ingest
-  // path (for example tenant or trigger identifiers).
+  // Arbitrary caller-provided fetch context of the rebuild (for example tenant
+  // or trigger identifiers), passed to every provider call its walk makes. It
+  // is never stored on a resource's row: the re-builds the walk's drift check
+  // triggers fetch with their rows' own metadata.
   map<string, string> metadata = 4;
 }
 

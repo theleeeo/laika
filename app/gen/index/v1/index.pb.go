@@ -303,8 +303,11 @@ type ChangeNotification struct {
 	// The resource that changed.
 	ResourceType string `protobuf:"bytes,2,opt,name=resource_type,json=resourceType,proto3" json:"resource_type,omitempty"`
 	ResourceId   string `protobuf:"bytes,3,opt,name=resource_id,json=resourceId,proto3" json:"resource_id,omitempty"`
-	// Arbitrary caller-provided metadata forwarded to provider calls triggered
-	// by this notification (for example tenant, trace, or trigger identifiers).
+	// Arbitrary caller-provided context of the resource (for example tenant,
+	// trace, or trigger identifiers). It is stored on the resource's own row,
+	// replacing what the row held, and every build of the resource that owns
+	// it — inline, follow-up, sweep — passes what the row holds when it begins
+	// to its provider calls. It never reaches the resource's Parents.
 	Metadata map[string]string `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Monotonically increasing version of the resource at the source.
 	// When non-zero, the indexer rejects notifications whose version is not
@@ -390,9 +393,10 @@ type ResourceSelector struct {
 	ResourceType string                 `protobuf:"bytes,1,opt,name=resource_type,json=resourceType,proto3" json:"resource_type,omitempty"`
 	Versions     []int32                `protobuf:"varint,2,rep,packed,name=versions,proto3" json:"versions,omitempty"`
 	ResourceIds  []string               `protobuf:"bytes,3,rep,name=resource_ids,json=resourceIds,proto3" json:"resource_ids,omitempty"`
-	// Arbitrary caller-provided metadata forwarded to every provider call the
-	// rebuild makes, exactly like ChangeNotification.metadata on the ingest
-	// path (for example tenant or trigger identifiers).
+	// Arbitrary caller-provided fetch context of the rebuild (for example tenant
+	// or trigger identifiers), passed to every provider call its walk makes. It
+	// is never stored on a resource's row: the re-builds the walk's drift check
+	// triggers fetch with their rows' own metadata.
 	Metadata      map[string]string `protobuf:"bytes,4,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
