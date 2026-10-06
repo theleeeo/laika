@@ -34,8 +34,9 @@ resource's plans finding it gone.
   A run ends after a page shorter than the page size.
 - **A plan's `Probe` answers existence.** `projection.Plan.Probe(ctx, ids, metadata) (present,
   err)` is optional. Given several ids and one actor's metadata, it returns exactly the ids the
-  plan's root fetch would find for that actor. The embedder writes it beside the plan, on the
-  clients its root fetch uses: a by-ids call where the source has one, a call per id otherwise.
+  plan's root fetch would find for that actor, and fails where that fetch would fail — as a
+  fetch with no actor does in a source that needs one. The embedder writes it beside the plan, on
+  the clients its root fetch uses: a by-ids call where the source has one, a call per id otherwise.
   Existence belongs to the resource, not to a Schema Version, so the sweep uses the first of the
   type's plans, in the order the embedder gave them, that has a Probe. A type with none is
   skipped at every run with a warning — nothing is listed, probed or marked — and there is no
@@ -95,7 +96,8 @@ resource's plans finding it gone.
   `ReverseSweepResumable` with a starting id and a checkpoint callback — as `RebuildNow` is
   `RebuildWalk`'s; calling it for a type without an entry is an error.
 - **The app sweeps nothing.** The app's DSL plans have no Probe, so the app configures no
-  reverse sweep. An embedder that writes probes configures its types.
+  reverse sweep and creates no schedule. An embedder that writes probes configures its types and
+  calls `EnsureReverseSweepSchedules` at startup, beside `EnsureSweepSchedule`.
 
 ## Why not the alternatives
 
@@ -109,8 +111,9 @@ resource's plans finding it gone.
   can't skip: a `Sub` stage needs what it fetched to build its output (`aggregation/plan.go`).
   In the harness, such a flag would still run the member expansion its root fetch includes.
 - **Accepting equal Versions in the `RegisterChanges` upsert** (its `accepted` CTE,
-  `storage/postgres/pg.go`), so that a resource notified again at its stored Version is built
-  again. Kept strict-greater: accepting equal Versions would help only a second write that keeps
+  `storage/postgres/pg.go`), so that a second change to a resource within one tick of its source's
+  `updated_at`, notified at the Version already stored, is built again. Kept strict-greater:
+  accepting equal Versions would help only a second write that keeps
   a row's `updated_at`, which the harness walk cursor's consumed-boundary-id check
   (`harness/resolvers/pagetoken.go`) already drops, and strict-greater dedupes a row listed once
   per member operator.
@@ -130,11 +133,11 @@ resource's plans finding it gone.
   misses that delete, silently and at every run. One that misses an id its root fetch would find
   costs a needless build of it at every run. Since only a build whose every plan finds the
   resource gone deletes anything, a probe can't delete a live document by itself.
-- **A row with no metadata is probed with none, and built with none** (seams S20). A probe that
-  fails without an actor leaves that group a failed probe at every run, and nothing of it is
-  marked. One that returns nothing makes each such row a suspect, whose build then fetches with
-  none: it deletes the resource when the source answers NotFound to a fetch without an actor,
-  and leaves it marked for `StaleSweep` when that fetch fails.
+- **A row with no metadata is probed with none, and built with none** (seams S20). Where the
+  source needs an actor, the probe fails as the root fetch would, so that group is a failed probe
+  at every run and nothing of it is marked until the row gets its owner. Where the source answers
+  NotFound to a fetch without an actor, the probe returns nothing, and each such row's build
+  deletes it — live or not.
 - **It heals nothing.** A resource the probe returns is not rebuilt, however stale its document.
   The forward walk heals what the sweep doesn't.
 - **A lost delete is late, not lost.** It is removed within one `Interval` plus the run that
