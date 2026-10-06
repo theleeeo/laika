@@ -168,16 +168,15 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 // version 2, stamped 10 and undeclared. That is harmless: the leftover set
 // only adds edges — extra fanout to this resource — until the next live
 // build, which declares its versions, prunes it.
-func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
+func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []core.EdgeSet, declared []int, reported map[string]string) error {
 	children := make(map[int][]model.Resource, len(sets))
 	for _, set := range sets {
 		if _, dup := children[set.SchemaVersion]; dup {
-			return nil, fmt.Errorf("replace edges of %s/%s: schema version %d named twice", resource.Type, resource.Id, set.SchemaVersion)
+			return fmt.Errorf("replace edges of %s/%s: schema version %d named twice", resource.Type, resource.Id, set.SchemaVersion)
 		}
 		children[set.SchemaVersion] = set.Children
 	}
-	var metadata map[string]string
-	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
+	return pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}, func(tx pgx.Tx) error {
 		versions := slices.Collect(maps.Keys(children))
 		if declared != nil {
 			rows, err := tx.Query(ctx,
@@ -257,32 +256,16 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 
 		// The resources row is taken last, whatever the guard decided above.
 		if len(reported) > 0 {
-			err := tx.QueryRow(ctx,
+			if _, err := tx.Exec(ctx,
 				`UPDATE resources SET metadata = $3::jsonb
-				 WHERE type=$1 AND id=$2 AND (metadata IS NULL OR metadata = '{}'::jsonb)
-				 RETURNING metadata`,
+				 WHERE type=$1 AND id=$2 AND (metadata IS NULL OR metadata = '{}'::jsonb)`,
 				resource.Type, resource.Id, reported,
-			).Scan(&metadata)
-			if err == nil {
-				return nil
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
+			); err != nil {
 				return err
 			}
 		}
-		err := tx.QueryRow(ctx,
-			`SELECT metadata FROM resources WHERE type=$1 AND id=$2`,
-			resource.Type, resource.Id,
-		).Scan(&metadata)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		return err
+		return nil
 	})
-	if err != nil || len(metadata) == 0 {
-		return nil, err
-	}
-	return metadata, nil
 }
 
 // RegisterChanges records a batch of changes in one statement, so each
@@ -435,7 +418,7 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 			token = *staleSeq
 		}
 		if ord == nil {
-			out.Parents = append(out.Parents, core.MarkedParent{Resource: model.Resource{Type: *typ, Id: *id}, Metadata: meta, Token: token})
+			out.Parents = append(out.Parents, core.MarkedParent{Resource: model.Resource{Type: *typ, Id: *id}, Token: token})
 			continue
 		}
 		out.Items[*ord-1] = core.RegisteredItem{Accepted: true, StaleSeq: *staleSeq, Token: token}
@@ -512,7 +495,7 @@ const drawnInput = `drawn AS MATERIALIZED (
 // nil. Either way the rows are locked in (type, id) order before any is
 // marked, so it doesn't deadlock over rows that exist when it starts; rows
 // created or removed concurrently still can (seams S4).
-func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]core.Owned, error) {
+func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, lease time.Duration) ([]core.Owned, error) {
 	if len(resources) == 0 {
 		return nil, nil
 	}
@@ -525,33 +508,31 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, metad
 	if lease <= 0 {
 		_, err := s.pool.Exec(ctx,
 			`WITH `+lockedInput+`, `+drawnInput+`
-			 INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata)
-			 SELECT t, i, seq, now(), $3::jsonb FROM drawn
+			 INSERT INTO resources AS r (type, id, stale_seq, stale_since)
+			 SELECT t, i, seq, now() FROM drawn
 			 ORDER BY t, i
 			 ON CONFLICT (type, id) DO UPDATE
 			 SET stale_seq = EXCLUDED.stale_seq,
-			     stale_since = COALESCE(r.stale_since, now()),
-			     metadata = EXCLUDED.metadata`,
-			types, ids, metadata,
+			     stale_since = COALESCE(r.stale_since, now())`,
+			types, ids,
 		)
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx,
 		`WITH `+lockedInput+`, `+drawnInput+`,
 		 marked AS (
-		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
-		     SELECT t, i, seq, now(), $3::jsonb, seq, now() FROM drawn
+		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, owner_seq, owner_since)
+		     SELECT t, i, seq, now(), seq, now() FROM drawn
 		     ORDER BY t, i
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET stale_seq = EXCLUDED.stale_seq,
 		         stale_since = COALESCE(r.stale_since, now()),
-		         metadata = EXCLUDED.metadata,
-		         owner_seq = CASE WHEN `+claimable("$4")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
-		         owner_since = CASE WHEN `+claimable("$4")+` THEN now() ELSE r.owner_since END
+		         owner_seq = CASE WHEN `+claimable("$3")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
+		         owner_since = CASE WHEN `+claimable("$3")+` THEN now() ELSE r.owner_since END
 		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq
 		 )
 		 SELECT type, id, stale_seq FROM marked WHERE owner_seq = stale_seq`,
-		types, ids, metadata, lease.Microseconds(),
+		types, ids, lease.Microseconds(),
 	)
 	if err != nil {
 		return nil, err
@@ -595,11 +576,14 @@ func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token i
 		         WHEN EXCLUDED.build_idx > GREATEST(r.build_idx, r.stale_seq, r.change_seq, COALESCE(r.owner_seq, 0))
 		         THEN EXCLUDED.build_idx ELSE nextval('change_sequence') END,
 		     owner_since = CASE WHEN $3::bigint <> 0 AND r.owner_seq = $3 THEN now() ELSE r.owner_since END
-		 RETURNING build_idx, stale_seq`,
+		 RETURNING build_idx, stale_seq, metadata`,
 		resource.Type, resource.Id, token,
-	).Scan(&b.BuildIdx, &b.StaleSeq)
+	).Scan(&b.BuildIdx, &b.StaleSeq, &b.Metadata)
 	if err != nil {
 		return core.BuildBegun{}, err
+	}
+	if len(b.Metadata) == 0 {
+		b.Metadata = nil
 	}
 	b.Start = b.BuildIdx
 	return b, nil
@@ -760,9 +744,9 @@ func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleS
 		     owner_seq = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_seq END,
 		     owner_since = CASE WHEN stale_seq = $3 THEN NULL ELSE now() END
 		 WHERE type=$1 AND id=$2 AND (stale_seq = $3 OR ($4::bigint <> 0 AND owner_seq = $4))
-		 RETURNING owner_seq, metadata, deleted`,
+		 RETURNING owner_seq, deleted`,
 		resource.Type, resource.Id, staleSeq, token,
-	).Scan(&owner, &f.Metadata, &f.Deleted)
+	).Scan(&owner, &f.Deleted)
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && owner == nil) {
 		return core.FollowUp{}, nil
 	}
@@ -792,9 +776,9 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 	err = s.pool.QueryRow(ctx,
 		`UPDATE resources SET owner_seq = stale_seq, owner_since = now()
 		 WHERE type=$1 AND id=$2 AND stale_seq <> $3 AND $4::bigint <> 0 AND owner_seq = $4
-		 RETURNING owner_seq, metadata, deleted`,
+		 RETURNING owner_seq, deleted`,
 		resource.Type, resource.Id, staleSeq, token,
-	).Scan(&f.Token, &f.Metadata, &f.Deleted)
+	).Scan(&f.Token, &f.Deleted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return core.FollowUp{}, nil
 	}
@@ -825,9 +809,9 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 		 claimed AS (
 		     UPDATE resources r SET owner_seq = r.stale_seq, owner_since = now()
 		     FROM candidates c WHERE r.type = c.type AND r.id = c.id
-		     RETURNING r.type, r.id, r.stale_seq, r.deleted, r.metadata, r.stale_since
+		     RETURNING r.type, r.id, r.stale_seq, r.deleted, r.stale_since
 		 )
-		 SELECT type, id, stale_seq, deleted, metadata FROM claimed ORDER BY stale_since`,
+		 SELECT type, id, stale_seq, deleted FROM claimed ORDER BY stale_since`,
 		before, limit, lease.Microseconds(),
 	)
 	if err != nil {
@@ -838,7 +822,7 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 	var out []core.StaleResource
 	for rows.Next() {
 		var e core.StaleResource
-		if err := rows.Scan(&e.Type, &e.Id, &e.StaleSeq, &e.Deleted, &e.Metadata); err != nil {
+		if err := rows.Scan(&e.Type, &e.Id, &e.StaleSeq, &e.Deleted); err != nil {
 			return nil, err
 		}
 		e.Token = e.StaleSeq

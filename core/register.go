@@ -91,7 +91,7 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 		idx.submitBuild(ctx, items[i].Resource, items[i].Metadata, it.Token, wait)
 	}
 	for _, p := range reg.Parents {
-		idx.submitBuild(ctx, p.Resource, p.Metadata, p.Token, wait)
+		idx.submitBuild(ctx, p.Resource, nil, p.Token, wait)
 	}
 	return statuses, nil
 }

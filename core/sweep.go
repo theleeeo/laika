@@ -47,7 +47,6 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 		if err := idx.Build(ctx, BuildArgs{
 			ResourceType: e.Type,
 			ResourceIds:  []string{e.Id},
-			Metadata:     e.Metadata,
 			OwnerTokens:  map[string]int64{e.Id: e.Token},
 		}); err != nil {
 			slog.Warn("sweep build failed; resource remains stale",

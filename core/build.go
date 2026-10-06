@@ -258,8 +258,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// drift check and the cascade: any later build of the resource without a
 	// notification fetches as it. own is the row's metadata as the write
 	// left it.
-	own, err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs))
-	if err != nil {
+	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs)); err != nil {
 		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
@@ -298,11 +297,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType),
 				slog.String("id", resourceID),
 			)
-			remark := own
-			if len(remark) == 0 {
-				remark = metadata
-			}
-			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, remark); err != nil {
+			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
 				return false, fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
 		}

@@ -46,10 +46,8 @@ type Store interface {
 	// none (NULL or empty), whatever the Build Sequence guard decided for the
 	// sets; metadata the row holds — a registration's, or an earlier report —
 	// is never overwritten. A nil or empty reported writes nothing. A row
-	// that is gone is not recreated. It returns the row's metadata as the
-	// transaction leaves it, nil when the row has none or is gone: the
-	// resource's own metadata, which the build's drift re-mark carries.
-	ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) (map[string]string, error)
+	// that is gone is not recreated.
+	ReplaceEdges(ctx context.Context, resource model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) error
 
 	// RegisterChanges records a batch of changes in one atomic statement:
 	// each accepted item's version (or tombstone), stale mark and metadata,
@@ -64,19 +62,21 @@ type Store interface {
 	// from owner_since) has expired; the outcome reports each claim's token.
 	RegisterChanges(ctx context.Context, items []Registration, lease time.Duration) (Registered, error)
 
-	// MarkStale durably records build intent for the given resources, along
-	// with the notification metadata the eventual build must run with. The
-	// metadata is stored per resource (last mark wins) so a sweep-recovered
-	// build carries the same context an inline build would have.
+	// MarkStale durably records build intent for the given resources. It
+	// leaves each row's metadata alone: a resource's metadata is written only
+	// by its own registrations and, while it has none, its plans' report
+	// (ReplaceEdges), so a mark one resource's change makes on another never
+	// gives it the first one's metadata. The build that serves the mark runs
+	// with what the row holds when it begins (BuildBegun.Metadata).
 	//
 	// A lease above zero also claims each marked row that has no live owner,
 	// in the same update, and returns the claimed rows; only those may be
 	// submitted. A lease of zero marks without claiming and returns nil: the
 	// mark hands the work to the sweep and nothing is submitted.
-	MarkStale(ctx context.Context, resources []model.Resource, metadata map[string]string, lease time.Duration) ([]Owned, error)
+	MarkStale(ctx context.Context, resources []model.Resource, lease time.Duration) ([]Owned, error)
 	// BeginBuild bumps the Build Sequence, captures the current stale_seq and
-	// takes the build's start from the Change Sequence. Callers invoke it
-	// before the build's fetches. A non-zero token that is the row's owner
+	// takes the build's start from the Change Sequence, and reads the row's
+	// metadata. Callers invoke it before the build's fetches. A non-zero token that is the row's owner
 	// token renews its lease (owner_since = now()); 0 is a build that owns
 	// nothing.
 	BeginBuild(ctx context.Context, resource model.Resource, token int64) (BuildBegun, error)
@@ -154,6 +154,12 @@ type BuildBegun struct {
 	// Start is a value of the Change Sequence taken before the build's
 	// fetches; the drift check compares against it.
 	Start int64
+	// Metadata is the row's metadata when the build began: its last
+	// registration's, or, on a row no registration gave any, its plans'
+	// report (see ReplaceEdges); nil when the row has none (NULL or empty).
+	// An owned build fetches with it, so a build that waited in the pool
+	// queue or the sweep runs with metadata registered meanwhile.
+	Metadata map[string]string
 }
 
 // DeleteBegun is what BeginDelete returns for one tombstone.
@@ -188,9 +194,6 @@ type FollowUp struct {
 	// stale_seq at the re-claim; 0 means no follow-up is due. A follow-up
 	// delete is guarded by it (DeleteResourceIfSeq's staleSeq).
 	Token int64
-	// Metadata is the row's metadata: that of its last mark, in commit order,
-	// or, on a row no mark gave any, its plans' report (see ReplaceEdges).
-	Metadata map[string]string
 	// Deleted reports a tombstone: the follow-up is a delete, not a build.
 	Deleted bool
 }
@@ -202,10 +205,6 @@ type StaleResource struct {
 	// Token is the owner token ListStale claimed the row under.
 	Token   int64
 	Deleted bool
-	// Metadata is the row's metadata — that of its most recent mark, or, on
-	// a row no mark gave any, its plans' report (see ReplaceEdges) — replayed
-	// into the build that serves the mark.
-	Metadata map[string]string
 }
 
 // Registration is one item of a RegisterChanges batch.
@@ -219,7 +218,9 @@ type Registration struct {
 	// greater than the stored one; otherwise the item is stale and nothing
 	// is written for it — neither its row nor its Parents' marks.
 	Version int64
-	// Metadata is stored on the item's own row with its mark.
+	// Metadata is stored on the item's own row with its mark, replacing
+	// what the row holds. It is the only mark that writes metadata: the
+	// item's Parents are marked with theirs left alone.
 	Metadata map[string]string
 }
 
@@ -245,11 +246,10 @@ type RegisteredItem struct {
 	Token int64
 }
 
-// MarkedParent is a Parent RegisterChanges marked stale, with the metadata
-// it stored on the row: that of the last accepted child in batch order.
+// MarkedParent is a Parent RegisterChanges marked stale. The mark leaves
+// the Parent's metadata alone; its build runs with the Parent's own.
 type MarkedParent struct {
 	model.Resource
-	Metadata map[string]string
 	// Token is the owner token the mark claimed; 0 when the row has a live
 	// owner, so nothing is submitted for it.
 	Token int64

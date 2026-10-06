@@ -261,7 +261,7 @@ func (t *TestSuite) Test_Migration_CutoverReadinessGates() {
 	t.worker.Drain(ctx)
 
 	// Parity holds now, but an aged stale mark still blocks the cutover.
-	_, err := t.st.MarkStale(ctx, []model.Resource{{Type: "m", Id: "2"}}, nil, 0)
+	_, err := t.st.MarkStale(ctx, []model.Resource{{Type: "m", Id: "2"}}, 0)
 	t.Require().NoError(err)
 	_, err = t.pool.Exec(ctx,
 		`UPDATE resources SET stale_since = now() - interval '1 hour' WHERE type='m' AND id='2'`)

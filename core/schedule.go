@@ -26,7 +26,7 @@ func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource, m
 	if len(roots) == 0 {
 		return nil
 	}
-	owned, err := idx.st.MarkStale(ctx, roots, metadata, idx.ownerLease)
+	owned, err := idx.st.MarkStale(ctx, roots, idx.ownerLease)
 	if err != nil {
 		return fmt.Errorf("marking %d resources stale: %w", len(roots), err)
 	}
@@ -104,7 +104,7 @@ func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu F
 		idx.submitDelete(ctx, res, fu.Token, fu.Token, false)
 		return
 	}
-	idx.submitBuild(ctx, res, fu.Metadata, fu.Token, false)
+	idx.submitBuild(ctx, res, nil, fu.Token, false)
 }
 
 // buildTask is the pool task of an owned inline build. It builds only the ids

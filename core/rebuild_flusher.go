@@ -242,7 +242,7 @@ func docKey(index, id string) string { return index + "/" + id }
 func (f *rebuildFlusher) markStale(ctx context.Context, id string) {
 	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
 	defer cancel()
-	if _, err := f.idx.st.MarkStale(mctx, []model.Resource{f.root(id)}, f.metadata, 0); err != nil {
+	if _, err := f.idx.st.MarkStale(mctx, []model.Resource{f.root(id)}, 0); err != nil {
 		slog.Error("failed to mark rebuilt resource stale; sweep cannot recover it",
 			slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
 	}
@@ -337,15 +337,13 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			at[it.version] = len(sets)
 			sets = append(sets, set)
 		}
-		own, err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil, reported)
-		if err != nil {
+		if err := f.idx.st.ReplaceEdges(ctx, f.root(id), f.state[id].occVersion, sets, nil, reported); err != nil {
 			// The replace may have failed because the walk's context ended;
 			// fail marks on a detached context all the same.
 			slog.Warn("failed to replace edges; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
 			f.fail(ctx, id)
 			continue
 		}
-		f.state[id].metadata = own
 	}
 
 	// Resources with a rejected document are failed after their landed
@@ -492,7 +490,7 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 	for id := range f.state {
 		roots = append(roots, f.root(id))
 	}
-	if _, err := f.idx.st.MarkStale(sctx, roots, f.metadata, 0); err != nil {
+	if _, err := f.idx.st.MarkStale(sctx, roots, 0); err != nil {
 		slog.Error("failed to mark unfinished rebuild resources stale; sweep cannot recover them",
 			slog.String("type", f.resourceType), slog.Int("count", len(roots)), slog.String("error", err.Error()))
 	}

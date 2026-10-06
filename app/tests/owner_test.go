@@ -337,7 +337,7 @@ func (t *TestSuite) Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired() {
 	ctx := t.T().Context()
 
 	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "sv1"})
-	owned, err := t.st.MarkStale(ctx, []model.Resource{{Type: "a", Id: "1"}}, nil, time.Minute)
+	owned, err := t.st.MarkStale(ctx, []model.Resource{{Type: "a", Id: "1"}}, time.Minute)
 	t.Require().NoError(err)
 	t.Require().Len(owned, 1, "the crashed instance's mark claimed a/1")
 	t.Require().NotZero(owned[0].Token)
