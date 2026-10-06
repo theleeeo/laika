@@ -148,6 +148,11 @@ resource's plans finding it gone.
   reaches it; a run takes about the type's row count over `PageSize`, times `PageInterval`, and
   longer while the pool is pressured. A row inserted behind the cursor during a run is checked by
   the next.
+- **A suspect deleted mid-page comes back as a stale row** (seams S22). A suspect hard-deleted
+  between its page's listing and the page's mark is recreated by `MarkStale`'s upsert as a stale
+  row with no metadata. Where the source needs an actor, its build fails and the row stays stale,
+  visible in `StaleSweep`'s logs; nothing wrong is served or deleted. Accepted while nothing is
+  live.
 - **A workflow's death starts the type over.** As in ADR 0011, the cursor belongs to the
   activity's attempt chain, so a fresh run starts at the type's first id. Overlap _skip_ keeps a
   long run from stacking another behind it.

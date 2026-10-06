@@ -91,9 +91,11 @@ type Config struct {
 	SearchMiddlewares []SearchMiddleware
 
 	// Temporal is the Temporal client used for the durable slow lane:
-	// RebuildWalk workflows and the StaleSweep schedule. Required for any
-	// deployment; construction does not nil-check so search-only tests can
-	// omit it, but Rebuild/NewWorker/EnsureSweepSchedule will panic without it.
+	// RebuildWalk workflows, the StaleSweep schedule, and the ReverseSweep
+	// workflows and their per-type schedules. Required for any deployment;
+	// construction does not nil-check so search-only tests can omit it, but
+	// Rebuild, NewWorker, EnsureSweepSchedule and EnsureReverseSweepSchedules
+	// will panic without it.
 	Temporal client.Client
 
 	// TaskQueue is the Temporal task queue for the Indexer's workflows.
