@@ -664,7 +664,7 @@ func TestRebuildByIDs_FailureNamingNoChunkDocument_RejectsEveryDocumentOfItsID(t
 	}
 }
 
-// Ruling R7: a targeted rebuild serves each id once, however often its
+// L2.6 ruling R7: a targeted rebuild serves each id once, however often its
 // ResourceIDs list it: an id whose plans disagree is begun, marked and
 // counted once.
 func TestRebuildByIDs_RepeatedID_IsBuiltOnce(t *testing.T) {
@@ -1240,7 +1240,7 @@ func TestRebuildAll_MultiPlan_RepeatedNilOfOnePlan_CountsOnce(t *testing.T) {
 	assertFailedOnce(t, st, err, "X")
 }
 
-// Ruling R5: a single-plan walk drops a settled entry, so an id its listing
+// L2.6 ruling R5: a single-plan walk drops a settled entry, so an id its listing
 // repeats is decided by each sighting while the earlier one is in flight,
 // and afresh once it settled — the later listing is the newer fetch. A
 // document still queued and a nil disagree and fail the id; a nil after the
@@ -1278,7 +1278,7 @@ func TestRebuildAll_SinglePlan_DocumentThenNilOfOneID(t *testing.T) {
 	})
 }
 
-// Ruling R6: a multi-plan walk keeps a settled entry until finish, so an id
+// L2.6 ruling R6: a multi-plan walk keeps a settled entry until finish, so an id
 // listed again after it settled is held to the outcome it settled on,
 // whatever the chunk boundaries. Each case flushes per document (chunk size
 // 1), so the id's documents land, and it settles, before the next sighting.
@@ -1337,7 +1337,65 @@ func TestRebuildAll_MultiPlan_SightingAfterSettling(t *testing.T) {
 	})
 }
 
-// Ruling R8: an aborted walk's salvage marks what is unsettled only: a failed
+// A multi-plan walk ignores a repeat of an outcome an id already completed
+// on: plan 2's listing repeats X after its document completed X (chunk size
+// 1 flushes each document as it is added), and the repeat is neither written
+// nor stored.
+func TestRebuildAll_MultiPlan_RepeatAfterCompletion_IsIgnored(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{}
+	err := walkProducts(t, st, es, 1, twoVersionResources(),
+		&staticExecuter{docs: []projection.BuildDoc{productDoc("X")}},
+		&staticExecuter{docs: []projection.BuildDoc{productDoc("X"), productDoc("X")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "ClearStale:product/X:") != 1 {
+		t.Fatalf("X must complete once: %v", calls)
+	}
+	v2 := 0
+	for _, it := range es.allBulkItems() {
+		if it.ID == "X" && it.Index == "product_search_v2" {
+			v2++
+		}
+	}
+	if v2 != 1 {
+		t.Fatalf("the repeat of a completed id must not be written again, wrote v2 %d times", v2)
+	}
+	if n := len(st.replacedFor(product("X"))); n != 2 {
+		t.Fatalf("one edge set per plan's document, none for the repeat, got %d: %v", n, calls)
+	}
+}
+
+// An all-nil id whose drift re-mark fails is failed instead of finished: the
+// row delete doesn't run, so the row keeps the mark fail gives it, and the id
+// is counted once.
+func TestRebuildAll_MultiPlan_AllNil_FailedDriftRemark_KeepsTheRow(t *testing.T) {
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"X": true}, markErrs: map[string]int{"product/X": 1}}
+	st.driftBudget.Store(1)
+	err := rebuildAllProducts(t, st,
+		&staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}},
+		&staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}})
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("the walk must report one failed resource, got %v", err)
+	}
+
+	calls := st.callsSnapshot()
+	if countPrefix(calls, "RemoveResource:product/X:") != 1 {
+		t.Fatalf("X's documents and edges are deleted before its drift check: %v", calls)
+	}
+	if countPrefix(calls, "DeleteResourceIfSeq:product/X:") != 0 {
+		t.Fatalf("a root whose re-mark failed must keep its row: %v", calls)
+	}
+	failed, marked := callIndexes(calls, "MarkStaleFailed:product/X"), callIndexes(calls, "MarkStale:product/X")
+	if len(failed) != 1 || len(marked) != 1 || marked[0] < failed[0] {
+		t.Fatalf("the failed re-mark must fail X, which marks it once: %v", calls)
+	}
+}
+
+// L2.6 ruling R8: an aborted walk's salvage marks what is unsettled only: a failed
 // id was marked when it failed, and a settled one needs no mark. Plan 1
 // fails X (its document is rejected) and completes Y; plan 2 completes Y on
 // its first page, then its second page fails.
