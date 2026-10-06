@@ -347,9 +347,21 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		}
 	}
 
+	// Each id is served once, however often the selector lists it: a repeat
+	// would begin it again over its flusher entry, so a failed id could be
+	// re-begun, counted and marked again.
+	ids := make([]string, 0, len(params.ResourceIDs))
+	seen := make(map[string]bool, len(params.ResourceIDs))
+	for _, id := range params.ResourceIDs {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+
 	fl := newRebuildFlusher(idx, params.ResourceType)
 
-	for _, id := range params.ResourceIDs {
+	for _, id := range ids {
 		if ctx.Err() != nil {
 			fl.salvage(ctx)
 			return ctx.Err()
@@ -421,7 +433,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		return err
 	}
 
-	logger.Info("targeted rebuild complete", slog.Int("total", len(params.ResourceIDs)), slog.Int("failed", fl.failed))
+	logger.Info("targeted rebuild complete", slog.Int("total", len(ids)), slog.Int("failed", fl.failed))
 	return fl.errorIfFailed()
 }
 

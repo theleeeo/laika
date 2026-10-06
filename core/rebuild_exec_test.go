@@ -664,6 +664,27 @@ func TestRebuildByIDs_FailureNamingNoChunkDocument_RejectsEveryDocumentOfItsID(t
 	}
 }
 
+// Ruling R7: a targeted rebuild serves each id once, however often its
+// ResourceIDs list it: an id whose plans disagree is begun, marked and
+// counted once.
+func TestRebuildByIDs_RepeatedID_IsBuiltOnce(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("X")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}}},
+	}}
+	idx := newRebuildIndexer(st, &captureBackend{}, plans, 0)
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"X", "X"}}})
+	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+		t.Fatalf("the rebuild must report one failed resource, got %v", err)
+	}
+	calls := st.callsSnapshot()
+	if st.count("BeginBuild:product/X") != 1 || countPrefix(calls, "MarkStale:product/X") != 1 {
+		t.Fatalf("X must be begun once and marked once: %v", calls)
+	}
+}
+
 // The same resource and version twice in one chunk — a listing that repeats a
 // resource — sends one edge set for that version, the later document's: the
 // bulk write applies its items in order, so the later document is the one
