@@ -9,7 +9,7 @@
 > rebuild doesn't count such an id as failed. A mark that fails does fail it,
 > so the rebuild reports it; a single-plan walk's checkpoint can still step
 > over an id whose marks failed, as over any failed id whose mark failed
-> (seams S26 in the multirepo's records). A rebuild that runs every plan with
+> (seams S27 in the multirepo's records). A rebuild that runs every plan with
 > an `Executer`, whether by naming every such version or none, still deletes
 > as the L2.6 note says. Rejected: deleting from every version on the
 > selected plans' word, which removed documents that plans never asked still
