@@ -1,5 +1,13 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-06, runbook step L2.6):** a multi-plan Rebuild walk deletes
+> a root only when every plan of the walk listed it without data, as a build
+> deletes only when all its plans return nil; a root whose plans disagree is
+> marked stale for the sweep, whose build runs every plan. The L2.1 note's
+> check of a root the walk deleted measures from the start of the plan walk
+> that first listed the root, which precedes every fetch of it, not from the
+> start of the walk that listed it last.
+
 > **Note (2026-10-06, runbook step L2.4):** a third durability leg stands
 > beside the ones below and ADR 0008's mark and sweep: the **reverse sweep**
 > ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md)).
