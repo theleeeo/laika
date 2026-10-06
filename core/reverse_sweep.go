@@ -225,7 +225,9 @@ func firstProbe(plans []projection.Plan) func(context.Context, []string, map[str
 func (idx *Indexer) probePage(ctx context.Context, probe func(context.Context, []string, map[string]string) ([]string, error), resourceType string, page []ListedResource, res *ReverseSweepResult) ([]model.Resource, error) {
 	var suspects []model.Resource
 	for _, g := range groupByMetadata(page) {
-		present, err := probe(ctx, g.ids, g.metadata)
+		// The probe gets a copy: it may use its ids as it likes, and the
+		// suspects are found by walking the group's own.
+		present, err := probe(ctx, slices.Clone(g.ids), g.metadata)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()

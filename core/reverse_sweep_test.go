@@ -264,6 +264,46 @@ func TestReverseSweep_MarksSuspectsThenBuildsThemOwned(t *testing.T) {
 	}
 }
 
+// A probe may use the ids it is given as it likes: one that filters them in
+// place, as present := ids[:0] does, still has every id it dropped found as a
+// suspect, marked and built.
+func TestReverseSweep_ProbeFilteringItsIDsInPlace_FindsEverySuspect(t *testing.T) {
+	st := &recordingStore{}
+	seedRows(st, nil, "a", "b", "c")
+	p := &fakeProbe{answer: func(_ context.Context, ids []string, _ map[string]string) ([]string, error) {
+		present := ids[:0]
+		for _, id := range ids {
+			if id != "b" {
+				present = append(present, id)
+			}
+		}
+		return present, nil
+	}}
+	ex := &sweepExecuter{}
+	idx, _ := newSweepIndexer(st, ex, p, ReverseSweepConfig{})
+
+	got, err := idx.ReverseSweepNow(t.Context(), "product")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, idx)
+
+	if want := (ReverseSweepResult{Listed: 3, Suspects: 1}); got != want {
+		t.Fatalf("result: got %+v, want %+v", got, want)
+	}
+	if marks := callsWithPrefix(st, "MarkStale"); !slices.Equal(marks, []string{"MarkStale:1"}) {
+		t.Fatalf("b, the id the probe dropped, must be marked: %v", st.callsSnapshot())
+	}
+	if len(callsWithPrefix(st, "BeginBuild:product/b:")) != 1 {
+		t.Fatalf("b must be built once: %v", st.callsSnapshot())
+	}
+	for _, id := range []string{"a", "c"} {
+		if len(callsWithPrefix(st, "BeginBuild:product/"+id+":")) != 0 {
+			t.Fatalf("%s, which the probe returned, must not be built: %v", id, st.callsSnapshot())
+		}
+	}
+}
+
 // A group whose probe fails is logged, counted and skipped — its ids neither
 // marked nor built — and the rest of the page is still probed; the page's
 // cursor still passes it.
