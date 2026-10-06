@@ -125,6 +125,12 @@ type Indexer struct {
 
 	ownerLease time.Duration
 
+	// reverseSweeps is Config.ReverseSweeps with its defaults applied.
+	reverseSweeps map[string]ReverseSweepConfig
+	// reverseSweepBackoff is how long a reverse sweep waits before checking
+	// the pool's pressure again; tests shorten it.
+	reverseSweepBackoff time.Duration
+
 	temporal  client.Client
 	taskQueue string
 
@@ -193,6 +199,13 @@ func New(cfg Config) (*Indexer, error) {
 	if idx.ownerLease <= 0 {
 		idx.ownerLease = defaultOwnerLease
 	}
+
+	sweeps, err := reverseSweepConfigs(cfg.ReverseSweeps, cfg.Resources)
+	if err != nil {
+		return nil, err
+	}
+	idx.reverseSweeps = sweeps
+	idx.reverseSweepBackoff = defaultReverseSweepBackoff
 
 	taskQueue := cfg.TaskQueue
 	if taskQueue == "" {

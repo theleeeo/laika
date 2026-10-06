@@ -3,7 +3,10 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/theleeeo/laika/core/resource"
 )
 
 const (
@@ -50,6 +53,31 @@ type ReverseSweepResult struct {
 	FailedProbes int
 	// Unprobed is the number of ids those failed probes skipped.
 	Unprobed int
+}
+
+// reverseSweepConfigs validates Config.ReverseSweeps against the resource
+// configs and applies its defaults.
+func reverseSweepConfigs(in map[string]ReverseSweepConfig, resources resource.Configs) (map[string]ReverseSweepConfig, error) {
+	out := make(map[string]ReverseSweepConfig, len(in))
+	for typ, c := range in {
+		if resources.Get(typ) == nil {
+			return nil, fmt.Errorf("reverse sweep for resource type %q: %w", typ, ErrUnknownResource)
+		}
+		if c.Interval < 0 || c.PageSize < 0 || c.PageInterval < 0 {
+			return nil, fmt.Errorf("reverse sweep for resource type %q: negative interval, page size or page interval", typ)
+		}
+		if c.Interval == 0 {
+			c.Interval = defaultReverseSweepInterval
+		}
+		if c.PageSize == 0 {
+			c.PageSize = defaultReverseSweepPageSize
+		}
+		if c.PageInterval == 0 {
+			c.PageInterval = defaultReverseSweepPageInterval
+		}
+		out[typ] = c
+	}
+	return out, nil
 }
 
 // errReverseSweepNotImplemented is the contract stub's; L2.4 lane B
