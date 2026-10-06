@@ -12,8 +12,10 @@ type ResourceSelector struct {
 	ResourceType string
 	Versions     []int
 	ResourceIDs  []string
-	// Metadata is forwarded to every provider call the rebuild makes, exactly
-	// like notification metadata on the ingest path (e.g. the acting tenant).
+	// Metadata is the rebuild's own fetch context (e.g. the acting tenant),
+	// passed to every provider call its walk makes. It is never stored on a
+	// resource's row: the owned re-builds the walk's drift re-marks claim
+	// fetch with their rows' own metadata.
 	Metadata map[string]string
 }
 

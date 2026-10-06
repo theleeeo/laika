@@ -40,9 +40,9 @@ type RebuildArgs struct {
 // ClearStale. An id whose plans all returned nil is gone at source: its
 // documents are deleted, and it finishes with DeleteResourceIfSeq instead,
 // which removes its row — owned or not, tombstone or not — and hands on the
-// follow-up when a change moved the mark. A failed owned id releases its ownership and keeps its mark, so the
-// next change claims it or the sweep rebuilds it; so does every owned id left
-// unfinished when ctx ends.
+// follow-up when a change moved the mark. A failed owned id releases its
+// ownership and keeps its mark, so the next change claims it or the sweep
+// rebuilds it; so does every owned id left unfinished when ctx ends.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 

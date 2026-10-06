@@ -201,36 +201,61 @@ func TestOwnMetadata_QueuedOwnedBuild_RunsWithMetadataRegisteredMeanwhile(t *tes
 	}
 }
 
-// A direct Build with no owner token owns nothing: it fetches with its
-// caller's BuildArgs.Metadata, whatever the row holds. An owner token makes
-// the same Build fetch with the row's metadata instead.
+// A direct Build decides per id: an id with no owner token owns nothing and
+// fetches with its caller's BuildArgs.Metadata, whatever its row holds — none
+// when the caller gives none; an id with one fetches with its row's metadata,
+// whatever the caller gives — none when the row holds none. One BuildArgs may
+// mix both.
 func TestOwnMetadata_DirectBuild_UnownedFetchesWithItsCallers_OwnedWithTheRows(t *testing.T) {
-	rowMD, callerMD := map[string]string{"m": "row"}, map[string]string{"m": "caller"}
+	callerMD := map[string]string{"m": "caller"}
+	rowMD := func(id string) map[string]string { return map[string]string{"m": "row-" + id} }
 	st := &recordingStore{}
-	st.seedMetadata(product("1"), rowMD)
+	for _, id := range []string{"1", "2", "3", "5"} {
+		st.seedMetadata(product(id), rowMD(id)) // "4" has no row metadata
+	}
 	idx, ex := newRecordingIndexer(st, 2, 4)
+	claim := func(id string) int64 {
+		t.Helper()
+		owned, err := st.MarkStale(t.Context(), []model.Resource{product(id)}, time.Minute)
+		if err != nil || len(owned) != 1 {
+			t.Fatalf("claiming %s: %v %v", id, owned, err)
+		}
+		return owned[0].Token
+	}
+	build := func(args BuildArgs) {
+		t.Helper()
+		args.ResourceType = "product"
+		if err := idx.Build(t.Context(), args); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}, Metadata: callerMD}); err != nil {
-		t.Fatal(err)
-	}
-	owned, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, time.Minute)
-	if err != nil || len(owned) != 1 {
-		t.Fatalf("claiming: %v %v", owned, err)
-	}
-	if err := idx.Build(t.Context(), BuildArgs{
-		ResourceType: "product", ResourceIds: []string{"1"}, Metadata: callerMD,
-		OwnerTokens: map[string]int64{"1": owned[0].Token},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	// 1 unowned, then owned.
+	build(BuildArgs{ResourceIds: []string{"1"}, Metadata: callerMD})
+	build(BuildArgs{ResourceIds: []string{"1"}, Metadata: callerMD, OwnerTokens: map[string]int64{"1": claim("1")}})
+	// One batch: 2 owned, 3 unowned.
+	build(BuildArgs{ResourceIds: []string{"2", "3"}, Metadata: callerMD, OwnerTokens: map[string]int64{"2": claim("2")}})
+	// 4 owned on a row without metadata, the caller giving some.
+	build(BuildArgs{ResourceIds: []string{"4"}, Metadata: callerMD, OwnerTokens: map[string]int64{"4": claim("4")}})
+	// 5 unowned with no caller metadata, on a row that holds some.
+	build(BuildArgs{ResourceIds: []string{"5"}})
 	waitIdle(t, idx)
 
-	reqs := ex.requestsFor("1")
-	if len(reqs) != 2 {
-		t.Fatalf("two builds, got %d: %v", len(reqs), st.callsSnapshot())
+	fetches := func(id string, n int) []projection.BuildRequest {
+		t.Helper()
+		reqs := ex.requestsFor(id)
+		if len(reqs) != n {
+			t.Fatalf("product/%s: want %d builds, got %d: %v", id, n, len(reqs), st.callsSnapshot())
+		}
+		return reqs
 	}
-	fetchedWith(t, "the build that owns nothing", reqs[0].Metadata, callerMD)
-	fetchedWith(t, "the owned build", reqs[1].Metadata, rowMD)
+	r1 := fetches("1", 2)
+	fetchedWith(t, "1, owning nothing", r1[0].Metadata, callerMD)
+	fetchedWith(t, "1, owned", r1[1].Metadata, rowMD("1"))
+	fetchedWith(t, "2, owned in a mixed batch", fetches("2", 1)[0].Metadata, rowMD("2"))
+	fetchedWith(t, "3, owning nothing in a mixed batch", fetches("3", 1)[0].Metadata, callerMD)
+	fetchedWith(t, "4, owned on a row without metadata", fetches("4", 1)[0].Metadata, nil)
+	fetchedWith(t, "5, owning nothing with no caller metadata", fetches("5", 1)[0].Metadata, nil)
 }
 
 // A rebuild owns nothing: the walk and a targeted rebuild fetch with the

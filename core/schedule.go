@@ -96,9 +96,10 @@ func (idx *Indexer) submitDelete(ctx context.Context, res model.Resource, staleS
 
 // submitFollowUp submits the follow-up an owned build or delete finished
 // with, if one is due: a build, which fetches with the row's metadata as its
-// BeginBuild returns it, or a delete when the row is a tombstone. It runs inside the finishing task (or the synchronous
-// sweep), so it never waits; a shed follow-up releases the re-claimed
-// ownership and leaves the mark to the sweep.
+// BeginBuild returns it, or a delete when the row is a tombstone. It runs
+// inside the finishing task (or the synchronous sweep), so it never waits; a
+// shed follow-up releases the re-claimed ownership and leaves the mark to the
+// sweep.
 func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu FollowUp) {
 	if fu.Token == 0 {
 		return
