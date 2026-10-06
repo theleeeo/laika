@@ -435,7 +435,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 
 	// Only a walk with exactly one active plan has resumable positions. With
 	// several, a resource first seen by an early plan stays unsettled until
-	// the later plans' documents land, so every mid-walk position steps over
+	// the later plans' outcomes arrive, so every mid-walk position steps over
 	// begun-but-unsettled resources — and an attempt resuming past one whose
 	// remaining listing no longer emits it would leave it with some versions'
 	// documents and edge sets refreshed, others not, and no stale mark. With
@@ -493,9 +493,9 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 		if plan.Executer == nil {
 			continue
 		}
-		// Documents a resource first seen in this walk still expects: this
-		// plan plus the active plans after it — earlier walks can no longer
-		// emit it.
+		// Plan outcomes — a document or a nil — a resource first seen in this
+		// walk still expects: this plan plus the active plans after it —
+		// earlier walks can no longer emit it.
 		expected := 0
 		for _, p := range plans[planIdx:] {
 			if p.Executer != nil {
@@ -541,48 +541,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					continue
 				}
 
-				// Source listed the resource but returned no data — hand it
-				// to the delete path, which removes every version's document
-				// at a Build Sequence of the resource's: the one this walk
-				// began it at, or else a fresh BeginBuild's (a failed entry
-				// that was never begun holds 0). The row goes after them,
-				// guarded by the stale_seq the same BeginBuild captured.
-				if doc.Doc == nil {
-					seq, staleSeq, ok := fl.occ(id)
-					if !ok || seq <= 0 {
-						begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
-						if err != nil {
-							logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
-							fl.fail(ctx, id)
-							continue
-						}
-						seq, staleSeq = begun.BuildIdx, begun.StaleSeq
-					}
-					fl.discard(id)
-					if err := idx.handleDelete(ctx, RebuildPayload{
-						ResourceType: params.ResourceType,
-						ResourceID:   id,
-					}, seq); err != nil {
-						logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
-						fl.fail(ctx, id)
-						continue
-					}
-					// The page may have been fetched before seq was taken (a
-					// fresh BeginBuild above): a recreate built and settled
-					// in between wrote below seq, and the delete removed it.
-					// Check the root against the walk start, as a root the
-					// walk settles checks itself (driftBase.checkRoot); a hit
-					// or a failed check re-marks and re-builds it — at worst
-					// a redundant build. The re-mark moves stale_seq, so the
-					// root keeps its row; a root whose re-mark failed was
-					// failed and keeps it too.
-					fl.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: doc.Root, Start: walkStart}}})
-					if !fl.tracked(id) {
-						fl.removeRow(ctx, id, staleSeq)
-					}
-					continue
-				}
-
+				// Begun on first sighting — by a document or a nil alike — so
+				// every plan's outcome for the resource lands in one flusher
+				// entry, at one Build Sequence. A failed resource keeps its
+				// entry, so it is never begun again.
 				if !fl.tracked(id) {
 					begun, err := idx.st.BeginBuild(ctx, doc.Root, 0)
 					if err != nil {
@@ -596,6 +558,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 					// only on first sighting, a root seen by several plans
 					// keeps the start of the walk that first fetched it.
 					fl.begin(id, begun, driftBase{start: walkStart, checkRoot: true}, expected)
+				}
+
+				// Source listed the resource but returned no data: that is
+				// this plan's outcome for it. Existence is decided across
+				// every plan, as the live build does: the resource is deleted
+				// only once every expected plan found it gone, and a plan
+				// that disagrees fails it (rebuildFlusher.gone).
+				if doc.Doc == nil {
+					fl.gone(ctx, id, plan.Version)
+					continue
 				}
 
 				occVersion, _, ok := fl.occ(id)
