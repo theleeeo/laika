@@ -839,6 +839,11 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 	return out, rows.Err()
 }
 
+// ListResources is the contract stub; L2.4 lane A implements it.
+func (s *Store) ListResources(ctx context.Context, resourceType, after string, limit int) ([]core.ListedResource, error) {
+	return nil, errors.New("ListResources: not implemented")
+}
+
 // CountStale returns how many resources of the type (tombstones included)
 // have a stale mark older than before, and the oldest such mark — zero when
 // the count is zero. This is core.StaleCounter, the cutover readiness gate's

@@ -76,6 +76,13 @@ type Config struct {
 	// (seams S16). Default 30s.
 	OwnerLease time.Duration
 
+	// ReverseSweeps enables the reverse sweep (ADR 0012) per resource type:
+	// each entry's type is swept on its own schedule
+	// (EnsureReverseSweepSchedules), paced by its config. A type without an
+	// entry is never swept. New rejects an entry for a type Resources doesn't
+	// configure, and negative values.
+	ReverseSweeps map[string]ReverseSweepConfig
+
 	// SearchMiddlewares wrap the search path. They run outermost-first in
 	// registration order: []{A, B} executes A → B → the Indexer's own
 	// validate/normalize/backend call. A middleware may authorize the request,

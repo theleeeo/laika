@@ -78,6 +78,10 @@ func (s *cancellingStore) DeleteResourceIfSeq(context.Context, model.Resource, i
 func (s *cancellingStore) ListStale(context.Context, time.Time, int, time.Duration) ([]StaleResource, error) {
 	return nil, nil
 }
+
+func (s *cancellingStore) ListResources(context.Context, string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
 func (s *cancellingStore) RenewOwners(_ context.Context, owned []Owned) ([]Owned, error) {
 	return owned, nil
 }

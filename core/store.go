@@ -133,6 +133,19 @@ type Store interface {
 	// before and that have no live owner under lease, and claims every row
 	// it returns in the same statement.
 	ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]StaleResource, error)
+	// ListResources returns up to limit live (not tombstoned) rows of
+	// resourceType whose id sorts after after, in id order, each with its
+	// metadata: a keyset page of the type's rows. An empty after starts at
+	// the first id. It claims and locks nothing. The reverse sweep enumerates
+	// a type's indexed resources with it (ADR 0012).
+	ListResources(ctx context.Context, resourceType, after string, limit int) ([]ListedResource, error)
+}
+
+// ListedResource is one row ListResources returns.
+type ListedResource struct {
+	model.Resource
+	// Metadata is the row's metadata; nil when it has none (NULL or empty).
+	Metadata map[string]string
 }
 
 // EdgeSet is the edges one Schema Version's plan discovered for a resource:

@@ -54,6 +54,19 @@ type BuildDoc struct {
 type Plan struct {
 	Version  int
 	Executer aggregation.Executer[BuildRequest, BuildDoc]
+
+	// Probe, when set, reports which of ids the plan's root fetch would find
+	// when fetching with metadata: it returns exactly those ids, in any
+	// order. The reverse sweep (core.Indexer.ReverseSweepNow) calls it with
+	// one actor's ids at a time and rebuilds every id it doesn't return, so a
+	// probe that misses an id its root fetch would find costs a needless
+	// build, and one that returns an id its root fetch would not find misses
+	// a delete. Write it beside the plan, on the clients its root fetch uses:
+	// a by-ids call where the source has one, a call per id otherwise. An
+	// error fails the whole call; nothing of it is used. Existence belongs to
+	// the resource, not to a Schema Version, so the sweep uses the first of a
+	// type's plans that has a Probe (ADR 0012).
+	Probe func(ctx context.Context, ids []string, metadata map[string]string) (present []string, err error)
 }
 
 // TODO: Abstract away

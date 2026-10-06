@@ -389,6 +389,10 @@ func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duratio
 	return nil, nil
 }
 
+func (s *recordingStore) ListResources(context.Context, string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
+
 // RenewOwners and ReleaseOwners fail on a done ctx, as a real store's query
 // would, and then record RenewOwnersFailed / ReleaseOwnersFailed per entry
 // instead — so a release made on a detached ctx is observable. RenewOwners

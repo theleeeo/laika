@@ -408,6 +408,10 @@ func (s *rebuildRecordingStore) ListStale(context.Context, time.Time, int, time.
 	return nil, nil
 }
 
+func (s *rebuildRecordingStore) ListResources(context.Context, string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
+
 func (s *rebuildRecordingStore) RenewOwners(_ context.Context, owned []Owned) ([]Owned, error) {
 	return owned, nil
 }
