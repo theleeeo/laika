@@ -54,6 +54,28 @@ func TestRebuildWalkWorkflow_RunsSelectorActivity(t *testing.T) {
 	require.Equal(t, sel, got)
 }
 
+func TestReverseSweepWorkflow_RunsSweepActivity(t *testing.T) {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestWorkflowEnvironment()
+
+	var got ReverseSweepParams
+	want := ReverseSweepResult{Listed: 7, Suspects: 2, FailedProbes: 1, Unprobed: 3}
+	env.RegisterActivityWithOptions(func(ctx context.Context, p ReverseSweepParams) (ReverseSweepResult, error) {
+		got = p
+		return want, nil
+	}, activity.RegisterOptions{Name: "RunReverseSweep"})
+
+	p := ReverseSweepParams{ResourceType: "product"}
+	env.ExecuteWorkflow(ReverseSweepWorkflow, p)
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, p, got)
+	var res ReverseSweepResult
+	require.NoError(t, env.GetWorkflowResult(&res))
+	require.Equal(t, want, res, "the workflow returns its activity's result")
+}
+
 func TestRunRebuild_ResumesFromHeartbeatCursor(t *testing.T) {
 	st := &rebuildRecordingStore{}
 	es := &captureBackend{}

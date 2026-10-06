@@ -32,6 +32,7 @@ const (
 	reverseSweepWorkflowName = "ReverseSweep"
 	sweepActivityName        = "SweepStale"
 	rebuildActivityName      = "RunRebuild"
+	reverseSweepActivityName = "RunReverseSweep"
 )
 
 // ReverseSweepParams names the resource type one ReverseSweep run sweeps. Its
@@ -153,6 +154,21 @@ func RebuildWalkWorkflow(ctx workflow.Context, sel ResourceSelector) error {
 		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
 	})
 	return workflow.ExecuteActivity(ctx, rebuildActivityName, sel).Get(ctx, nil)
+}
+
+// ReverseSweepWorkflow runs one pass of a type's reverse sweep as a single
+// long-running, heartbeating activity, with RebuildWalkWorkflow's options: a
+// retried attempt resumes after the last page whose suspects were marked
+// (ADR 0011's pattern, ADR 0012).
+func ReverseSweepWorkflow(ctx workflow.Context, p ReverseSweepParams) (ReverseSweepResult, error) {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 24 * time.Hour,
+		HeartbeatTimeout:    time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
+	})
+	var res ReverseSweepResult
+	err := workflow.ExecuteActivity(ctx, reverseSweepActivityName, p).Get(ctx, &res)
+	return res, err
 }
 
 // NewWorker creates a Temporal worker hosting the Indexer's workflows and
