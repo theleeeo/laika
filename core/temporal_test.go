@@ -333,6 +333,46 @@ func TestRunReverseSweep_ResumedLivenessBeatPreservesInheritedCursor(t *testing.
 	}
 }
 
+// With no stand-in body, RunReverseSweep drives the Indexer's own sweep: a
+// retried attempt lists from after its heartbeat cursor, and its checkpoints
+// reach the heartbeat.
+func TestRunReverseSweep_ResumesTheIndexersSweepFromHeartbeatCursor(t *testing.T) {
+	st := &recordingStore{}
+	seedRows(st, nil, "a", "b", "c", "d", "e")
+	p := &fakeProbe{}
+	idx, _ := newSweepIndexer(st, &sweepExecuter{}, p, ReverseSweepConfig{PageSize: 2})
+
+	env := runReverseSweepEnv(&temporalActivities{idx: idx})
+	env.SetHeartbeatDetails("b")
+	var mu sync.Mutex
+	var beats []string
+	env.SetOnActivityHeartbeatListener(func(_ *activity.Info, details converter.EncodedValues) {
+		var c string
+		require.NoError(t, details.Get(&c), "a checkpoint beat must carry its cursor")
+		mu.Lock()
+		beats = append(beats, c)
+		mu.Unlock()
+	})
+
+	val, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: "product"})
+	require.NoError(t, err)
+
+	listings := callsWithPrefix(st, "ListResources")
+	require.NotEmpty(t, listings)
+	require.Equal(t, "ListResources:product:b:2", listings[0], "the sweep must list from after the heartbeat cursor")
+	require.Equal(t, []string{"c", "d", "e"}, p.probedIDs(), "ids at or before the cursor must not be probed again")
+	var res ReverseSweepResult
+	require.NoError(t, val.Get(&res))
+	require.Equal(t, ReverseSweepResult{Listed: 3}, res)
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The SDK sends the first beat and holds later ones within its throttle
+	// window: the first is the first page's checkpoint, past the cursor.
+	require.NotEmpty(t, beats, "the sweep's checkpoints must reach the heartbeat")
+	require.Equal(t, "d", beats[0], "the first checkpoint is the last id of the first page after the cursor")
+}
+
 // fakeScheduleCreator captures EnsureSweepSchedule's create-if-absent behavior.
 type fakeScheduleCreator struct {
 	opts []client.ScheduleOptions
