@@ -57,7 +57,8 @@ type Plan struct {
 
 	// Probe, when set, reports which of ids the plan's root fetch would find
 	// when fetching with metadata: it returns exactly those ids, in any
-	// order. The reverse sweep (core.Indexer.ReverseSweepNow) calls it with
+	// order, and fails where that fetch would fail — as a fetch with no
+	// actor does in a source that needs one. The reverse sweep (core.Indexer.ReverseSweepNow) calls it with
 	// one actor's ids at a time and rebuilds every id it doesn't return, so a
 	// probe that misses an id its root fetch would find costs a needless
 	// build, and one that returns an id its root fetch would not find misses
