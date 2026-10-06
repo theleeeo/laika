@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -92,6 +93,11 @@ type recordingStore struct {
 	replaced   []edgeReplace
 	replaceErr error
 	onReplace  func(edgeReplace)
+	// markErr fails every MarkStale after recording it. onList, when set,
+	// runs at the start of every ListResources, outside the lock, with its
+	// after: a test can see where a reverse sweep's page starts.
+	markErr error
+	onList  func(after string)
 
 	rows     map[model.Resource]*memRow
 	seq      int64 // the last stale_seq handed out
@@ -261,14 +267,18 @@ func (s *recordingStore) followUpLocked(res model.Resource, r *memRow, token int
 	return fu
 }
 
-// MarkStale fails on a done ctx, as a real store's query would. It leaves
-// the rows' metadata.
+// MarkStale fails on a done ctx, as a real store's query would, and with
+// markErr, marking nothing. It leaves the rows' metadata.
 func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, lease time.Duration) ([]Owned, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	s.recordLocked("MarkStale:%d", len(rs))
+	if s.markErr != nil {
+		s.mu.Unlock()
+		return nil, s.markErr
+	}
 	var owned []Owned
 	for _, res := range rs {
 		r := s.markLocked(res, nil)
@@ -389,8 +399,33 @@ func (s *recordingStore) ListStale(context.Context, time.Time, int, time.Duratio
 	return nil, nil
 }
 
-func (s *recordingStore) ListResources(context.Context, string, string, int) ([]ListedResource, error) {
-	return nil, nil
+// ListResources follows the contract over the in-memory rows: up to limit
+// live rows of resourceType whose id sorts after after, in id order, each
+// with a copy of its metadata (nil when it has none); tombstones are skipped.
+// It records the call and runs onList first, outside the lock.
+func (s *recordingStore) ListResources(_ context.Context, resourceType, after string, limit int) ([]ListedResource, error) {
+	if s.onList != nil {
+		s.onList(after)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("ListResources:%s:%s:%d", resourceType, after, limit)
+	var out []ListedResource
+	for res, r := range s.rows {
+		if res.Type != resourceType || res.Id <= after || r.deleted {
+			continue
+		}
+		var md map[string]string
+		if len(r.metadata) > 0 {
+			md = maps.Clone(r.metadata)
+		}
+		out = append(out, ListedResource{Resource: res, Metadata: md})
+	}
+	slices.SortFunc(out, func(a, b ListedResource) int { return strings.Compare(a.Id, b.Id) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 
 // RenewOwners and ReleaseOwners fail on a done ctx, as a real store's query
