@@ -1,14 +1,16 @@
 # Distributed safety via OCC and drift-check, not locks
 
 > **Note (2026-10-06, runbook step L2.7):** Decided 2026-10-06 (Q23): a
-> rebuild that selects versions (`RebuildArgs.Versions`) and whose selected
-> plans are not all of its type's plans never deletes on them alone. An id
+> rebuild that selects versions (`RebuildArgs.Versions`) and so runs fewer
+> than all of its type's plans with an `Executer` never deletes on them alone. An id
 > every selected plan finds gone, in a walk or by id, is marked stale with
 > one `MarkStale`, and nothing of it is deleted, its row included. The
 > sweep's build then runs every plan and deletes only if they all agree. The
 > rebuild doesn't count such an id as failed. A mark that fails does fail it,
-> so a checkpoint never steps over an id that is neither deleted nor marked
-> (ADR 0011). A rebuild that runs every plan with an `Executer` still deletes
+> so the rebuild reports it; a single-plan walk's checkpoint can still step
+> over an id whose marks failed, as over any failed id whose mark failed
+> (seams S26 in the multirepo's records). A rebuild that runs every plan with
+> an `Executer`, whether by naming every such version or none, still deletes
 > as the L2.6 note says. Rejected: deleting from every version on the
 > selected plans' word, which removed documents that plans never asked still
 > served; and deleting only the selected versions' documents while keeping

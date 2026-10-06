@@ -173,8 +173,8 @@ type pendingItem struct {
 // instead of cleared, so the sweep recovers it, and the rebuild reports the
 // failure instead of success. A plan walk counts a plan's nil as that plan's
 // outcome too (gone): a resource every expected plan found gone is deleted —
-// or, when the rebuild selected versions, left marked for the sweep
-// (mayDelete) — unless it is partial (pendingResource.partial), which fails
+// or, when the rebuild runs fewer than every plan with an Executer, left
+// marked for the sweep (mayDelete) — unless it is partial (pendingResource.partial), which fails
 // instead, and one whose plans disagree fails. Its marks carry no metadata:
 // the rebuild's Metadata is the walk's fetch context, never a resource's own.
 type rebuildFlusher struct {
@@ -344,7 +344,7 @@ func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 // it, durably marked. A failed mark fails it (fail retries the mark and
 // counts it), so the rebuild reports what has no mark.
 func (f *rebuildFlusher) leaveGone(ctx context.Context, id string) {
-	slog.Info("every selected plan found the resource gone; the rebuild selected versions, so it is left marked for the sweep, whose build runs every plan",
+	slog.Info("every plan the rebuild runs found the resource gone; it runs fewer than every plan with an executer, so the resource is left marked for the sweep, whose build runs them all",
 		slog.String("type", f.resourceType), slog.String("id", id))
 	if err := f.markStale(ctx, id); err != nil {
 		f.fail(ctx, id)

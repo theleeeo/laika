@@ -591,7 +591,8 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				// this plan's outcome for it. Existence is decided across
 				// every plan, as the live build does: the resource is deleted
 				// only once every expected plan found it gone — or left marked
-				// for the sweep, if the walk selected versions — and a plan
+				// for the sweep, if the walk runs fewer than every plan with an
+				// Executer (mayDelete) — and a plan
 				// that disagrees fails it (rebuildFlusher.gone).
 				if doc.Doc == nil {
 					fl.gone(ctx, id, plan.Version)
