@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"sort"
@@ -557,24 +558,30 @@ func TestReplaceEdges_StoresTheReportOnARowWithNoMetadata(t *testing.T) {
 	requireSets(t, p, map[int]stored{1: stamped(5, model.Resource{Type: "rm1c", Id: "a"})})
 }
 
-func TestReplaceEdges_KeepsTheMetadataTheRowHolds(t *testing.T) {
+// A row only a mark created has no metadata, as a mark writes none, so it
+// takes the plans' report: a cascade-marked Parent no registration reached
+// builds with its own report, not a child's metadata.
+func TestReplaceEdges_StoresTheReportOnARowOnlyAMarkCreated(t *testing.T) {
 	ctx := context.Background()
+	st := NewStore(testPool)
+	for _, lease := range []time.Duration{0, time.Minute} {
+		p := model.Resource{Type: "rm7", Id: fmt.Sprint("marked-", lease)}
+		if _, err := st.MarkStale(ctx, []model.Resource{p}, lease); err != nil {
+			t.Fatal(err)
+		}
+
+		replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
+
+		requireMetadata(t, fmt.Sprintf("lease %v: stored", lease), metadataOf(t, p), meta("report"))
+	}
+}
+
+func TestReplaceEdges_KeepsTheMetadataTheRowHolds(t *testing.T) {
 	st := NewStore(testPool)
 
 	t.Run("a registration's", func(t *testing.T) {
 		p := model.Resource{Type: "rm2", Id: "registered"}
 		register(t, st, core.Registration{Resource: p, Version: 1, Metadata: meta("registration")})
-
-		replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
-
-		requireMetadata(t, "stored", metadataOf(t, p), meta("registration"))
-	})
-	t.Run("a registration's, after a mark", func(t *testing.T) {
-		p := model.Resource{Type: "rm2", Id: "marked"}
-		register(t, st, core.Registration{Resource: p, Version: 1, Metadata: meta("registration")})
-		if _, err := st.MarkStale(ctx, []model.Resource{p}, 0); err != nil {
-			t.Fatal(err)
-		}
 
 		replaceReporting(t, st, p, 5, meta("report"), edgeSet(1))
 

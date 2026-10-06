@@ -187,6 +187,20 @@ func TestMarkStale_LeavesTheRowsMetadataAlone(t *testing.T) {
 		}
 		requireMetadata(t, "metadata after a claiming mark", metadataOf(t, res), meta("reg"))
 	})
+	t.Run("with a lease under a live owner", func(t *testing.T) {
+		res := r("owned")
+		register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("reg")})
+		_, _, before, _, _ := row(t, res)
+
+		owned, err := st.MarkStale(ctx, []model.Resource{res}, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, seq, _, _ := row(t, res); len(owned) != 0 || seq <= before {
+			t.Fatalf("owned %+v stale_seq %d, want the row marked above %d and not claimed", owned, seq, before)
+		}
+		requireMetadata(t, "metadata after a mark under a live owner", metadataOf(t, res), meta("reg"))
+	})
 	t.Run("a row the mark creates", func(t *testing.T) {
 		for _, lease := range []time.Duration{0, time.Minute} {
 			res := r(fmt.Sprint("new-", lease))
@@ -1876,7 +1890,7 @@ func TestFinishOwned_MovedSeqReclaimsForAFollowUp(t *testing.T) {
 
 	t.Run("build", func(t *testing.T) {
 		res := model.Resource{Type: "fo2", Id: "built"}
-		markUnclaimed(t, st, res)
+		register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("reg")})
 		tok := own(t, testPool, res)
 		// Two changes during the build; the owner holds, so neither claims.
 		markUnclaimed(t, st, res)
@@ -1898,6 +1912,8 @@ func TestFinishOwned_MovedSeqReclaimsForAFollowUp(t *testing.T) {
 		if _, _, seq, since, _ := row(t, res); seq != moved || since == nil {
 			t.Fatalf("a re-claim keeps the mark: seq %d (want %d) since %v", seq, moved, since)
 		}
+		// The follow-up's build reads the registration's metadata at BeginBuild.
+		requireMetadata(t, "the re-claimed row's metadata", metadataOf(t, res), meta("reg"))
 	})
 
 	t.Run("tombstone", func(t *testing.T) {
@@ -1916,6 +1932,7 @@ func TestFinishOwned_MovedSeqReclaimsForAFollowUp(t *testing.T) {
 		}
 		requireFollowUp(t, f, core.FollowUp{Token: moved, Deleted: true})
 		requireFreshOwner(t, testPool, res, moved)
+		requireMetadata(t, "the re-claimed tombstone's metadata", metadataOf(t, res), meta("del"))
 	})
 }
 
@@ -2331,7 +2348,7 @@ func TestFinishOwned_MarkCommittedWhileWaitingIsReclaimed(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	res := model.Resource{Type: "fw", Id: "1"}
-	markUnclaimed(t, st, res)
+	register(t, st, core.Registration{Resource: res, Version: 1, Metadata: meta("reg")})
 	tok := own(t, testPool, res)
 
 	// The interleaving: the owned build finishes with FinishOwned(tok, tok)
@@ -2351,6 +2368,8 @@ func TestFinishOwned_MarkCommittedWhileWaitingIsReclaimed(t *testing.T) {
 	}
 	requireFollowUp(t, f, core.FollowUp{Token: seq})
 	requireFreshOwner(t, testPool, res, seq)
+	// The follow-up's build reads the registration's metadata at BeginBuild.
+	requireMetadata(t, "the re-claimed row's metadata", metadataOf(t, res), meta("reg"))
 }
 
 func TestDeleteResourceIfSeq_RecreateCommittedWhileWaitingIsReclaimed(t *testing.T) {
