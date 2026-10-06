@@ -208,6 +208,131 @@ func TestRunRebuild_ResumedLivenessBeatPreservesInheritedCursor(t *testing.T) {
 	}
 }
 
+// reverseSweepCall is what a fake sweep body saw.
+type reverseSweepCall struct {
+	resourceType string
+	after        string
+}
+
+// runReverseSweepEnv registers RunReverseSweep on a fresh activity test
+// environment with sweep standing in for ReverseSweepResumable, so these tests
+// exercise the activity's cursor handling and not the sweep body.
+func runReverseSweepEnv(a *temporalActivities) *testsuite.TestActivityEnvironment {
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+	env.RegisterActivityWithOptions(a.RunReverseSweep, activity.RegisterOptions{Name: reverseSweepActivityName})
+	return env
+}
+
+func TestRunReverseSweep_ResumesFromHeartbeatCursor(t *testing.T) {
+	var got []reverseSweepCall
+	want := ReverseSweepResult{Listed: 4, Suspects: 1}
+	env := runReverseSweepEnv(&temporalActivities{
+		reverseSweep: func(_ context.Context, typ, after string, _ func(string)) (ReverseSweepResult, error) {
+			got = append(got, reverseSweepCall{typ, after})
+			return want, nil
+		},
+	})
+	env.SetHeartbeatDetails("p-41")
+
+	val, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: "product"})
+	require.NoError(t, err)
+
+	require.Equal(t, []reverseSweepCall{{"product", "p-41"}}, got,
+		"a retried activity must resume its sweep after the heartbeat cursor's id")
+	var res ReverseSweepResult
+	require.NoError(t, val.Get(&res))
+	require.Equal(t, want, res)
+}
+
+func TestRunReverseSweep_FreshAttemptSweepsFromTheStart(t *testing.T) {
+	var got []reverseSweepCall
+	env := runReverseSweepEnv(&temporalActivities{
+		reverseSweep: func(_ context.Context, typ, after string, _ func(string)) (ReverseSweepResult, error) {
+			got = append(got, reverseSweepCall{typ, after})
+			return ReverseSweepResult{}, nil
+		},
+	})
+
+	_, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: "product"})
+	require.NoError(t, err)
+
+	require.Equal(t, []reverseSweepCall{{"product", ""}}, got, "a fresh attempt must sweep from the type's first id")
+}
+
+func TestRunReverseSweep_FailedAttemptLeavesItsLatestCheckpoint(t *testing.T) {
+	boom := errors.New("boom")
+	env := runReverseSweepEnv(&temporalActivities{
+		reverseSweep: func(_ context.Context, _, _ string, checkpoint func(string)) (ReverseSweepResult, error) {
+			checkpoint("p-200")
+			checkpoint("p-400")
+			return ReverseSweepResult{}, boom
+		},
+	})
+
+	var mu sync.Mutex
+	var beats []string
+	env.SetOnActivityHeartbeatListener(func(_ *activity.Info, details converter.EncodedValues) {
+		var c string
+		require.NoError(t, details.Get(&c), "a checkpoint beat must carry its cursor")
+		mu.Lock()
+		beats = append(beats, c)
+		mu.Unlock()
+	})
+
+	_, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: "product"})
+	require.ErrorContains(t, err, "boom")
+
+	mu.Lock()
+	defer mu.Unlock()
+	// The SDK sends the first beat and buffers later ones within its throttle
+	// window, flushing the newest when the attempt returns an error: the retry
+	// of a failed attempt resumes from its last checkpoint.
+	require.Equal(t, []string{"p-200", "p-400"}, beats, "each checkpoint must be recorded as the heartbeat's cursor")
+}
+
+func TestRunReverseSweep_ResumedLivenessBeatPreservesInheritedCursor(t *testing.T) {
+	beat := make(chan struct{}) // closed once a heartbeat has reached the server
+	env := runReverseSweepEnv(&temporalActivities{
+		// Drive the liveness ticker rather than waiting out the production interval.
+		heartbeatInterval: time.Millisecond,
+		reverseSweep: func(_ context.Context, _, _ string, _ func(string)) (ReverseSweepResult, error) {
+			select {
+			case <-beat:
+			case <-time.After(2 * time.Second): // never block the suite if no beat lands
+			}
+			return ReverseSweepResult{}, nil
+		},
+	})
+	env.SetHeartbeatDetails("p-41")
+
+	var mu sync.Mutex
+	var beats []converter.EncodedValues
+	var once sync.Once
+	env.SetOnActivityHeartbeatListener(func(_ *activity.Info, details converter.EncodedValues) {
+		mu.Lock()
+		beats = append(beats, details)
+		mu.Unlock()
+		once.Do(func() { close(beat) })
+	})
+
+	_, err := env.ExecuteActivity(reverseSweepActivityName, ReverseSweepParams{ResourceType: "product"})
+	require.NoError(t, err)
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, beats, "the liveness ticker must have beaten during the sweep")
+	// This sweep never checkpoints: every beat it makes carries the cursor the
+	// attempt inherited — or erases it, sending the next attempt back to the
+	// type's first id.
+	for i, d := range beats {
+		var got string
+		require.NoError(t, d.Get(&got),
+			"beat %d recorded no cursor: a bare liveness beat erases the position this attempt resumed from", i)
+		require.Equal(t, "p-41", got, "beat %d", i)
+	}
+}
+
 // fakeScheduleCreator captures EnsureSweepSchedule's create-if-absent behavior.
 type fakeScheduleCreator struct {
 	opts []client.ScheduleOptions

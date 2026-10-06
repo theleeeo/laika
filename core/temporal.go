@@ -50,16 +50,22 @@ type SweepParams struct {
 	BatchSize int
 }
 
-// rebuildHeartbeatInterval is how often a running rebuild walk emits a liveness
-// heartbeat, well inside RebuildWalkWorkflow's one-minute HeartbeatTimeout.
+// rebuildHeartbeatInterval is how often a running rebuild walk or reverse sweep
+// emits a liveness heartbeat, well inside the one-minute HeartbeatTimeout
+// RebuildWalkWorkflow and ReverseSweepWorkflow give their activities.
 const rebuildHeartbeatInterval = 10 * time.Second
 
 // temporalActivities hosts the Indexer-backed activity implementations.
 type temporalActivities struct {
 	idx *Indexer
-	// heartbeatInterval overrides rebuildHeartbeatInterval. Zero means the
-	// default; tests shorten it to observe a liveness beat without waiting.
+	// heartbeatInterval overrides rebuildHeartbeatInterval for RunRebuild and
+	// RunReverseSweep. Zero means the default; tests shorten it to observe a
+	// liveness beat without waiting.
 	heartbeatInterval time.Duration
+	// reverseSweep overrides idx.ReverseSweepResumable as RunReverseSweep's
+	// body. Nil means the Indexer's; tests stand in a fake to observe the
+	// activity's cursor handling on its own.
+	reverseSweep func(ctx context.Context, resourceType, after string, checkpoint func(after string)) (ReverseSweepResult, error)
 }
 
 func (a *temporalActivities) SweepStale(ctx context.Context, p SweepParams) (int, error) {
@@ -82,18 +88,60 @@ func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelecto
 		}
 	}
 
+	checkpoint, stop := heartbeatCursor(ctx, start, a.livenessInterval())
+	defer stop()
+	return a.idx.RebuildNowResumable(ctx, sel, start, checkpoint)
+}
+
+// RunReverseSweep runs one pass of a type's reverse sweep synchronously,
+// heartbeating as RunRebuild does. Its cursor is the last id of the last page
+// whose suspects were marked: a retried attempt resumes after it instead of
+// re-probing the type from its first id (ADR 0011's pattern, ADR 0012).
+func (a *temporalActivities) RunReverseSweep(ctx context.Context, p ReverseSweepParams) (ReverseSweepResult, error) {
+	var start *string
+	if activity.HasHeartbeatDetails(ctx) {
+		var c string
+		if err := activity.GetHeartbeatDetails(ctx, &c); err != nil {
+			activity.GetLogger(ctx).Warn("unreadable reverse sweep heartbeat cursor; restarting sweep from the first id",
+				"resource_type", p.ResourceType, "error", err)
+		} else {
+			start = &c
+		}
+	}
+	var after string // empty: from the type's first id
+	if start != nil {
+		after = *start
+	}
+
+	sweep := a.reverseSweep
+	if sweep == nil {
+		sweep = a.idx.ReverseSweepResumable
+	}
+	checkpoint, stop := heartbeatCursor(ctx, start, a.livenessInterval())
+	defer stop()
+	return sweep(ctx, p.ResourceType, after, checkpoint)
+}
+
+// livenessInterval is heartbeatInterval, or rebuildHeartbeatInterval when it
+// is zero.
+func (a *temporalActivities) livenessInterval() time.Duration {
+	if a.heartbeatInterval > 0 {
+		return a.heartbeatInterval
+	}
+	return rebuildHeartbeatInterval
+}
+
+// heartbeatCursor keeps a resumable activity's cursor on its heartbeat (ADR
+// 0011): it beats every interval until stop is called, and the checkpoint it
+// returns records a new cursor at once. start is the cursor the attempt
+// inherited, nil if none.
+func heartbeatCursor[T any](ctx context.Context, start *T, interval time.Duration) (checkpoint func(T), stop func()) {
 	var mu sync.Mutex
 	// The inherited cursor seeds the beat: until this attempt checkpoints past
 	// it, every liveness beat must re-record the position it resumed from.
 	latest := start
 
-	interval := a.heartbeatInterval
-	if interval <= 0 {
-		interval = rebuildHeartbeatInterval
-	}
-
 	done := make(chan struct{})
-	defer close(done)
 	go func() {
 		t := time.NewTicker(interval)
 		defer t.Stop()
@@ -107,8 +155,8 @@ func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelecto
 				mu.Unlock()
 				// Heartbeat details replace each other wholesale, so a bare
 				// liveness beat once a cursor exists would erase it — the
-				// inherited one included, costing the next attempt the whole
-				// walk. Always re-record the latest cursor there is.
+				// inherited one included, costing the next attempt its whole
+				// run. Always re-record the latest cursor there is.
 				if cur != nil {
 					activity.RecordHeartbeat(ctx, *cur)
 				} else {
@@ -118,12 +166,13 @@ func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelecto
 		}
 	}()
 
-	return a.idx.RebuildNowResumable(ctx, sel, start, func(c RebuildCursor) {
+	checkpoint = func(c T) {
 		mu.Lock()
 		latest = &c
 		mu.Unlock()
 		activity.RecordHeartbeat(ctx, c)
-	})
+	}
+	return checkpoint, func() { close(done) }
 }
 
 // StaleSweepWorkflow drains the stale backlog in batches until a pass returns
@@ -178,9 +227,11 @@ func (idx *Indexer) NewWorker() worker.Worker {
 	w := worker.New(idx.temporal, idx.taskQueue, worker.Options{})
 	w.RegisterWorkflowWithOptions(StaleSweepWorkflow, workflow.RegisterOptions{Name: staleSweepWorkflowName})
 	w.RegisterWorkflowWithOptions(RebuildWalkWorkflow, workflow.RegisterOptions{Name: rebuildWalkWorkflowName})
+	w.RegisterWorkflowWithOptions(ReverseSweepWorkflow, workflow.RegisterOptions{Name: reverseSweepWorkflowName})
 	a := &temporalActivities{idx: idx}
 	w.RegisterActivityWithOptions(a.SweepStale, activity.RegisterOptions{Name: sweepActivityName})
 	w.RegisterActivityWithOptions(a.RunRebuild, activity.RegisterOptions{Name: rebuildActivityName})
+	w.RegisterActivityWithOptions(a.RunReverseSweep, activity.RegisterOptions{Name: reverseSweepActivityName})
 	return w
 }
 
