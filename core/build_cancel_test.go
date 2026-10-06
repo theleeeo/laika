@@ -50,8 +50,8 @@ func (s *cancellingStore) BeginDelete(context.Context, model.Resource, int64) (D
 	return DeleteBegun{}, nil
 }
 
-func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int, map[string]string) (map[string]string, error) {
-	return nil, nil
+func (s *cancellingStore) ReplaceEdges(context.Context, model.Resource, int64, []EdgeSet, []int, map[string]string) error {
+	return nil
 }
 func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
@@ -59,7 +59,7 @@ func (s *cancellingStore) GetChildResources(context.Context, model.Resource) ([]
 func (s *cancellingStore) GetParentResources(context.Context, model.Resource) ([]model.Resource, error) {
 	return nil, nil
 }
-func (s *cancellingStore) MarkStale(context.Context, []model.Resource, map[string]string, time.Duration) ([]Owned, error) {
+func (s *cancellingStore) MarkStale(context.Context, []model.Resource, time.Duration) ([]Owned, error) {
 	return nil, nil
 }
 func (s *cancellingStore) BeginBuild(context.Context, model.Resource, int64) (BuildBegun, error) {

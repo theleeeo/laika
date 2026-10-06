@@ -37,7 +37,7 @@ func newEdgeBuildIndexer(st Store, es SearchBackend, v1, v2 []model.Resource) *I
 // buildProduct1 marks product/1 stale and builds it directly (unowned).
 func buildProduct1(t *testing.T, st *recordingStore, idx *Indexer) {
 	t.Helper()
-	if _, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, nil, 0); err != nil {
+	if _, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1"}}); err != nil {
@@ -186,10 +186,10 @@ func TestBuild_SeveralPlans_TheFirstNonEmptyReportInPlanOrderIsStored(t *testing
 }
 
 // An owned inline build of a row without metadata stores its plan's report,
-// and its drift re-mark carries that report instead of clobbering it with
-// the build's (empty) metadata: FinishOwned's follow-up hands it on, and the
-// follow-up build fetches as it.
-func TestBuild_OwnedBuild_StoresTheReport_AndTheDriftRemarkCarriesIt(t *testing.T) {
+// and its drift re-mark leaves it: FinishOwned re-claims the row for the
+// follow-up, whose BeginBuild returns the report, and the follow-up build
+// fetches as it.
+func TestBuild_OwnedBuild_StoresTheReport_AndTheFollowUpFetchesAsIt(t *testing.T) {
 	report := map[string]string{"actor": "a"}
 	st := &recordingStore{}
 	st.drift.Store(true) // the first build's drift check hits
@@ -216,23 +216,26 @@ func TestBuild_OwnedBuild_StoresTheReport_AndTheDriftRemarkCarriesIt(t *testing.
 	if r, _ := st.row(product("1")); !maps.Equal(r.metadata, report) {
 		t.Fatalf("the row must end with the plan's report %v, holds %v: %v", report, r.metadata, st.callsSnapshot())
 	}
-	fus := st.followUpsOf(product("1"))
-	if len(fus) != 1 || !maps.Equal(fus[0].Metadata, report) {
-		t.Fatalf("the drift re-mark must carry the report into FinishOwned's follow-up, follow-ups %+v: %v", fus, st.callsSnapshot())
+	if fus := st.followUpsOf(product("1")); len(fus) != 1 {
+		t.Fatalf("the drift re-mark must hand FinishOwned one follow-up, got %+v: %v", fus, st.callsSnapshot())
 	}
 	builds := exec.requestsFor("1")
 	if len(builds) != 2 {
 		t.Fatalf("the build and its follow-up, got %d builds: %v", len(builds), st.callsSnapshot())
 	}
+	if builds[0].Metadata != nil {
+		t.Fatalf("the first build begins on a row without metadata and fetches with none, fetched as %v", builds[0].Metadata)
+	}
 	if !maps.Equal(builds[1].Metadata, report) {
-		t.Fatalf("the follow-up build must fetch as the report %v, fetched as %v", report, builds[1].Metadata)
+		t.Fatalf("the follow-up build must fetch as the stored report %v, fetched as %v", report, builds[1].Metadata)
 	}
 }
 
 // A drift re-mark of a row left without metadata — none registered, none
-// reported — falls back to the build's metadata, as before the plan's report
-// existed: the re-mark stores it, and the re-build it claims fetches as it.
-func TestBuild_DriftRemark_RowWithoutMetadata_CarriesTheBuildsMetadata(t *testing.T) {
+// reported — leaves it without any: the direct build that owns nothing
+// fetches with its caller's metadata, but the re-build the re-mark claims is
+// owned and fetches with the row's, none.
+func TestBuild_DriftRemark_RowWithoutMetadata_ReBuildsWithNone(t *testing.T) {
 	buildMD := map[string]string{"b": "1"}
 	st := &recordingStore{}
 	st.drift.Store(true) // the first build's drift check hits
@@ -253,11 +256,17 @@ func TestBuild_DriftRemark_RowWithoutMetadata_CarriesTheBuildsMetadata(t *testin
 		t.Fatal(err)
 	}
 
-	if r, _ := st.row(product("1")); !maps.Equal(r.metadata, buildMD) {
-		t.Fatalf("the re-mark must carry the build's metadata %v, the row holds %v: %v", buildMD, r.metadata, st.callsSnapshot())
+	if r, _ := st.row(product("1")); len(r.metadata) != 0 {
+		t.Fatalf("the re-mark must leave the row without metadata, it holds %v: %v", r.metadata, st.callsSnapshot())
 	}
 	builds := exec.requestsFor("1")
-	if len(builds) != 2 || !maps.Equal(builds[1].Metadata, buildMD) {
-		t.Fatalf("the claimed re-build must fetch as %v, builds %+v: %v", buildMD, builds, st.callsSnapshot())
+	if len(builds) != 2 {
+		t.Fatalf("the direct build and the claimed re-build, got %d builds: %v", len(builds), st.callsSnapshot())
+	}
+	if !maps.Equal(builds[0].Metadata, buildMD) {
+		t.Fatalf("the direct build owns nothing and must fetch as its caller's %v, fetched as %v", buildMD, builds[0].Metadata)
+	}
+	if builds[1].Metadata != nil {
+		t.Fatalf("the claimed re-build must fetch with the row's metadata, none, fetched as %v", builds[1].Metadata)
 	}
 }

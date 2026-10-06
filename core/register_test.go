@@ -18,28 +18,39 @@ import (
 
 // recordingStore records the order of Store calls and keeps the stale-mark
 // and ownership state of core/store.go in memory: one row per resource with
-// its stale_seq, mark, owner token, metadata and tombstone, created by a mark
-// or a BeginBuild. A non-zero owner
+// its stale_seq, mark, owner token, change_seq, metadata and tombstone,
+// created by a mark or a BeginBuild. A non-zero owner
 // is a live lease — leases never expire here — and every mark takes the next
 // value of one global counter as its stale_seq; a claim makes the row's new
-// stale_seq its owner token.
+// stale_seq its owner token. Each item RegisterChanges accepts takes the next
+// value of the Change Sequence as its change_seq, and BeginBuild's start is
+// the Change Sequence's value at the begin, so AnyChangedSince reports a
+// change accepted after a build began. A row's metadata follows the
+// contract: only an accepted registration writes it, for its own row, and
+// ReplaceEdges stores a report on a row that has none; marks leave it.
 type recordingStore struct {
 	mu    sync.Mutex
 	calls []string
-	// drift is one-shot: report drift on the first AnyChangedSince.
-	// driftErr fails every AnyChangedSince.
+	// drift is one-shot: report drift on the first AnyChangedSince, whatever
+	// the change_seqs. driftErr fails every AnyChangedSince.
 	drift    atomic.Bool
 	driftErr error
-	// start is every BeginBuild's BuildBegun.Start; checks records every
-	// AnyChangedSince batch.
-	start  int64
-	checks [][]ChangeCheck
+	// start is added to every BeginBuild's BuildBegun.Start; checks records
+	// every AnyChangedSince batch. changes is the Change Sequence's last
+	// value handed out.
+	start   int64
+	checks  [][]ChangeCheck
+	changes int64
+	// onCheck, when set, runs at the start of every AnyChangedSince, outside
+	// the lock and before it records the call: a test can register a change
+	// after a build stored its edges and before its drift check and re-mark.
+	onCheck func([]ChangeCheck)
 	// marked, when set, receives (non-blocking) after every MarkStale and
 	// RegisterChanges: the point past which a WaitForSlot registration may wait.
 	marked chan struct{}
 
 	// RegisterChanges serves these: parents are marked as Parents of every
-	// batch, each with its own Metadata; parentsOf maps a child to the
+	// batch (only their Resource is read); parentsOf maps a child to the
 	// Parents each accepted registration of it marks; stale resources are
 	// rejected; registerErr fails the call. registrations records every batch
 	// it received.
@@ -75,8 +86,9 @@ type recordingStore struct {
 	renewErr error
 	// replaced records every ReplaceEdges call, in order; replaceErr fails
 	// every ReplaceEdges, which then stores no metadata. onReplace, when set,
-	// runs inside every ReplaceEdges, outside the lock: a test can see what
-	// else had happened by the time a build stored its edges.
+	// runs inside every ReplaceEdges, outside the lock and before it stores
+	// anything: a test can see what else had happened by the time a build
+	// stored its edges.
 	replaced   []edgeReplace
 	replaceErr error
 	onReplace  func(edgeReplace)
@@ -104,9 +116,12 @@ type memRow struct {
 	staleSeq int64
 	stale    bool
 	// owner is the owner token; 0 = no owner.
-	owner    int64
-	metadata map[string]string
-	deleted  bool
+	owner int64
+	// changeSeq is the Change Sequence value of the last accepted
+	// registration of the row; 0 for none.
+	changeSeq int64
+	metadata  map[string]string
+	deleted   bool
 }
 
 func (s *recordingStore) signalMarked() {
@@ -183,17 +198,28 @@ func (s *recordingStore) owner(res model.Resource) int64 {
 func (s *recordingStore) followUpsOf(res model.Resource) []FollowUp {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]FollowUp, len(s.followUps[res]))
-	for i, fu := range s.followUps[res] {
-		fu.Metadata = maps.Clone(fu.Metadata)
-		out[i] = fu
-	}
-	return out
+	return append([]FollowUp(nil), s.followUps[res]...)
 }
 
-// markLocked marks res stale under a new stale_seq with metadata; deleted,
-// when non-nil, sets the tombstone. It returns the row.
-func (s *recordingStore) markLocked(res model.Resource, metadata map[string]string, deleted *bool) *memRow {
+// seedMetadata gives res's row metadata md, creating the row unmarked if
+// absent, as an earlier registration whose build finished would leave it.
+func (s *recordingStore) seedMetadata(res model.Resource, md map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.rows == nil {
+		s.rows = make(map[model.Resource]*memRow)
+	}
+	r, ok := s.rows[res]
+	if !ok {
+		r = &memRow{}
+		s.rows[res] = r
+	}
+	r.metadata = maps.Clone(md)
+}
+
+// markLocked marks res stale under a new stale_seq, leaving its metadata;
+// deleted, when non-nil, sets the tombstone. It returns the row.
+func (s *recordingStore) markLocked(res model.Resource, deleted *bool) *memRow {
 	if s.rows == nil {
 		s.rows = make(map[model.Resource]*memRow)
 	}
@@ -205,7 +231,6 @@ func (s *recordingStore) markLocked(res model.Resource, metadata map[string]stri
 	s.seq++
 	r.staleSeq = s.seq
 	r.stale = true
-	r.metadata = maps.Clone(metadata)
 	if deleted != nil {
 		r.deleted = *deleted
 	}
@@ -228,18 +253,17 @@ func (s *recordingStore) followUpLocked(res model.Resource, r *memRow, token int
 		return FollowUp{}
 	}
 	r.owner = r.staleSeq
-	fu := FollowUp{Token: r.owner, Metadata: maps.Clone(r.metadata), Deleted: r.deleted}
+	fu := FollowUp{Token: r.owner, Deleted: r.deleted}
 	if s.followUps == nil {
 		s.followUps = make(map[model.Resource][]FollowUp)
 	}
-	snap := fu
-	snap.Metadata = maps.Clone(fu.Metadata)
-	s.followUps[res] = append(s.followUps[res], snap)
+	s.followUps[res] = append(s.followUps[res], fu)
 	return fu
 }
 
-// MarkStale fails on a done ctx, as a real store's query would.
-func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, md map[string]string, lease time.Duration) ([]Owned, error) {
+// MarkStale fails on a done ctx, as a real store's query would. It leaves
+// the rows' metadata.
+func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, lease time.Duration) ([]Owned, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -247,7 +271,7 @@ func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, md 
 	s.recordLocked("MarkStale:%d", len(rs))
 	var owned []Owned
 	for _, res := range rs {
-		r := s.markLocked(res, md, nil)
+		r := s.markLocked(res, nil)
 		if lease > 0 {
 			if tok := claimLocked(r); tok != 0 {
 				owned = append(owned, Owned{Resource: res, Token: tok})
@@ -277,18 +301,37 @@ func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, token i
 		row = &memRow{}
 		s.rows[r] = row
 	}
-	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start}, nil
+	var md map[string]string
+	if len(row.metadata) > 0 {
+		md = maps.Clone(row.metadata)
+	}
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start + s.changes, Metadata: md}, nil
 }
 func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
 	return 0, nil
 }
+
+// AnyChangedSince reports drift once when drift is set, and otherwise when a
+// checked row's change_seq exceeds its check's Start.
 func (s *recordingStore) AnyChangedSince(_ context.Context, checks []ChangeCheck) (bool, error) {
-	s.record("AnyChangedSince:%d", len(checks))
+	if s.onCheck != nil {
+		s.onCheck(checks)
+	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("AnyChangedSince:%d", len(checks))
 	s.checks = append(s.checks, append([]ChangeCheck(nil), checks...))
-	s.mu.Unlock()
-	return s.drift.Swap(false), s.driftErr
+	changed := s.drift.Swap(false)
+	if s.driftErr != nil {
+		return false, s.driftErr
+	}
+	for _, c := range checks {
+		if row, ok := s.rows[c.Resource]; ok && row.changeSeq > c.Start {
+			changed = true
+		}
+	}
+	return changed, nil
 }
 func (s *recordingStore) ClearStale(_ context.Context, r model.Resource, seq int64) error {
 	s.mu.Lock()
@@ -397,10 +440,9 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 // ReplaceEdges records the call, runs onReplace, and then fails with
 // replaceErr, writing nothing. Otherwise it follows the contract's metadata
 // rule on the in-memory row: a non-empty reported is stored only on a row
-// that exists and has no metadata, and it returns the row's metadata (nil
-// when the row has none or is gone). It never creates a row; edges are not
+// that exists and has no metadata. It never creates a row; edges are not
 // modelled.
-func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) (map[string]string, error) {
+func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, buildSeq int64, sets []EdgeSet, declared []int, reported map[string]string) error {
 	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: sets, declared: declared, reported: maps.Clone(reported)}
 	s.mu.Lock()
 	s.recordLocked("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq)
@@ -410,21 +452,14 @@ func (s *recordingStore) ReplaceEdges(_ context.Context, r model.Resource, build
 		s.onReplace(call)
 	}
 	if s.replaceErr != nil {
-		return nil, s.replaceErr
+		return s.replaceErr
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row, ok := s.rows[r]
-	if !ok {
-		return nil, nil
-	}
-	if len(row.metadata) == 0 && len(reported) > 0 {
+	if row, ok := s.rows[r]; ok && len(row.metadata) == 0 && len(reported) > 0 {
 		row.metadata = maps.Clone(reported)
 	}
-	if len(row.metadata) == 0 {
-		return nil, nil
-	}
-	return maps.Clone(row.metadata), nil
+	return nil
 }
 
 func (s *recordingStore) replacedSnapshot() []edgeReplace {
@@ -470,10 +505,10 @@ func (s *recordingStore) RemoveResource(_ context.Context, r model.Resource, bui
 }
 
 // RegisterChanges marks and claims as the real statement does: each accepted
-// item's row, then the Parents of the batch — the canned parents, and every
-// accepted item's parentsOf, a Parent storing the metadata of its last
-// accepted child in batch order — excluding the batch's accepted items, each
-// once.
+// item's row, which takes the item's metadata and the next change_seq, then
+// the Parents of the batch — the canned parents, and every accepted item's
+// parentsOf — excluding the batch's accepted items, each once, with their
+// metadata left alone.
 func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration, _ time.Duration) (Registered, error) {
 	s.mu.Lock()
 	s.recordLocked("RegisterChanges:%d", len(items))
@@ -485,33 +520,36 @@ func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration
 	out := Registered{Items: make([]RegisteredItem, len(items))}
 	accepted := make(map[model.Resource]bool, len(items))
 	var parentOrder []model.Resource
-	parentMeta := make(map[model.Resource]map[string]string)
-	addParent := func(p model.Resource, md map[string]string) {
-		if _, seen := parentMeta[p]; !seen {
+	seenParent := make(map[model.Resource]bool)
+	addParent := func(p model.Resource) {
+		if !seenParent[p] {
+			seenParent[p] = true
 			parentOrder = append(parentOrder, p)
 		}
-		parentMeta[p] = md
 	}
 	for _, p := range s.parents {
-		addParent(p.Resource, p.Metadata)
+		addParent(p.Resource)
 	}
 	for i, it := range items {
 		if s.stale[it.Resource] {
 			continue
 		}
 		accepted[it.Resource] = true
-		r := s.markLocked(it.Resource, it.Metadata, &it.Deleted)
+		r := s.markLocked(it.Resource, &it.Deleted)
+		r.metadata = maps.Clone(it.Metadata)
+		s.changes++
+		r.changeSeq = s.changes
 		out.Items[i] = RegisteredItem{Accepted: true, StaleSeq: r.staleSeq, Token: claimLocked(r)}
 		for _, p := range s.parentsOf[it.Resource] {
-			addParent(p, it.Metadata)
+			addParent(p)
 		}
 	}
 	for _, p := range parentOrder {
 		if accepted[p] {
 			continue
 		}
-		r := s.markLocked(p, parentMeta[p], nil)
-		out.Parents = append(out.Parents, MarkedParent{Resource: p, Metadata: parentMeta[p], Token: claimLocked(r)})
+		r := s.markLocked(p, nil)
+		out.Parents = append(out.Parents, MarkedParent{Resource: p, Token: claimLocked(r)})
 	}
 	s.mu.Unlock()
 	s.signalMarked()
@@ -805,8 +843,13 @@ func TestBuild_DriftQueryError_LeavesTheMarkAndSchedulesNothing(t *testing.T) {
 // recordingExecuter serves a doc for every requested id and records each
 // request, so a test sees which ids were built with which metadata.
 type recordingExecuter struct {
-	mu   sync.Mutex
-	reqs []projection.BuildRequest
+	// relations gives the doc of each id it names those Relations (the
+	// root's children, drift-checked by its build); parents gives it those
+	// derived Parents (ADR 0006).
+	relations map[string][]model.Resource
+	parents   map[string][]model.Resource
+	mu        sync.Mutex
+	reqs      []projection.BuildRequest
 	// arrived and proceed, when set, park every Execute — or, with parkIDs
 	// set, only those of the ids it names: it sends its id on arrived and
 	// returns once it receives from proceed (one send releases one parked
@@ -833,8 +876,10 @@ func (e *recordingExecuter) Execute(_ context.Context, req projection.BuildReque
 		return ch
 	}
 	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-		Root: model.Resource{Type: req.ResourceType, Id: req.ResourceID},
-		Doc:  map[string]any{"fields": map[string]any{"title": "t"}},
+		Root:      model.Resource{Type: req.ResourceType, Id: req.ResourceID},
+		Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
+		Relations: e.relations[req.ResourceID],
+		Parents:   e.parents[req.ResourceID],
 	}}}
 	close(ch)
 	return ch
@@ -943,8 +988,10 @@ func TestRegisterChanges_StoreError_ReturnsErrorAndSubmitsNothing(t *testing.T) 
 func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *testing.T) {
 	st := &recordingStore{
 		stale:   map[model.Resource]bool{product("2"): true},
-		parents: []MarkedParent{{Resource: product("p"), Metadata: map[string]string{"m": "p"}}},
+		parents: []MarkedParent{{Resource: product("p")}},
 	}
+	// The Parent holds metadata of its own, which its mark leaves.
+	st.seedMetadata(product("p"), map[string]string{"m": "p"})
 	idx, ex := newRecordingIndexer(st, 4, 8)
 
 	ns := []Notification{
@@ -981,12 +1028,16 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 	}
 
 	// Each accepted non-delete item and each Parent is built as itself with
-	// its own metadata; the stale item and the delete are not built.
+	// its own metadata — an item's the registration stored, the Parent's
+	// what its row held — and the stale item and the delete are not built.
 	wantBuilt := map[string]map[string]string{
 		"1": {"m": "1"}, "4": {"m": "4"}, "p": {"m": "p"},
 	}
 	if built := ex.metadataByID(); fmt.Sprint(built) != fmt.Sprint(wantBuilt) {
 		t.Fatalf("built %v, want %v", built, wantBuilt)
+	}
+	if r, _ := st.row(product("p")); !maps.Equal(r.metadata, map[string]string{"m": "p"}) {
+		t.Fatalf("the Parent's mark must leave its metadata, it holds %v", r.metadata)
 	}
 	// The delete runs with the StaleSeq and Token the store returned for it:
 	// the second mark of the batch (item 2 is stale and marks nothing).

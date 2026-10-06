@@ -70,10 +70,6 @@ type pendingResource struct {
 	// set stored, stale mark cleared — when it hits 0.
 	remaining int
 	failed    bool
-	// metadata is the resource row's metadata as its last ReplaceEdges
-	// returned it; its drift re-mark carries it when non-empty, else the
-	// rebuild's metadata.
-	metadata map[string]string
 }
 
 // driftBase is where a begun resource's drift check measures from. It is per
@@ -112,11 +108,11 @@ type pendingItem struct {
 // the seq-guarded stale clear — waits until every document of that resource
 // has flushed. A resource whose document is rejected is durably marked stale
 // instead of cleared, so the sweep recovers it, and the rebuild reports the
-// failure instead of success.
+// failure instead of success. Its marks carry no metadata: the rebuild's
+// Metadata is the walk's fetch context, never a resource's own.
 type rebuildFlusher struct {
 	idx          *Indexer
 	resourceType string
-	metadata     map[string]string
 	chunkSize    int
 
 	pending []pendingItem
@@ -129,11 +125,10 @@ type rebuildFlusher struct {
 	afterFlush func()
 }
 
-func newRebuildFlusher(idx *Indexer, resourceType string, metadata map[string]string) *rebuildFlusher {
+func newRebuildFlusher(idx *Indexer, resourceType string) *rebuildFlusher {
 	return &rebuildFlusher{
 		idx:          idx,
 		resourceType: resourceType,
-		metadata:     metadata,
 		chunkSize:    idx.rebuildChunkSize,
 		state:        make(map[string]*pendingResource),
 	}
@@ -413,9 +408,9 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 //
 // One batched query serves the common no-drift case; a hit narrows with one
 // query per root, and each changed root is re-marked and re-built via the
-// mark-first primitive, carrying the root's metadata as its ReplaceEdges
-// returned it, or the rebuild's when the row has none or the root had no
-// ReplaceEdges (the walk's nil-doc delete path). A root whose re-mark fails
+// mark-first primitive. The re-mark leaves the root's metadata alone, and the
+// re-build it claims is owned and fetches with the root's own metadata, not
+// the rebuild's — none when the row has none. A root whose re-mark fails
 // is failed instead: clearing it would leave its possibly outdated document
 // with no mark for the sweep. fail retries its mark on a context detached
 // from cancellation — the re-mark may have failed because the walk's context
@@ -441,11 +436,7 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		// On a drift-check error, re-mark rather than risk a silent
 		// convergence gap: a redundant rebuild is safe, a missed one is not.
 		if perErr != nil || perResource {
-			metadata := f.metadata
-			if p := f.state[id]; p != nil && len(p.metadata) > 0 {
-				metadata = p.metadata
-			}
-			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}, metadata); err != nil {
+			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}); err != nil {
 				slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
 				f.fail(ctx, id)
 			}

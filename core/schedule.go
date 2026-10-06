@@ -18,11 +18,15 @@ import (
 // owner's finish sees the moved stale_seq and runs the follow-up. That
 // includes the building resource itself when its drift check re-marks it.
 //
+// The mark leaves each root's metadata alone, and the build it submits
+// carries none: an owned build fetches with the root's own metadata as its
+// BeginBuild returns it.
+//
 // It is the cascade path, whose submissions shed on a full queue and never
 // wait: build Parents and drift re-builds run inside pool tasks, where a task
 // waiting on its own pool could deadlock it, and the rebuild flusher runs in a
 // rebuild walk, which must not stall behind producer backpressure.
-func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource, metadata map[string]string) error {
+func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource) error {
 	if len(roots) == 0 {
 		return nil
 	}
@@ -30,19 +34,18 @@ func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource, m
 	if err != nil {
 		return fmt.Errorf("marking %d resources stale: %w", len(roots), err)
 	}
-	idx.submitOwnedBuilds(ctx, owned, metadata)
+	idx.submitOwnedBuilds(ctx, owned)
 	return nil
 }
 
 // submitOwnedBuilds is scheduleBuild's opportunistic half: one inline build
 // per resource type of the claimed roots, each id carrying its owner token. A
 // shed build releases the ownership of its batch.
-func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned, metadata map[string]string) {
+func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned) {
 	for resourceType, batch := range groupOwnedByType(owned) {
 		args := BuildArgs{
 			ResourceType: resourceType,
 			ResourceIds:  make([]string, len(batch)),
-			Metadata:     metadata,
 			OwnerTokens:  make(map[string]int64, len(batch)),
 		}
 		for i, o := range batch {
@@ -58,17 +61,17 @@ func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned, metada
 	}
 }
 
-// submitBuild submits one inline build of res, already marked stale, with
-// its own metadata, if the mark claimed it (token != 0). An unclaimed res has
-// a live owner, whose follow-up carries the change, so nothing is submitted.
-func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, metadata map[string]string, token int64, wait bool) {
+// submitBuild submits one owned inline build of res, already marked stale,
+// if the mark claimed it (token != 0); the build fetches with res's metadata
+// as its BeginBuild returns it. An unclaimed res has a live owner, whose
+// follow-up carries the change, so nothing is submitted.
+func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, token int64, wait bool) {
 	if token == 0 {
 		return
 	}
 	args := BuildArgs{
 		ResourceType: res.Type,
 		ResourceIds:  []string{res.Id},
-		Metadata:     metadata,
 		OwnerTokens:  map[string]int64{res.Id: token},
 	}
 	if !idx.submitOwned(ctx, wait, []Owned{{Resource: res, Token: token}}, idx.buildTask(args)) {
@@ -92,8 +95,8 @@ func (idx *Indexer) submitDelete(ctx context.Context, res model.Resource, staleS
 }
 
 // submitFollowUp submits the follow-up an owned build or delete finished
-// with, if one is due: a build with the row's metadata, or a delete when the
-// row is a tombstone. It runs inside the finishing task (or the synchronous
+// with, if one is due: a build, which fetches with the row's metadata as its
+// BeginBuild returns it, or a delete when the row is a tombstone. It runs inside the finishing task (or the synchronous
 // sweep), so it never waits; a shed follow-up releases the re-claimed
 // ownership and leaves the mark to the sweep.
 func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu FollowUp) {
@@ -104,7 +107,7 @@ func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu F
 		idx.submitDelete(ctx, res, fu.Token, fu.Token, false)
 		return
 	}
-	idx.submitBuild(ctx, res, nil, fu.Token, false)
+	idx.submitBuild(ctx, res, fu.Token, false)
 }
 
 // buildTask is the pool task of an owned inline build. It builds only the ids

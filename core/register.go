@@ -35,7 +35,8 @@ const (
 
 // RegisterChanges registers a batch of notifications atomically: every
 // accepted item's version or tombstone, stale mark and metadata, and the
-// marks of their Parents, commit in one statement or not at all. A non-nil
+// marks of their Parents, which leave the Parents' metadata, commit in one
+// statement or not at all. A non-nil
 // error means nothing was committed and the whole batch may be retried.
 // After the commit, a delete or build is submitted per id the statement
 // claimed (WaitForSlot applies to them); an item or Parent with a live owner
@@ -88,10 +89,10 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 			idx.submitDelete(ctx, items[i].Resource, it.StaleSeq, it.Token, wait)
 			continue
 		}
-		idx.submitBuild(ctx, items[i].Resource, items[i].Metadata, it.Token, wait)
+		idx.submitBuild(ctx, items[i].Resource, it.Token, wait)
 	}
 	for _, p := range reg.Parents {
-		idx.submitBuild(ctx, p.Resource, nil, p.Token, wait)
+		idx.submitBuild(ctx, p.Resource, p.Token, wait)
 	}
 	return statuses, nil
 }

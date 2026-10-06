@@ -29,13 +29,14 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 		return 0, nil
 	}
 
-	// Builds run one entry at a time: each stale mark carries the metadata of
-	// the notification that set it, and the recovered build must replay it.
-	// ListStale claimed the whole batch at once, so each entry renews its
-	// lease when the pass reaches it, and is served only if its ownership is
-	// still held: a later entry's claim may have lapsed while the ones before
-	// it ran, and a change since claimed the row — serving it then could
-	// delete a recreated document or race its new owner's build.
+	// Builds run one entry at a time, each an owned build that fetches with
+	// the metadata its row holds when the build begins (BuildBegun.Metadata),
+	// as an inline build of it would. ListStale claimed the whole batch at
+	// once, so each entry renews its lease when the pass reaches it, and is
+	// served only if its ownership is still held: a later entry's claim may
+	// have lapsed while the ones before it ran, and a change since claimed the
+	// row — serving it then could delete a recreated document or race its new
+	// owner's build.
 	for _, e := range entries {
 		if len(idx.renewOwners(ctx, []Owned{{Resource: e.Resource, Token: e.Token}})) == 0 {
 			continue

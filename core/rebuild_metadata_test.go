@@ -13,8 +13,10 @@ import (
 
 // A rebuild stores the metadata its plans report (BuildDoc.ResourceMetadata)
 // as a resource row's metadata when the row has none, through
-// Store.ReplaceEdges; a drift re-mark carries the row's metadata the replace
-// returned, falling back to the rebuild's own Metadata when the row has none.
+// Store.ReplaceEdges. The walk fetches with the rebuild's own Metadata, but
+// never stores it: a drift re-mark leaves the row's metadata, and the
+// re-build it claims is owned and fetches with what the row holds when it
+// begins — none on a row without any.
 
 // requestLog wraps an executer and records every request it serves, so a test
 // sees which ids were built with which metadata — the walk's request
@@ -121,12 +123,12 @@ func TestRebuildAll_PlanReportsNone_LeavesRowMetadataAsItWas(t *testing.T) {
 	assertRowMetadata(t, st, product("3"), nil)
 }
 
-// A walk root whose drift check fires is re-marked with the row's metadata
-// as its ReplaceEdges returned it — the plan's report on a row that had
-// none, a registration's on a row that held one — and the claimed re-build
-// fetches as that metadata; only a row left without metadata falls back to
-// the walk's Metadata.
-func TestRebuildAll_DriftRemark_CarriesTheRowsMetadata(t *testing.T) {
+// A walk root whose drift check fires is re-marked, and the mark leaves the
+// row's metadata: the re-build it claims fetches as the row holds it when the
+// re-build begins — the plan's report on a row that had none, a
+// registration's on a row that held one, and none on a row left without any,
+// never the walk's Metadata.
+func TestRebuildAll_DriftRemark_ReBuildsWithTheRowsMetadata(t *testing.T) {
 	cases := map[string]struct {
 		seeded map[string]string // the row's metadata before the walk; nil: no row
 		report map[string]string
@@ -140,8 +142,8 @@ func TestRebuildAll_DriftRemark_CarriesTheRowsMetadata(t *testing.T) {
 			seeded: map[string]string{"tenant": "registered"},
 			want:   map[string]string{"tenant": "registered"},
 		},
-		"new row, plan reports none: the walk's metadata": {
-			want: walkMetadata,
+		"new row, plan reports none: none, not the walk's": {
+			want: nil,
 		},
 	}
 	for name, tc := range cases {
@@ -160,20 +162,16 @@ func TestRebuildAll_DriftRemark_CarriesTheRowsMetadata(t *testing.T) {
 			}}
 			rebuildProducts(t, st, 0, nil, exec)
 
-			marks := st.marksOf(product("1"))
-			if len(marks) != 1 || !maps.Equal(marks[0], tc.want) {
-				t.Fatalf("the drift re-mark must carry %v, marks %v: %v", tc.want, marks, st.callsSnapshot())
+			if n := countPrefix(st.callsSnapshot(), "MarkStale:product/1"); n != 1 {
+				t.Fatalf("the drift check must re-mark the root once, got %d: %v", n, st.callsSnapshot())
 			}
 			rebuilds := exec.requestsFor("1")
 			if len(rebuilds) != 1 {
 				t.Fatalf("the re-mark must claim and re-build the root once, got %d builds: %v", len(rebuilds), st.callsSnapshot())
 			}
-			if !maps.Equal(rebuilds[0].Metadata, tc.want) {
+			if !maps.Equal(rebuilds[0].Metadata, tc.want) || (tc.want == nil && rebuilds[0].Metadata != nil) {
 				t.Fatalf("the drift re-build must fetch as %v, fetched as %v", tc.want, rebuilds[0].Metadata)
 			}
-			// The re-mark is last-mark-wins, so in the fallback case the row
-			// ends with the walk's metadata: today's re-mark, until step L1.8
-			// stops marks from carrying it.
 			assertRowMetadata(t, st, product("1"), tc.want)
 		})
 	}
@@ -249,18 +247,23 @@ func TestRebuildAll_MultiPlan_FlushPerDocument_TheFirstStoredReportWins(t *testi
 }
 
 // The walk's nil-doc delete path drift-checks a root that made no
-// ReplaceEdges: its re-mark carries the walk's metadata.
-func TestRebuildAll_NilDocDriftRemark_CarriesTheWalksMetadata(t *testing.T) {
+// ReplaceEdges and removed its row: its re-mark creates a row without
+// metadata, and the re-build it claims fetches with none, not the walk's.
+func TestRebuildAll_NilDocDriftRemark_ReBuildsWithNone(t *testing.T) {
 	st := &rebuildRecordingStore{driftChildren: map[string]bool{"1": true}}
 	st.driftBudget.Store(1)
 	gone := projection.BuildDoc{Root: product("1")}
-	rebuildProducts(t, st, 0, nil, &staticExecuter{
+	exec := &requestLog{exec: &staticExecuter{
 		docs: []projection.BuildDoc{gone},
 		byID: map[string][]projection.BuildDoc{"1": {gone}},
-	})
+	}}
+	rebuildProducts(t, st, 0, nil, exec)
 
-	marks := st.marksOf(product("1"))
-	if len(marks) != 1 || !maps.Equal(marks[0], walkMetadata) {
-		t.Fatalf("the drift re-mark must carry the walk's metadata %v, marks %v: %v", walkMetadata, marks, st.callsSnapshot())
+	if n := countPrefix(st.callsSnapshot(), "MarkStale:product/1"); n != 1 {
+		t.Fatalf("the drift check must re-mark the root once, got %d: %v", n, st.callsSnapshot())
+	}
+	rebuilds := exec.requestsFor("1")
+	if len(rebuilds) != 1 || rebuilds[0].Metadata != nil {
+		t.Fatalf("the claimed re-build must run once and fetch with no metadata, got %+v: %v", rebuilds, st.callsSnapshot())
 	}
 }

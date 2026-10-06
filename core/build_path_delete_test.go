@@ -48,7 +48,7 @@ func TestBuildPathDelete_TombstoneClaimedByAParentMark_RemovesTheRow(t *testing.
 	// P is a tombstone whose delete never ran: marked, unowned.
 	deleted := true
 	st.mu.Lock()
-	st.markLocked(P, nil, &deleted)
+	st.markLocked(P, &deleted)
 	st.mu.Unlock()
 	ex := &staticExecuter{byID: map[string][]projection.BuildDoc{"P": {nilDoc("P")}, "C": {productDoc("C")}}}
 	idx, be := newDeletePathIndexer(st, ex)

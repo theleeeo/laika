@@ -11,9 +11,14 @@ import (
 )
 
 type BuildArgs struct {
-	ResourceType string            `json:"resource_type"`
-	ResourceIds  []string          `json:"resource_ids,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	ResourceType string   `json:"resource_type"`
+	ResourceIds  []string `json:"resource_ids,omitempty"`
+	// Metadata is the fetch context of the ids that build without an owner
+	// token: a build that owns nothing fetches with its caller's metadata.
+	// An owned id ignores it and fetches with its row's metadata as
+	// BeginBuild returns it (BuildBegun.Metadata), so owned builds are
+	// submitted without any.
+	Metadata map[string]string `json:"metadata,omitempty"`
 	// OwnerTokens holds, per id, the owner token the build was claimed
 	// under (Store.MarkStale, RegisterChanges, ListStale). An id without one
 	// builds unowned: it claims nothing and finishes with ClearStale.
@@ -28,13 +33,14 @@ type RebuildArgs struct {
 }
 
 // Build builds each of params' ids. An id with an owner token (OwnerTokens)
-// is an owned inline build: BeginBuild renews its lease, and a success
-// finishes it with FinishOwned, submitting the follow-up FinishOwned hands on.
-// An id without one owns nothing and finishes with ClearStale. An id whose
-// plans all returned nil is gone at source: its documents are deleted, and it
-// finishes with DeleteResourceIfSeq instead, which removes its row — owned or
-// not, tombstone or not — and hands on the follow-up when a change moved the
-// mark. A failed owned id releases its ownership and keeps its mark, so the
+// is an owned inline build: BeginBuild renews its lease, its fetches run with
+// the row's metadata as BeginBuild returns it, and a success finishes it with
+// FinishOwned, submitting the follow-up FinishOwned hands on. An id without
+// one owns nothing: it fetches with params.Metadata and finishes with
+// ClearStale. An id whose plans all returned nil is gone at source: its
+// documents are deleted, and it finishes with DeleteResourceIfSeq instead,
+// which removes its row — owned or not, tombstone or not — and hands on the
+// follow-up when a change moved the mark. A failed owned id releases its ownership and keeps its mark, so the
 // next change claims it or the sweep rebuilds it; so does every owned id left
 // unfinished when ctx ends.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
@@ -69,8 +75,16 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 			continue
 		}
 
+		// An owned build runs with what the row holds when it begins, so one
+		// that waited in the pool queue or the sweep picks up metadata
+		// registered meanwhile; one that owns nothing runs with its caller's.
+		metadata := params.Metadata
+		if token != 0 {
+			metadata = begun.Metadata
+		}
+
 		// TODO: Build multiple documents in a batch.
-		gone, err := idx.buildOne(ctx, plans, params.ResourceType, id, params.Metadata, begun.BuildIdx, begun.Start)
+		gone, err := idx.buildOne(ctx, plans, params.ResourceType, id, metadata, begun.BuildIdx, begun.Start)
 		if err != nil {
 			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
@@ -173,9 +187,10 @@ func firstReport(docs []versionedDoc) map[string]string {
 	return nil
 }
 
-// buildOne builds one resource at the Build Sequence occVersion. gone reports
-// that every plan returned nil and the resource's documents and edge sets
-// were deleted instead; the caller removes its row.
+// buildOne builds one resource at the Build Sequence occVersion, its plans
+// fetching with metadata. gone reports that every plan returned nil and the
+// resource's documents and edge sets were deleted instead; the caller removes
+// its row.
 func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) (gone bool, err error) {
 	if occVersion <= 0 {
 		return false, fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
@@ -255,17 +270,17 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	}
 	// The same write stores the plans' report — the first non-empty one, in
 	// plan order — as the row's metadata if the row has none, before the
-	// drift check and the cascade: any later build of the resource without a
-	// notification fetches as it. own is the row's metadata as the write
-	// left it.
+	// drift check and the cascade: a later owned build of the resource that
+	// no registration gave metadata fetches as it.
 	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs)); err != nil {
 		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
 	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
 	// Parents the Plans derived from the Child's own data, unioned across
-	// every Schema Version's plan.
-	if err := idx.scheduleBuild(ctx, parents, metadata); err != nil {
+	// every Schema Version's plan. The mark carries none of this build's
+	// metadata: a Parent's build runs with the Parent's own.
+	if err := idx.scheduleBuild(ctx, parents); err != nil {
 		return false, err
 	}
 
@@ -280,9 +295,9 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// another build owns it. The root is not checked: its BeginBuild precedes
 	// its own fetch, so a root change numbered below start is seen by the
 	// fetch, and one above it bumped stale_seq, so the guarded finish leaves
-	// the mark for the follow-up build. The re-mark carries the root's own
-	// metadata (own), so it doesn't clobber the report just stored; a row
-	// without any is re-marked with the build's metadata.
+	// the mark for the follow-up build. The re-mark leaves the root's
+	// metadata alone, so a registration that committed after the edge write
+	// keeps its metadata for the follow-up (Q16).
 	if len(allRelations) > 0 {
 		checks := make([]ChangeCheck, len(allRelations))
 		for i, r := range allRelations {
@@ -297,7 +312,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType),
 				slog.String("id", resourceID),
 			)
-			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}, metadata); err != nil {
+			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}); err != nil {
 				return false, fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
 			}
 		}
@@ -332,7 +347,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		}
 	}
 
-	fl := newRebuildFlusher(idx, params.ResourceType, params.Metadata)
+	fl := newRebuildFlusher(idx, params.ResourceType)
 
 	for _, id := range params.ResourceIDs {
 		if ctx.Err() != nil {
@@ -457,7 +472,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			slog.String("page_token", startToken))
 	}
 
-	fl := newRebuildFlusher(idx, params.ResourceType, params.Metadata)
+	fl := newRebuildFlusher(idx, params.ResourceType)
 
 	// completed is the last fully consumed page boundary. The flusher's
 	// afterFlush hook checkpoints it: right after a flush, everything before

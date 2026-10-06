@@ -66,8 +66,9 @@ func waitIdle(t *testing.T, idx *Indexer) {
 // Ten registrations touching P while its build is blocked in its plan — as
 // an item, or as a Parent through its child c — submit nothing: P's row is
 // owned, and the changes ride on its mark. When the build finishes, its
-// FinishOwned re-claims P and the one follow-up runs with the metadata the
-// statement returned: the last registration's, here the child's.
+// FinishOwned re-claims P and the one follow-up runs with the row's
+// metadata: that of P's own last registration, the ninth. The tenth, the
+// last, comes through the child and leaves P's metadata alone.
 func TestOwner_RegistrationsDuringABuild_CollapseIntoOneFollowUp(t *testing.T) {
 	P, c := product("P"), product("c")
 	st := &recordingStore{parentsOf: map[model.Resource][]model.Resource{c: {P}}}
@@ -105,11 +106,11 @@ func TestOwner_RegistrationsDuringABuild_CollapseIntoOneFollowUp(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("P must be built exactly twice — its build and one follow-up — got %d: %v", len(reqs), st.callsSnapshot())
 	}
-	if !maps.Equal(reqs[1].Metadata, fu.Metadata) {
-		t.Fatalf("the follow-up must run with the metadata FinishOwned returned: ran with %v, returned %v", reqs[1].Metadata, fu.Metadata)
+	if !maps.Equal(reqs[1].Metadata, mdN(9)) {
+		t.Fatalf("the follow-up must run with P's own last registration's metadata %v, not its child's; ran with %v", mdN(9), reqs[1].Metadata)
 	}
-	if !maps.Equal(fu.Metadata, mdN(10)) {
-		t.Fatalf("the follow-up's metadata must be the last registration's, %v, got %v", mdN(10), fu.Metadata)
+	if r, _ := st.row(P); !maps.Equal(r.metadata, mdN(9)) {
+		t.Fatalf("the child's registration must leave P's metadata %v, P holds %v", mdN(9), r.metadata)
 	}
 	if st.indexOf(fmt.Sprintf("BeginBuild:product/P:%d", fu.Token)) == -1 ||
 		st.indexOf(fmt.Sprintf("FinishOwned:product/P:%d:%d", fu.Token, fu.Token)) == -1 {
@@ -155,9 +156,6 @@ func TestOwner_ChangeDuringAFollowUp_GetsAFollowUpOfItsOwn(t *testing.T) {
 		t.Fatalf("each finished build that saw a newer change must hand on one follow-up, got %v: %v", fus, st.callsSnapshot())
 	}
 	for i, fu := range fus {
-		if !maps.Equal(fu.Metadata, mdN(i+1)) {
-			t.Fatalf("follow-up %d must carry %v, got %v", i, mdN(i+1), fu.Metadata)
-		}
 		if st.indexOf(fmt.Sprintf("BeginBuild:product/P:%d", fu.Token)) == -1 {
 			t.Fatalf("follow-up %d must build under its re-claimed token %d: %v", i, fu.Token, st.callsSnapshot())
 		}
@@ -235,8 +233,8 @@ func TestOwner_DeleteFollowUp(t *testing.T) {
 		st, ex := setup(t, notify("R", ChangeCreated, recreate))
 
 		fus := st.followUpsOf(R)
-		if len(fus) != 1 || fus[0].Deleted || !maps.Equal(fus[0].Metadata, recreate) {
-			t.Fatalf("the guarded delete must hand on one build follow-up with the recreate's metadata, got %v: %v", fus, st.callsSnapshot())
+		if len(fus) != 1 || fus[0].Deleted {
+			t.Fatalf("the guarded delete must hand on one build follow-up, got %v: %v", fus, st.callsSnapshot())
 		}
 		fu := fus[0]
 		begins := callsWithPrefix(st, "BeginBuild:product/R:")
@@ -418,8 +416,8 @@ func TestOwner_SupersededDelete_DeletesNothingAndFinishesAsAMovedMark(t *testing
 			t.Fatalf("a superseded delete must not remove edges: %v", st.callsSnapshot())
 		}
 		fus := st.followUpsOf(R)
-		if len(fus) != 1 || fus[0].Deleted || !maps.Equal(fus[0].Metadata, recreate) {
-			t.Fatalf("the finish must hand on one build follow-up with the recreate's metadata, got %v: %v", fus, st.callsSnapshot())
+		if len(fus) != 1 || fus[0].Deleted {
+			t.Fatalf("the finish must hand on one build follow-up, got %v: %v", fus, st.callsSnapshot())
 		}
 		fu := fus[0]
 		begins := callsWithPrefix(st, "BeginBuild:product/R:")
@@ -717,7 +715,8 @@ func esOpsOn(be *captureBackend, id string) []string {
 func steal(st *recordingStore, res model.Resource, deleted bool) int64 {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	r := st.markLocked(res, map[string]string{"m": "stolen"}, &deleted)
+	r := st.markLocked(res, &deleted)
+	r.metadata = map[string]string{"m": "stolen"}
 	r.owner = r.staleSeq
 	return r.owner
 }
@@ -882,7 +881,7 @@ func TestOwner_Cascade_SubmitsOnlyWhatMarkStaleClaimed(t *testing.T) {
 		Doc:     map[string]any{"fields": map[string]any{"title": "t"}},
 		Parents: []model.Resource{p1, p2},
 	}}}
-	owned, err := st.MarkStale(t.Context(), []model.Resource{p1}, nil, time.Minute)
+	owned, err := st.MarkStale(t.Context(), []model.Resource{p1}, time.Minute)
 	if err != nil || len(owned) != 1 {
 		t.Fatalf("claiming p1: %v %v", owned, err)
 	}
@@ -1043,7 +1042,7 @@ func TestOwner_CancelledBuild_ReleasesUnfinishedOwnershipOnALiveCtx(t *testing.T
 	defer cancel()
 	idx.plans["product"][0].Executer.(*staticExecuter).onExecute = cancel // during the first id's plan
 
-	owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, nil, time.Minute)
+	owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, time.Minute)
 	if err != nil || len(owned) != 2 {
 		t.Fatalf("claiming: %v %v", owned, err)
 	}
@@ -1070,7 +1069,7 @@ func TestOwner_CancelledBuild_ReleasesUnfinishedOwnershipOnALiveCtx(t *testing.T
 func TestOwner_DirectBuild_OwnsNothing(t *testing.T) {
 	st := &recordingStore{}
 	idx := newHotPathIndexer(st, 2, 4)
-	if _, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, nil, 0); err != nil {
+	if _, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1143,12 +1142,12 @@ func TestOwner_PoolTask_SkipsWhatItLostBeforeDequeue(t *testing.T) {
 		idx, ex, be := newCaptureIndexer(st, 1, 4)
 		release := occupyWorker(t, idx)
 
-		owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, nil, time.Minute)
+		owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, time.Minute)
 		if err != nil || len(owned) != 2 {
 			t.Fatalf("claiming: %v %v", owned, err)
 		}
 		tokens := map[string]int64{owned[0].Id: owned[0].Token, owned[1].Id: owned[1].Token}
-		idx.submitOwnedBuilds(t.Context(), owned, nil) // one task: both ids are products
+		idx.submitOwnedBuilds(t.Context(), owned) // one task: both ids are products
 		if n := st.count("ReleaseOwners"); n != 0 {
 			t.Fatalf("setup: the build must queue, not shed: %v", st.callsSnapshot())
 		}
@@ -1291,7 +1290,7 @@ func TestOwner_WaitForSlot_UnclaimedRegistrationDoesNotWait(t *testing.T) {
 	P := product("1")
 	st := &recordingStore{}
 	idx := newHotPathIndexer(st, 1, 1)
-	owned, err := st.MarkStale(t.Context(), []model.Resource{P}, nil, time.Minute)
+	owned, err := st.MarkStale(t.Context(), []model.Resource{P}, time.Minute)
 	if err != nil || len(owned) != 1 {
 		t.Fatalf("claiming: %v %v", owned, err)
 	}

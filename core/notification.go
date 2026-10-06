@@ -37,8 +37,11 @@ type Notification struct {
 	// Kind describes what happened: created, updated, or deleted.
 	Kind ChangeKind
 
-	// Metadata contains arbitrary caller-provided context propagated through
-	// rebuild processing and provider fetches.
+	// Metadata contains arbitrary caller-provided context of the resource
+	// (e.g. the acting tenant). The registration stores it on the resource's
+	// own row, replacing what the row held, and every owned build of the
+	// resource fetches with what the row holds when it begins; it never
+	// reaches the resource's Parents.
 	Metadata map[string]string
 
 	// Version is the resource's version at the source, monotonic per
