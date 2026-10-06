@@ -1,5 +1,46 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-06, runbook step L1.8):** a resource's metadata is its own,
+> and a mark carries none to another resource (open point Q16 in laika-dev's
+> `docs/open-points.md`, *Which metadata should a Build owner's follow-up run
+> with?*, answered: the latest metadata registered for the resource). Until
+> now every mark wrote the metadata it carried, the last in commit order
+> winning: a registration's Parent marks the child's, and `MarkStale` — the
+> ADR 0006 cascade, the drift re-marks, the rebuild flusher's failure,
+> `finish` and salvage marks — the build's. So a registration with metadata
+> md1 that committed while an owner ran with md0 could be overwritten by the
+> owner's drift re-mark, and the follow-up fetched with md0; in the harness,
+> as an operator that may no longer see the resource. Now only a
+> registration's own item writes `resources.metadata`; its Parent marks and
+> `MarkStale` bump `stale_seq` and claim, and leave it alone. A plan's report
+> is still stored on a row that has none (`Store.ReplaceEdges`), which no
+> longer returns the row's metadata. A build that owns its resource — an
+> inline build a mark claimed, a follow-up, a sweep build — runs with what
+> the row holds when it begins: `BeginBuild` returns it in
+> `BuildBegun.Metadata`, and `FollowUp`, `StaleResource` and `MarkedParent`
+> carry none. So a build that waited in the pool queue or the sweep picks up
+> metadata registered meanwhile, metadata registered while an owner runs is
+> built by its follow-up, and a Parent's build runs with the Parent's own. A
+> row without metadata builds with none: a row a walk found whose walk build
+> failed, a Parent a child's plan derived before Laika had a row for it, and
+> every row only the app's walks built, since the app's DSL plans report
+> none. In the harness a fetch with no operator fails at the source (no
+> fallback actor, `authz.SourceAuth`), so such a row stays stale and nothing
+> is deleted. Builds that own nothing — a rebuild walk, a direct `idx.Build`
+> — fetch with their caller's metadata (`BuildArgs.Metadata`,
+> `RebuildArgs.Metadata`).
+>
+> This supersedes the L2.3 note below where it names the marks that still
+> give a row a walk's or a child's metadata, and its drift re-mark carrying
+> the row's: no mark but a registration's of the row itself gives it
+> metadata, so no build's mark and no other resource's change locks out its
+> plans' report. In the L1.4 note, the follow-up runs with the row's
+> metadata as its `BeginBuild` reads it — its latest registration's, else
+> its plans' report — not "the last mark's, in commit order". The commit
+> order the rejection of an in-memory registry argues from is now that of
+> the resource's own registrations, which the row still records; the
+> argument stands.
+
 > **Note (2026-10-05, runbook step L2.3):** a row's metadata is its own: its
 > registrations', else its plan's report, never a walk's. Until now only a
 > stale mark wrote `resources.metadata` and `BeginBuild` wrote none, so a row

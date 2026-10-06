@@ -1,5 +1,14 @@
 # Reverse-relation discovery bootstraps Parent edges for brand-new Children
 
+> **Note (2026-10-06, runbook step L1.8):** the cascade marks the Parent and
+> carries no metadata to it. Until now its `MarkStale` stored the Child
+> build's metadata on the Parent's row, as a Child's registration stored the
+> Child's on its Parents' rows. A resource's metadata is now its own (ADR
+> 0008's L1.8 note): both marks leave the Parent's alone, and the Parent
+> Build runs with the Parent's own metadata, which its `BeginBuild` reads
+> from the row — none on a Parent the Child's plan derived before Laika had a
+> row for it.
+
 > **Note (2026-09-30, runbook step L1.2):** registration no longer calls
 > `GetParentResources`. The Parents of a change are read from the same persisted
 > edges by a join on `relations` inside the `Store.RegisterChanges` statement,
