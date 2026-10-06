@@ -473,6 +473,9 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	}
 
 	fl := newRebuildFlusher(idx, params.ResourceType)
+	// With several plans an id settles on its last plan's outcome, and a
+	// later sighting is held to it (rebuildFlusher.keepSettled).
+	fl.keepSettled = activePlans > 1
 
 	// completed is the last fully consumed page boundary. The flusher's
 	// afterFlush hook checkpoints it: right after a flush, everything before

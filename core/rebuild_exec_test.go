@@ -1219,16 +1219,134 @@ func TestRebuildAll_MultiPlan_RepeatedNilOfOnePlan_CountsOnce(t *testing.T) {
 	assertFailedOnce(t, st, err, "X")
 }
 
-// Ruling R5: in a single-plan walk, a listing that repeats an id with a
-// document, then without data, disagrees with itself and fails the id.
-func TestRebuildAll_SinglePlan_DocumentThenNilOfOneID_Fails(t *testing.T) {
-	st := &rebuildRecordingStore{}
-	es := &captureBackend{}
-	err := walkProducts(t, st, es, 0, twoVersionResources(),
-		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}})
+// Ruling R5: a single-plan walk drops a settled entry, so an id its listing
+// repeats is decided by each sighting while the earlier one is in flight,
+// and afresh once it settled — the later listing is the newer fetch. A
+// document still queued and a nil disagree and fail the id; a nil after the
+// document settled is a fresh sighting, deleted at its own BeginBuild's
+// sequence.
+func TestRebuildAll_SinglePlan_DocumentThenNilOfOneID(t *testing.T) {
+	walk := func() *staticExecuter {
+		return &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}}
+	}
 
-	assertNothingDeleted(t, st, es, "X")
-	assertFailedOnce(t, st, err, "X")
+	t.Run("document still queued: fails", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walkProducts(t, st, es, 0, twoVersionResources(), walk())
+
+		assertNothingDeleted(t, st, es, "X")
+		assertFailedOnce(t, st, err, "X")
+	})
+
+	t.Run("document settled: the nil is a fresh sighting and deletes", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43, X again at 44
+		es := &captureBackend{}
+		if err := walkProducts(t, st, es, 1, twoVersionResources(), walk()); err != nil {
+			t.Fatal(err)
+		}
+
+		calls := st.callsSnapshot()
+		if n := st.count("BeginBuild:product/X"); n != 2 || countPrefix(calls, "ClearStale:product/X:") != 1 {
+			t.Fatalf("X's document must settle, and its nil begin X afresh: %v", calls)
+		}
+		assertDeletedAt(t, st, es, "X", 44)
+		if countPrefix(calls, "MarkStale:product/X") != 0 {
+			t.Fatalf("a fresh sighting's delete marks nothing: %v", calls)
+		}
+	})
+}
+
+// Ruling R6: a multi-plan walk keeps a settled entry until finish, so an id
+// listed again after it settled is held to the outcome it settled on,
+// whatever the chunk boundaries. Each case flushes per document (chunk size
+// 1), so the id's documents land, and it settles, before the next sighting.
+func TestRebuildAll_MultiPlan_SightingAfterSettling(t *testing.T) {
+	t.Run("a repeated document counts once: a later nil still disagrees", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walkProducts(t, st, es, 1, twoVersionResources(),
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), productDoc("X")}},
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}})
+
+		assertNothingDeleted(t, st, es, "X")
+		assertFailedOnce(t, st, err, "X")
+		if n := st.count("BeginBuild:product/X"); n != 1 {
+			t.Fatalf("X is begun once, got %d: %v", n, st.callsSnapshot())
+		}
+	})
+
+	t.Run("a nil after the id completed fails it", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		es := &captureBackend{}
+		err := walkProducts(t, st, es, 1, twoVersionResources(),
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}})
+
+		assertNothingDeleted(t, st, es, "X")
+		calls := st.callsSnapshot()
+		if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+			t.Fatalf("the walk must report one failed resource, got %v", err)
+		}
+		if n := countPrefix(calls, "MarkStale:product/X"); n != 1 {
+			t.Fatalf("X must be marked stale exactly once, got %d: %v", n, calls)
+		}
+		if n := st.count("BeginBuild:product/X"); n != 1 {
+			t.Fatalf("X is begun once, got %d: %v", n, calls)
+		}
+	})
+
+	t.Run("a document after the id was deleted fails it unwritten", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
+		es := &captureBackend{}
+		err := walkProducts(t, st, es, 1, twoVersionResources(),
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}},
+			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X"), productDoc("X")}})
+
+		assertDeletedAt(t, st, es, "X", 43)
+		assertFailedOnce(t, st, err, "X")
+		if n := st.count("BeginBuild:product/X"); n != 1 {
+			t.Fatalf("X is begun once, got %d: %v", n, st.callsSnapshot())
+		}
+		for _, it := range es.allBulkItems() {
+			if it.ID == "X" {
+				t.Fatalf("a document of a deleted id must never be written: %+v", it)
+			}
+		}
+	})
+}
+
+// Ruling R8: an aborted walk's salvage marks what is unsettled only: a failed
+// id was marked when it failed, and a settled one needs no mark. Plan 1
+// fails X (its document is rejected) and completes Y; plan 2 completes Y on
+// its first page, then its second page fails.
+func TestRebuildAll_Salvage_SkipsFailedAndSettledIDs(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{rejectDocs: map[string]bool{"product_search_v1/X": true}}
+	plans := []projection.Plan{
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("X"), productDoc("Y"), productDoc("Z")}}},
+		{Version: 2, Executer: &pagingExecuter{pages: []aggregation.ExecutionResult[projection.BuildDoc]{
+			{Items: []projection.BuildDoc{productDoc("X"), productDoc("Y")}},
+			{Err: errors.New("provider page exploded")},
+		}}},
+	}
+	idx := mustNew(Config{Resources: twoVersionResources(), Plans: map[string][]projection.Plan{"product": plans}, ES: es, Store: st, RebuildChunkSize: 1})
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}})
+	if err == nil || !strings.Contains(err.Error(), "provider page exploded") {
+		t.Fatalf("a page error must abort the walk, got %v", err)
+	}
+
+	calls := st.callsSnapshot()
+	if n := countPrefix(calls, "MarkStale:product/X"); n != 1 {
+		t.Fatalf("failed X was marked when it failed and must not be marked again, got %d: %v", n, calls)
+	}
+	if countPrefix(calls, "ClearStale:product/Y:") != 1 || countPrefix(calls, "MarkStale:product/Y") != 0 {
+		t.Fatalf("settled Y must not be marked by the salvage: %v", calls)
+	}
+	if countPrefix(calls, "MarkStale:product/Z") != 1 {
+		t.Fatalf("Z still awaits plan 2 and must be salvaged: %v", calls)
+	}
 }
 
 // An id that failed stays failed: later plans' nils and documents are

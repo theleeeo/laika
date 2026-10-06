@@ -60,7 +60,7 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 const detachedMarkTimeout = 30 * time.Second
 
 // pendingResource tracks a resource mid-rebuild: begun (Build Sequence bumped)
-// but not yet settled, or failed.
+// but not yet settled, failed, or — in a multi-plan walk — settled.
 type pendingResource struct {
 	occVersion int64
 	staleSeq   int64
@@ -68,22 +68,38 @@ type pendingResource struct {
 	// remaining counts the plans whose outcome for the resource is still
 	// outstanding: a plan's document counts once it flushed successfully, a
 	// plan's nil (the source listed the resource without data) as the walk
-	// meets it. The resource settles when it hits 0: on documents it
+	// meets it — each plan once, however often its listing repeats the
+	// resource. The resource settles when it hits 0: on documents it
 	// completes — every expected document and its version's edge set
 	// stored, stale mark cleared — and on nils it is deleted (gone).
 	remaining int
+	// lastCounted is the Schema Version of the plan whose outcome counted
+	// last (0: none). Plans arrive in order, so an outcome of that version is
+	// a repeat and counts no further.
+	lastCounted int
 	// sawDoc records a document of the resource queued for a flush, sawNil a
-	// plan's nil, and nilFrom the Schema Version of the plan whose nil
-	// counted last. Only unanimity decides existence, as in the live build:
-	// a document and a nil fail the resource.
-	sawDoc  bool
-	sawNil  bool
-	nilFrom int
+	// plan's nil. Only unanimity decides existence, as in the live build: a
+	// document and a nil fail the resource.
+	sawDoc bool
+	sawNil bool
+	// settled is how the resource settled, kept by a multi-plan walk until
+	// finish (keepSettled); a single-plan walk drops a settled entry.
+	settled settlement
 	// failed marks a resource the rebuild could not serve. Its entry stays
 	// until finish (or salvage), so nothing later re-begins, writes, deletes
 	// or counts it again.
 	failed bool
 }
+
+// settlement is how a resource settled: unsettled, completed on documents, or
+// deleted on nils.
+type settlement int
+
+const (
+	unsettled settlement = iota
+	completed
+	deleted
+)
 
 // driftBase is where a begun resource's drift check measures from. It is per
 // resource, never flusher state: one chunk can settle resources begun at
@@ -133,6 +149,14 @@ type rebuildFlusher struct {
 	pending []pendingItem
 	state   map[string]*pendingResource
 	failed  int
+	// keepSettled keeps a settled resource's entry until finish, recording
+	// how it settled. A multi-plan walk sets it: a later sighting of an id
+	// that settled is held to that outcome — a repeat of it is ignored, the
+	// other outcome fails the id — rather than begun afresh, so the result
+	// never depends on where the chunks end. A single-plan walk drops a
+	// settled entry, keeping its state to O(chunk): a later sighting there
+	// is the newer fetch and decides the id afresh.
+	keepSettled bool
 	// afterFlush, when set, runs after every successful flush of a non-empty
 	// chunk. rebuildAll checkpoints the walk cursor here: right after a flush,
 	// everything queued before the last completed page boundary is durably
@@ -162,7 +186,7 @@ func (f *rebuildFlusher) begin(id string, begun BuildBegun, drift driftBase, exp
 }
 
 // tracked reports whether the resource has an entry: begun and not yet
-// settled, or failed.
+// settled, failed, or settled in a multi-plan walk (keepSettled).
 func (f *rebuildFlusher) tracked(id string) bool {
 	return f.state[id] != nil
 }
@@ -179,17 +203,18 @@ func (f *rebuildFlusher) occ(id string) (occVersion, staleSeq int64, ok bool) {
 
 // add queues one plan document of Schema Version version, with its plan's
 // report reported. Flushes when the chunk bound is reached. A document of a
-// failed resource is dropped; one of a resource an earlier plan found gone
-// fails it unwritten, so no version is written without the others.
+// failed or completed resource is dropped; one of a resource a plan found
+// gone — deleted, or awaiting the later plans' outcomes — fails it unwritten,
+// so no version is written without the others.
 func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.Resource, reported map[string]string) error {
 	p := f.state[item.ID]
-	if p == nil || p.failed {
+	if p == nil || p.failed || p.settled == completed {
 		return nil
 	}
 	if p.sawNil {
 		slog.Warn("plans disagree on existence; leaving resource stale for the sweep",
 			slog.String("type", f.resourceType), slog.String("id", item.ID),
-			slog.Int("version_with_data", version), slog.Int("version_without_data", p.nilFrom))
+			slog.Int("version_with_data", version), slog.Int("version_without_data", p.lastCounted))
 		f.fail(ctx, item.ID)
 		return nil
 	}
@@ -213,16 +238,16 @@ func (f *rebuildFlusher) discard(id string) {
 }
 
 // gone counts a plan's nil — the source listed the resource but returned no
-// data — as plan version's outcome for the begun resource id. A failed
+// data — as plan version's outcome for the resource id. A failed or deleted
 // resource ignores it, and a repeated nil of one plan's listing counts once.
-// A resource with a document queued or flushed fails: its queued documents
-// are dropped, what already flushed stays written, and the sweep's build,
-// which runs every plan, resolves it. When the last expected plan's nil
-// settles the resource, every plan found it gone and it is deleted
-// (removeGone).
+// A resource with a document — queued, flushed, or completed in a multi-plan
+// walk (keepSettled) — fails: its queued documents are dropped, what already
+// flushed stays written, and the sweep's build, which runs every plan,
+// resolves it. When the last expected plan's nil settles the resource, every
+// plan found it gone and it is deleted (removeGone).
 func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 	p := f.state[id]
-	if p == nil || p.failed {
+	if p == nil || p.failed || p.settled == deleted {
 		return
 	}
 	if p.sawDoc {
@@ -231,10 +256,10 @@ func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 		f.fail(ctx, id)
 		return
 	}
-	if p.sawNil && p.nilFrom == version {
+	if p.lastCounted == version {
 		return
 	}
-	p.sawNil, p.nilFrom = true, version
+	p.sawNil, p.lastCounted = true, version
 	p.remaining--
 	if p.remaining > 0 {
 		return
@@ -264,7 +289,22 @@ func (f *rebuildFlusher) removeGone(ctx context.Context, id string, p *pendingRe
 	if !p.failed {
 		f.removeRow(ctx, id, p.staleSeq)
 	}
-	f.discard(id)
+	f.settle(id, deleted)
+}
+
+// settle records that the resource settled as how: a multi-plan walk keeps
+// its entry until finish (keepSettled), a single-plan walk drops it. A
+// resource that failed on the way stays failed.
+func (f *rebuildFlusher) settle(id string, how settlement) {
+	p := f.state[id]
+	if p == nil || p.failed {
+		return
+	}
+	if f.keepSettled {
+		p.settled = how
+		return
+	}
+	delete(f.state, id)
 }
 
 // fail records a resource the rebuild could not serve: its queued documents
@@ -375,7 +415,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	hasRejected := make(map[string]bool)
 	for _, it := range chunk {
 		p := f.state[it.ID]
-		if p == nil || p.failed {
+		if p == nil || p.failed || p.settled != unsettled {
 			continue
 		}
 		if _, seen := landed[it.ID]; !seen && !hasRejected[it.ID] {
@@ -437,7 +477,8 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 
 	// Per-document settlement of the resources still standing: drift checks
 	// — the root once per chunk, its children per document — and the count
-	// of documents still expected.
+	// of plans whose outcome is still expected, which a plan's repeated
+	// document doesn't lower again.
 	driftCheck := make(map[string][]ChangeCheck)
 	rootChecked := make(map[string]bool)
 	for _, id := range order {
@@ -453,7 +494,8 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			for _, r := range it.relations {
 				driftCheck[id] = append(driftCheck[id], ChangeCheck{Resource: r, Start: p.drift.start})
 			}
-			if p.remaining > 0 {
+			if it.version != p.lastCounted && p.remaining > 0 {
+				p.lastCounted = it.version
 				p.remaining--
 			}
 		}
@@ -465,7 +507,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	// whose drift re-mark failed was failed by checkDrift and is skipped.
 	for _, it := range chunk {
 		p := f.state[it.ID]
-		if p == nil || p.failed || p.remaining > 0 {
+		if p == nil || p.failed || p.settled != unsettled || p.remaining > 0 {
 			continue
 		}
 		// Seq-guarded: a notification that landed mid-rebuild — or the drift
@@ -474,7 +516,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			slog.Warn("clear stale failed; sweep may rebuild redundantly",
 				slog.String("id", it.ID), slog.String("error", err.Error()))
 		}
-		delete(f.state, it.ID)
+		f.settle(it.ID, completed)
 	}
 
 	if f.afterFlush != nil {
@@ -531,18 +573,19 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 }
 
 // finish flushes the remainder and settles resources that never received
-// every expected plan's outcome (a later plan walk skipped them, e.g. deleted
-// or created upstream mid-walk). Their Build Sequence was bumped and only
-// some of their versions' documents and edge sets were refreshed, or none
-// after an earlier plan's nil — they must converge via the sweep, so they are
-// marked stale. Failed resources were marked when they failed.
+// every expected plan's outcome: an earlier plan's document or nil began
+// them, and a later plan's walk never listed them. Their Build Sequence was
+// bumped and only some of their versions' documents and edge sets were
+// refreshed, or none after an earlier plan's nil — they must converge via the
+// sweep, so they are marked stale. Failed resources were marked when they
+// failed, and settled ones (keepSettled) need no mark.
 func (f *rebuildFlusher) finish(ctx context.Context) error {
 	if err := f.flush(ctx); err != nil {
 		return err
 	}
 	for id, p := range f.state {
 		delete(f.state, id)
-		if p.failed {
+		if p.failed || p.settled != unsettled {
 			continue
 		}
 		slog.Warn("rebuild left resource incomplete; marking stale for sweep",
@@ -553,10 +596,11 @@ func (f *rebuildFlusher) finish(ctx context.Context) error {
 	return nil
 }
 
-// salvage durably marks every unfinished resource stale after an abort. It
+// salvage durably marks every unsettled resource stale after an abort. It
 // runs on a detached context: the abort may stem from cancellation, and these
 // marks are the only durable recovery for resources that were begun but not
-// fully written.
+// fully written. A failed resource was marked when it failed, and a settled
+// one (keepSettled) needs no mark.
 func (f *rebuildFlusher) salvage(ctx context.Context) {
 	if len(f.state) == 0 {
 		return
@@ -565,14 +609,20 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 	defer cancel()
 
 	roots := make([]model.Resource, 0, len(f.state))
-	for id := range f.state {
+	for id, p := range f.state {
+		if p.failed || p.settled != unsettled {
+			continue
+		}
 		roots = append(roots, f.root(id))
+	}
+	f.state = make(map[string]*pendingResource)
+	if len(roots) == 0 {
+		return
 	}
 	if _, err := f.idx.st.MarkStale(sctx, roots, 0); err != nil {
 		slog.Error("failed to mark unfinished rebuild resources stale; sweep cannot recover them",
 			slog.String("type", f.resourceType), slog.Int("count", len(roots)), slog.String("error", err.Error()))
 	}
-	f.state = make(map[string]*pendingResource)
 }
 
 // errorIfFailed converts accumulated per-resource failures into a rebuild
