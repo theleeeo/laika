@@ -145,10 +145,11 @@ func (s *Store) RemoveResource(ctx context.Context, resource model.Resource, bui
 // The metadata write comes last, whatever the guard decided for the sets:
 // when reported is non-empty, an UPDATE of the resource's resources row
 // guarded by metadata IS NULL OR metadata = '{}' stores it — never an
-// insert, so a row hard-deleted since BeginBuild stays gone. It returns the
-// metadata it wrote; when it wrote nothing, or reported is empty, a plain
-// SELECT, which takes no lock, reads the row's metadata in the same
-// transaction. The empty object reads as none, like NULL.
+// insert, so a row hard-deleted since BeginBuild stays gone. A resource's
+// stored metadata is written only by its own registrations (RegisterChanges)
+// and, while it has none, by this report; a mark never writes it, and an
+// owned build runs with what BeginBuild reads. ReplaceEdges returns no
+// metadata.
 //
 // It cannot deadlock against another ReplaceEdges, whatever declared each
 // carries, or against RemoveResource: each takes a resource's edge_sets
@@ -280,9 +281,13 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // newer. Parents are found from
 // the accepted items only, so a stale item marks nothing; accepted in-batch
 // items are excluded from the Parent mark because one statement may modify a
-// row only once, and their own row already carries the mark. A Parent shared
-// by several accepted children stores the metadata of the last one in batch
-// order.
+// row only once, and their own row already carries the mark.
+//
+// Only the item upsert writes metadata, the item's own, replacing what its
+// row holds. A Parent mark bumps stale_seq and claims, and leaves the
+// Parent's metadata alone: a resource's stored metadata is written only by
+// its own registrations and, while it has none, its plans' report
+// (ReplaceEdges); an owned build runs with what BeginBuild reads.
 //
 // Every accepted row — upsert, version-0 item or delete — is stamped with a
 // fresh Change Sequence value, which is both its change_seq and its mark's
@@ -321,7 +326,7 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		metadata[i] = it.Metadata
 	}
 	// One JSON array index-aligned with the items; a nil map marshals to
-	// JSON null, stored as SQL NULL like MarkStale stores nil metadata.
+	// JSON null, stored as SQL NULL: the row then has no metadata.
 	metaJSON, err := json.Marshal(metadata)
 	if err != nil {
 		return core.Registered{}, err
@@ -369,31 +374,29 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		 ),
 		 parents AS (
 		     SELECT DISTINCT ON (rel.resource, rel.resource_id)
-		            rel.resource AS t, rel.resource_id AS i, input.meta
+		            rel.resource AS t, rel.resource_id AS i
 		     FROM accepted a
-		     JOIN input ON input.t = a.type AND input.i = a.id
 		     JOIN relations rel ON rel.related_resource = a.type AND rel.related_resource_id = a.id
 		     WHERE NOT EXISTS (SELECT 1 FROM accepted a2 WHERE a2.type = rel.resource AND a2.id = rel.resource_id)
-		     ORDER BY rel.resource, rel.resource_id, input.ord DESC
+		     ORDER BY rel.resource, rel.resource_id
 		 ),
 		 parents_drawn AS MATERIALIZED (
-		     SELECT t, i, meta, nextval('change_sequence') AS seq FROM parents
+		     SELECT t, i, nextval('change_sequence') AS seq FROM parents
 		 ),
 		 marked AS (
-		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, metadata, owner_seq, owner_since)
-		     SELECT t, i, seq, now(), meta, seq, now() FROM parents_drawn
+		     INSERT INTO resources AS r (type, id, stale_seq, stale_since, owner_seq, owner_since)
+		     SELECT t, i, seq, now(), seq, now() FROM parents_drawn
 		     ON CONFLICT (type, id) DO UPDATE
 		     SET stale_seq = EXCLUDED.stale_seq,
 		         stale_since = COALESCE(r.stale_since, now()),
-		         metadata = EXCLUDED.metadata,
 		         owner_seq = CASE WHEN `+claimable("$6")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
 		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
-		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed, r.metadata
+		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed
 		 )
-		 SELECT input.ord, a.stale_seq, a.claimed, NULL::text, NULL::text, NULL::jsonb
+		 SELECT input.ord, a.stale_seq, a.claimed, NULL::text, NULL::text
 		 FROM input LEFT JOIN accepted a ON a.type = input.t AND a.id = input.i
 		 UNION ALL
-		 SELECT NULL, stale_seq, claimed, type, id, metadata FROM marked`,
+		 SELECT NULL, stale_seq, claimed, type, id FROM marked`,
 		types, ids, deleted, versions, metaJSON, lease.Microseconds(),
 	)
 	if err != nil {
@@ -406,8 +409,7 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		var ord, staleSeq *int64
 		var claimed *bool
 		var typ, id *string
-		var meta map[string]string
-		if err := rows.Scan(&ord, &staleSeq, &claimed, &typ, &id, &meta); err != nil {
+		if err := rows.Scan(&ord, &staleSeq, &claimed, &typ, &id); err != nil {
 			return core.Registered{}, err
 		}
 		if staleSeq == nil {
@@ -485,9 +487,10 @@ const drawnInput = `drawn AS MATERIALIZED (
 // MarkStale durably records build intent for the given resources: set
 // stale_seq to a fresh Change Sequence value and set stale_since — keeping
 // the OLDEST timestamp, so "stale for too long" measures the oldest unserved
-// change. The notification metadata is stored alongside the mark (last mark
-// wins) so a sweep-recovered build runs with the same context an inline
-// build would have.
+// change. It leaves the row's metadata alone: a resource's stored metadata
+// is written only by its own registrations and, while it has none, its plans'
+// report (ReplaceEdges), never by a mark, and the build that serves the mark
+// runs with what BeginBuild reads. A row the mark creates has none.
 //
 // A lease above zero also claims each row without a live owner, as
 // RegisterChanges does, with owner_seq set to the mark's stale_seq, and
@@ -563,6 +566,11 @@ func (s *Store) MarkStale(ctx context.Context, resources []model.Resource, lease
 // guarantee holds there too at the cost of a gap. It leaves the row's
 // change_seq alone: a build is not a change. A token that is the row's owner
 // token renews the owner's lease.
+//
+// It returns the row's metadata as the statement leaves it — its last
+// registration's or, on a row no registration gave any, its plans' report —
+// nil when the row has none (NULL or the empty object). An owned build runs
+// with it, so a build that waited runs with metadata registered meanwhile.
 func (s *Store) BeginBuild(ctx context.Context, resource model.Resource, token int64) (core.BuildBegun, error) {
 	var b core.BuildBegun
 	err := s.pool.QueryRow(ctx,
@@ -791,12 +799,12 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 // ListStale returns up to limit resources whose stale mark is older than
 // before and that have no live owner, oldest first, including delete
 // tombstones, and claims each one in the same statement at its current
-// stale_seq (no bump), which is its Token. Each entry carries the row's
-// metadata: its most recent mark's, or the plans' report ReplaceEdges stored
-// on a row that had none. The candidates are locked FOR UPDATE SKIP
-// LOCKED inside the claiming UPDATE, so of two concurrent sweeps only one
-// claims a row: the other skips it while it is locked, and re-checks the
-// owner condition against the claimed row once it has committed.
+// stale_seq (no bump), which is its Token. It returns no metadata: the build
+// that serves an entry reads the row's at BeginBuild. The candidates are
+// locked FOR UPDATE SKIP LOCKED inside the claiming UPDATE, so of two
+// concurrent sweeps only one claims a row: the other skips it while it is
+// locked, and re-checks the owner condition against the claimed row once it
+// has committed.
 func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]core.StaleResource, error) {
 	rows, err := s.pool.Query(ctx,
 		`WITH candidates AS (
