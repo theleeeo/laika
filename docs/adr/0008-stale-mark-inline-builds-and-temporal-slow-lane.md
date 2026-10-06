@@ -1,5 +1,23 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-06, decided for runbook step L2.8):** the sweep **backs off**
+> a resource whose build keeps failing. Today it takes the oldest stale rows
+> first and a failed build keeps its `stale_since`, so a resource that never
+> builds heads every pass. Enough such rows starve every other stale resource.
+> The decision:
+> - each failed owned build or delete pushes its row's next turn out, starting
+>   at a base delay and doubling up to a cap;
+> - the sweep orders rows by their next turn;
+> - a successful build, or a registration of the resource itself, resets the
+>   backoff;
+> - cancellation, a failed renewal and a shed submission are not failures.
+>
+> The mark stays, so the resource still heals on its own when its source or
+> config changes. Rejected: parking a resource after N failures until an
+> operator or a new notification revives it. A source that changes without a
+> notification would never revive it, and the mark would no longer be the
+> durability this ADR rests on.
+
 > **Note (2026-10-06, runbook step L2.4):** the **reverse sweep**
 > ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md))
 > is a third durability leg beside the mark and the sweep here and ADR

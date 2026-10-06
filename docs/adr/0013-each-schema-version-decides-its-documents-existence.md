@@ -1,0 +1,57 @@
+# Each Schema Version decides its own document's existence
+
+_Accepted, 2026-10-06. Supersedes the cross-version existence agreement in
+[ADR 0004](0004-multi-schema-version-writes-for-graceful-migrations.md) and the existence rule of
+ADR 0002's L2.6 and L2.7 notes. Built by runbook step L2.9._
+
+A build runs every Schema Version's plan for a resource (ADR 0004). Until now, existence was
+decided only when they all agreed. If every plan returned nil, the build deleted every version's
+document and the resource's row. If the plans disagreed, some returning a document and some nil,
+the build failed and wrote nothing. That left the stale mark for the sweep, whose build ran the
+same plans and failed again.
+
+When two versions' plans disagree for good, that loops forever. That happens with a new version
+whose plan reads a different endpoint or filters out some resources, or with a broken new plan
+that returns nil for everything. Every sweep pass retries the resource, and the old version's
+document stays frozen at its last good build while the resource keeps changing at its source.
+
+**Decision.** A plan's nil is its own version's answer.
+
+- **A build** writes the document of every version whose plan returned one. For each version
+  whose plan returned nil, it deletes that version's document at the build's Build Sequence
+  (`external_gte`, ADR 0002) and replaces that version's edge set with an empty one at the same
+  sequence. Then it settles as a successful build does, clearing the mark.
+- **The row** stays while any version has a document. One row per resource remains:
+  - documents live per version index, and edge sets per version;
+  - the row holds what the versions share: the Build Sequence, the mark, the owner and the
+    metadata.
+- **When every plan returns nil**, the build deletes every version's document, the edge sets and
+  the row, as before.
+- A rebuild walk applies the same rule to each plan's outcome for an id.
+- A version-selected rebuild deletes its selected versions' documents when their plans return nil,
+  and keeps the row. The row can be removed only by a build that runs every plan. So when all of
+  its selected plans return nil, the rebuild also marks the resource stale, and the sweep's full
+  build decides the row.
+
+**Why not keep agreement.** It treats a permanent difference between versions as a transient
+error. The transient case, a resource deleted between two plans' fetches, converges without it:
+- a notified delete is a tombstone, whose delete removes every version's document and the row
+  without running a plan (`deleteOne`);
+- a lost delete is the reverse sweep's to find (ADR 0012), as it is today for one that lands after
+  both fetches.
+
+The other alternative was to back off a disagreeing resource without changing the rule. It would
+stop the loop, which the stale sweep's backoff does anyway for every build that keeps failing, but
+the old version's document would stay frozen.
+
+**Consequences.**
+
+- Versions may hold different sets of documents. No read spans two versions of one type, because
+  every search reads through the type's alias (ADR 0009), so a search shows what the read
+  version's plan says exists.
+- The cutover check's document-count parity (ADR 0010) assumed every version holds the same set.
+  A version that legitimately holds fewer fails it unless the operator allows the gap.
+- The reverse sweep (ADR 0012) still probes through one plan, which answers for its own version.
+  An id its version excludes is a suspect at every run: a needless but harmless build. An id only
+  another version's plan stops returning, without a notification, is never a suspect, so that
+  version's document stays until something else builds the id.
