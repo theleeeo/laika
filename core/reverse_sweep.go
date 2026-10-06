@@ -50,8 +50,9 @@ type ReverseSweepConfig struct {
 type ReverseSweepResult struct {
 	// Listed is the number of rows the run listed.
 	Listed int
-	// Suspects is the number of listed ids no probe returned: each was
-	// marked stale and, if the mark claimed it, submitted as an owned build.
+	// Suspects is the number of listed ids no successful probe returned:
+	// each was marked stale and, if the mark claimed it, submitted as an
+	// owned build.
 	Suspects int
 	// FailedProbes is the number of probe calls that failed: each one's ids
 	// were skipped, neither marked nor built, and the next run probes them
@@ -110,21 +111,22 @@ func (idx *Indexer) ReverseSweepNow(ctx context.Context, resourceType string) (R
 //
 // It walks the type's live rows in keyset pages of PageSize ids
 // (Store.ListResources), ending after a page shorter than that. A page's ids
-// are grouped by their row's metadata, a row without metadata in a group of
-// its own, and each group is probed in one call with its metadata (nil for
-// the group without): the actor a row's own registration recorded. An id a
-// probe doesn't return is a suspect; an id it returns but wasn't asked about
-// is ignored. A probe that fails is warned about and counted (FailedProbes,
-// and its ids in Unprobed), and its ids are skipped, neither marked nor
-// built, for the next run to probe again; the rest of the page goes on. A
-// probe that fails once ctx has ended ends the run with ctx's error instead.
+// are grouped by their row's metadata — as a registration of the row stored
+// it or, on a row that had none, its plans' report — rows without metadata
+// in a group of their own, and each group is probed in one call with its
+// metadata (nil for the group without). An id a probe doesn't return is a
+// suspect; an id it returns but wasn't asked about is ignored. A probe that
+// fails is warned about and counted (FailedProbes, and its ids in Unprobed),
+// and its ids are skipped, neither marked nor built, for the next run to
+// probe again; the rest of the page goes on. A probe that fails once ctx has
+// ended ends the run with ctx's error instead.
 //
 // A page's suspects go through one scheduleBuild: one MarkStale marks them
 // all, claiming each that has no live owner, and only then is an owned build
 // of the claimed ones submitted, so only suspects are ever marked, and the
 // mark comes first (ADR 0008). Each build fetches with the metadata its row
 // holds at BeginBuild, not the page's — a suspect whose metadata a
-// registration changed since the listing is built as that actor — and one
+// registration changed since the listing is built with the new one — and one
 // whose every plan returns nil has its documents deleted at its Build
 // Sequence and its row removed, through Build's all-plans-nil path; one that
 // does exist is rebuilt, which is harmless. A suspect with a live owner is
@@ -135,8 +137,8 @@ func (idx *Indexer) ReverseSweepNow(ctx context.Context, resourceType string) (R
 //
 // Pacing: before each page, the first included, the run waits while the
 // build pool is pressured (its queue at Config.QueueHighWater), checking
-// again every reverseSweepBackoff, so the sweep's builds never crowd out the
-// hot path's. After a page it waits out the rest of PageInterval, measured
+// again every reverseSweepBackoff: it starts no page while the pool is
+// pressured. After a page it waits out the rest of PageInterval, measured
 // from the page's start, so it probes at most PageSize ids per PageInterval;
 // it doesn't wait after the last page. A ctx that ends during a wait, or
 // between pages, ends the run with ctx's error and the result so far.
