@@ -3,6 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,12 +23,23 @@ const (
 	DefaultTaskQueue = "laika-indexer"
 
 	sweepScheduleID = "laika-stale-sweep"
+	// reverseSweepScheduleIDPrefix, followed by the resource type, is the ID
+	// of a type's ReverseSweep schedule.
+	reverseSweepScheduleIDPrefix = "laika-reverse-sweep-"
 
-	staleSweepWorkflowName  = "StaleSweep"
-	rebuildWalkWorkflowName = "RebuildWalk"
-	sweepActivityName       = "SweepStale"
-	rebuildActivityName     = "RunRebuild"
+	staleSweepWorkflowName   = "StaleSweep"
+	rebuildWalkWorkflowName  = "RebuildWalk"
+	reverseSweepWorkflowName = "ReverseSweep"
+	sweepActivityName        = "SweepStale"
+	rebuildActivityName      = "RunRebuild"
 )
+
+// ReverseSweepParams names the resource type one ReverseSweep run sweeps. Its
+// paging and pacing come from the worker's Config.ReverseSweeps entry for the
+// type, not from the schedule.
+type ReverseSweepParams struct {
+	ResourceType string
+}
 
 // SweepParams configures one stale-sweep pass.
 type SweepParams struct {
@@ -184,6 +198,36 @@ func ensureSweepSchedule(ctx context.Context, sc scheduleCreator, taskQueue stri
 		return nil
 	}
 	return err
+}
+
+// EnsureReverseSweepSchedules idempotently creates one ReverseSweep schedule
+// per type in Config.ReverseSweeps, each every its type's Interval. As with
+// EnsureSweepSchedule, an existing schedule is left untouched — changing a
+// type's interval requires deleting its schedule in Temporal first — and a
+// type removed from the config keeps its schedule until it is deleted there.
+func (idx *Indexer) EnsureReverseSweepSchedules(ctx context.Context) error {
+	return ensureReverseSweepSchedules(ctx, idx.temporal.ScheduleClient(), idx.taskQueue, idx.reverseSweeps)
+}
+
+func ensureReverseSweepSchedules(ctx context.Context, sc scheduleCreator, taskQueue string, sweeps map[string]ReverseSweepConfig) error {
+	for _, typ := range slices.Sorted(maps.Keys(sweeps)) {
+		_, err := sc.Create(ctx, client.ScheduleOptions{
+			ID: reverseSweepScheduleIDPrefix + typ,
+			Spec: client.ScheduleSpec{
+				Intervals: []client.ScheduleIntervalSpec{{Every: sweeps[typ].Interval}},
+			},
+			Action: &client.ScheduleWorkflowAction{
+				Workflow:  reverseSweepWorkflowName,
+				Args:      []any{ReverseSweepParams{ResourceType: typ}},
+				TaskQueue: taskQueue,
+			},
+			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+		})
+		if err != nil && !errors.Is(err, temporal.ErrScheduleAlreadyRunning) {
+			return fmt.Errorf("reverse sweep schedule for resource type %q: %w", typ, err)
+		}
+	}
+	return nil
 }
 
 // temporalErrScheduleAlreadyRunning exists so tests can produce the sentinel

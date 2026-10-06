@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/aggregation"
 	"github.com/theleeeo/laika/projection"
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
@@ -188,10 +190,15 @@ func TestRunRebuild_ResumedLivenessBeatPreservesInheritedCursor(t *testing.T) {
 type fakeScheduleCreator struct {
 	opts []client.ScheduleOptions
 	err  error
+	// errByID overrides err for the schedule IDs it names.
+	errByID map[string]error
 }
 
 func (f *fakeScheduleCreator) Create(_ context.Context, options client.ScheduleOptions) (client.ScheduleHandle, error) {
 	f.opts = append(f.opts, options)
+	if err, ok := f.errByID[options.ID]; ok {
+		return nil, err
+	}
 	return nil, f.err
 }
 
@@ -208,4 +215,51 @@ func TestEnsureSweepSchedule_ToleratesExisting(t *testing.T) {
 	f := &fakeScheduleCreator{err: temporalErrScheduleAlreadyRunning()}
 	err := ensureSweepSchedule(context.Background(), f, "laika-indexer", time.Minute, SweepParams{})
 	require.NoError(t, err, "an already-existing schedule is success")
+}
+
+func TestEnsureReverseSweepSchedules_OnePerTypeInSortedOrder(t *testing.T) {
+	f := &fakeScheduleCreator{}
+	err := ensureReverseSweepSchedules(context.Background(), f, "laika-indexer", map[string]ReverseSweepConfig{
+		"product":  {Interval: time.Hour, PageSize: 200, PageInterval: time.Second},
+		"category": {Interval: 2 * time.Hour, PageSize: 50, PageInterval: time.Second},
+	})
+	require.NoError(t, err)
+	require.Len(t, f.opts, 2)
+
+	for i, want := range []struct {
+		typ   string
+		every time.Duration
+	}{{"category", 2 * time.Hour}, {"product", time.Hour}} {
+		o := f.opts[i]
+		require.Equal(t, "laika-reverse-sweep-"+want.typ, o.ID, "schedule %d", i)
+		require.Equal(t, []client.ScheduleIntervalSpec{{Every: want.every}}, o.Spec.Intervals, "schedule %d", i)
+		require.Equal(t, enumspb.SCHEDULE_OVERLAP_POLICY_SKIP, o.Overlap, "schedule %d", i)
+		require.Equal(t, &client.ScheduleWorkflowAction{
+			Workflow:  "ReverseSweep",
+			Args:      []any{ReverseSweepParams{ResourceType: want.typ}},
+			TaskQueue: "laika-indexer",
+		}, o.Action, "schedule %d", i)
+	}
+}
+
+func TestEnsureReverseSweepSchedules_ToleratesExistingAndCreatesTheRest(t *testing.T) {
+	f := &fakeScheduleCreator{errByID: map[string]error{
+		"laika-reverse-sweep-category": temporalErrScheduleAlreadyRunning(),
+	}}
+	err := ensureReverseSweepSchedules(context.Background(), f, "laika-indexer", map[string]ReverseSweepConfig{
+		"category": {Interval: time.Hour},
+		"product":  {Interval: time.Hour},
+	})
+	require.NoError(t, err, "an already-existing schedule is success")
+	require.Len(t, f.opts, 2, "an existing schedule must not stop the remaining types' schedules")
+	require.Equal(t, "laika-reverse-sweep-product", f.opts[1].ID)
+}
+
+func TestEnsureReverseSweepSchedules_ReturnsOtherErrors(t *testing.T) {
+	boom := errors.New("boom")
+	f := &fakeScheduleCreator{err: boom}
+	err := ensureReverseSweepSchedules(context.Background(), f, "laika-indexer", map[string]ReverseSweepConfig{
+		"product": {Interval: time.Hour},
+	})
+	require.ErrorIs(t, err, boom)
 }
