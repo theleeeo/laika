@@ -32,6 +32,17 @@ func newDeletePathIndexer(st *recordingStore, ex *staticExecuter) (*Indexer, *ca
 	}), be
 }
 
+// afterBothWalks checks a two-plan walk took both plans' walk starts and made
+// call only after the second: a multi-plan walk deletes an id once its last
+// plan's nil agrees.
+func afterBothWalks(t *testing.T, calls []string, call string) {
+	t.Helper()
+	starts, at := callIndexes(calls, "NextChangeSeq"), slices.Index(calls, call)
+	if len(starts) != 2 || at < starts[1] {
+		t.Fatalf("want %q after both plans' walk starts: %v", call, calls)
+	}
+}
+
 // bothVersionsAt is the two Schema Versions' deletes of id at seq.
 func bothVersionsAt(id string, seq int64) []string {
 	return []string{fmt.Sprintf("product_search_v1/%s@%d", id, seq), fmt.Sprintf("product_search_v2/%s@%d", id, seq)}
@@ -114,7 +125,8 @@ func TestBuildPathDelete_ChangeDuringTheBuild_KeepsTheRowForTheFollowUp(t *testi
 
 // A by-ids rebuild and a rebuild walk own nothing, and BeginBuild inserts a
 // row for an id without one. An id whose plans all return nil has its
-// documents deleted and the row its BeginBuild inserted removed.
+// documents deleted and the row its BeginBuild inserted removed. Each runs
+// every plan: a rebuild that selects versions deletes nothing (L2.7).
 func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 	t.Run("by ids", func(t *testing.T) {
 		st := &recordingStore{buildIdx: 41}
@@ -137,15 +149,19 @@ func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 		st := &recordingStore{buildIdx: 41}
 		idx, be := newDeletePathIndexer(st, &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("2")}})
 
-		if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", Versions: []int{1}}}); err != nil {
+		if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}}); err != nil {
 			t.Fatal(err)
 		}
 
-		// 1 begins at 42, 2 at 43.
+		// v1's walk begins 1 at 42 and 2 at 43; v2's nil for 2 agrees.
 		if got := deletesOf(be, "2"); !slices.Equal(got, bothVersionsAt("2", 43)) {
 			t.Fatalf("2's documents must be deleted at its BeginBuild's sequence: got %v", got)
 		}
 		inOrder(t, st, "BeginBuild:product/2:0", "RemoveResource:product/2:43", "AnyChangedSince:1", "DeleteResourceIfSeq:product/2:0:0")
+		afterBothWalks(t, st.callsSnapshot(), "RemoveResource:product/2:43")
+		if n := st.count("BeginBuild:product/2:"); n != 1 {
+			t.Fatalf("2 is begun once, by v1's nil, got %d: %v", n, st.callsSnapshot())
+		}
 		if r, ok := st.row(product("2")); ok {
 			t.Fatalf("the walk must leave no row for 2, got %+v", r)
 		}
@@ -159,6 +175,7 @@ func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 // walk start after its delete. A hit re-marks it — it was recreated after
 // the walk fetched its page — which moves stale_seq, so the guarded row
 // delete keeps the row, and the re-build the mark claimed writes it again.
+// The walk runs both plans; its delete waits for v2's nil.
 func TestBuildPathDelete_WalkRootRemarkedByItsDriftCheck_KeepsItsRow(t *testing.T) {
 	st := &recordingStore{}
 	st.drift.Store(true) // the root's check, the walk's first, hits
@@ -167,12 +184,13 @@ func TestBuildPathDelete_WalkRootRemarkedByItsDriftCheck_KeepsItsRow(t *testing.
 		byID: map[string][]projection.BuildDoc{"2": {productDoc("2")}},
 	})
 
-	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", Versions: []int{1}}}); err != nil {
+	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}}); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, idx)
 
 	inOrder(t, st, "RemoveResource:product/2:1", "MarkStale:1", "DeleteResourceIfSeq:product/2:0:0")
+	afterBothWalks(t, st.callsSnapshot(), "RemoveResource:product/2:1")
 	r, ok := st.row(product("2"))
 	if !ok {
 		t.Fatalf("a root its drift check re-marked must keep its row: %v", st.callsSnapshot())
@@ -216,11 +234,12 @@ func TestBuildPathDelete_RowDeleteFails_ReleasesAndKeepsTheMark(t *testing.T) {
 }
 
 // A rebuild whose row delete fails fails the resource: it is marked stale for
-// the sweep, counted once, and the rebuild reports the failure.
+// the sweep, counted once, and the rebuild reports the failure. The walk runs
+// both plans, and its delete waits for v2's nil.
 func TestBuildPathDelete_RebuildRowDeleteFails_FailsTheResource(t *testing.T) {
 	for name, sel := range map[string]ResourceSelector{
 		"by ids": {ResourceType: "product", ResourceIDs: []string{"2"}},
-		"walk":   {ResourceType: "product", Versions: []int{1}},
+		"walk":   {ResourceType: "product"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			st := &rebuildRecordingStore{deleteErrs: map[string]error{"2": errors.New("db down")}}
@@ -240,6 +259,9 @@ func TestBuildPathDelete_RebuildRowDeleteFails_FailsTheResource(t *testing.T) {
 			}
 			if st.count("BeginBuild:product/2") != 1 {
 				t.Fatalf("the failed resource must not be begun again: %v", calls)
+			}
+			if name == "walk" {
+				afterBothWalks(t, calls, "DeleteResourceIfSeq:product/2:42")
 			}
 		})
 	}
