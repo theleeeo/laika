@@ -839,9 +839,39 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 	return out, rows.Err()
 }
 
-// ListResources is the contract stub; L2.4 lane A implements it.
+// ListResources returns up to limit live rows of resourceType whose id sorts
+// after after, in id order, each with its metadata — nil when the row has
+// none (NULL or the empty object). Tombstones are skipped. It is a keyset
+// page on the UNIQUE (type, id) index, so the next page starts after the
+// last id returned; an empty after sorts before every id. It is a plain
+// read: it claims nothing and takes no row lock, so a row being built or
+// registered meanwhile neither blocks it nor is blocked by it, and a page
+// can be out of date by the time its caller acts on it.
 func (s *Store) ListResources(ctx context.Context, resourceType, after string, limit int) ([]core.ListedResource, error) {
-	return nil, errors.New("ListResources: not implemented")
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, metadata FROM resources
+		 WHERE type=$1 AND NOT deleted AND id > $2
+		 ORDER BY id
+		 LIMIT $3`,
+		resourceType, after, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []core.ListedResource
+	for rows.Next() {
+		e := core.ListedResource{Resource: model.Resource{Type: resourceType}}
+		if err := rows.Scan(&e.Id, &e.Metadata); err != nil {
+			return nil, err
+		}
+		if len(e.Metadata) == 0 {
+			e.Metadata = nil
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // CountStale returns how many resources of the type (tombstones included)

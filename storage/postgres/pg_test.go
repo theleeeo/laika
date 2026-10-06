@@ -442,6 +442,71 @@ func TestCountStale_FiltersByTypeAndCutoff_ReportsOldest(t *testing.T) {
 	}
 }
 
+func TestListResources_PagesLiveRowsOfTheTypeInIdOrderWithTheirMetadata(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+
+	text := func(s string) *string { return &s }
+	a := model.Resource{Type: "lr", Id: "a"}
+	b := model.Resource{Type: "lr", Id: "b"}
+	c := model.Resource{Type: "lr", Id: "c"}
+	d := model.Resource{Type: "lr", Id: "d"}
+	e := model.Resource{Type: "lr", Id: "e"}
+	// Inserted out of id order; the other type's ids sort around and among
+	// lr's, and lr2 shares its prefix.
+	seedMetadata(t, e, text(`{"k":"e","actor":"u1"}`))
+	seedMetadata(t, c, text(`{}`)) // the empty object: no metadata
+	seed(t, d, 3, 1, true)         // a tombstone, between c and e
+	seedMetadata(t, a, text(`{"k":"a"}`))
+	seedMetadata(t, b, nil) // NULL: no metadata
+	seedMetadata(t, model.Resource{Type: "lr-other", Id: "0"}, nil)
+	seedMetadata(t, model.Resource{Type: "lr-other", Id: "bb"}, nil)
+	seedMetadata(t, model.Resource{Type: "lr2", Id: "c0"}, nil)
+
+	wantA := core.ListedResource{Resource: a, Metadata: map[string]string{"k": "a"}}
+	wantB := core.ListedResource{Resource: b}
+	wantC := core.ListedResource{Resource: c}
+	wantE := core.ListedResource{Resource: e, Metadata: map[string]string{"k": "e", "actor": "u1"}}
+
+	// A row lock held elsewhere doesn't hold the listing up: it locks nothing.
+	lockRow(t, testPool, a)
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cases := []struct {
+		name  string
+		after string
+		limit int
+		want  []core.ListedResource
+	}{
+		{"an empty after starts at the first id", "", 10, []core.ListedResource{wantA, wantB, wantC, wantE}},
+		{"limit bounds the page", "", 2, []core.ListedResource{wantA, wantB}},
+		{"the next page follows the last id, past the tombstone", "b", 2, []core.ListedResource{wantC, wantE}},
+		{"an after that is no row's id", "bb", 10, []core.ListedResource{wantC, wantE}},
+		{"after the last id", "e", 2, nil},
+	}
+	for _, tc := range cases {
+		got, err := st.ListResources(lctx, "lr", tc.after, tc.limit)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(got) == 0 && len(tc.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: ListResources(lr, %q, %d) = %+v, want %+v", tc.name, tc.after, tc.limit, got, tc.want)
+		}
+	}
+
+	// It claims nothing and leaves every row as it was.
+	for _, res := range []model.Resource{a, b, c, e} {
+		requireOwner(t, testPool, res, owner{}, "after ListResources")
+		if _, _, _, since, _ := row(t, res); since != nil {
+			t.Fatalf("%s/%s: stale_since %v after ListResources, want none", res.Type, res.Id, since)
+		}
+	}
+}
+
 // register runs RegisterChanges and fails the test on error.
 func register(t *testing.T, st *Store, items ...core.Registration) core.Registered {
 	t.Helper()
