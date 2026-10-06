@@ -81,7 +81,8 @@ type pendingResource struct {
 	// meets it — each plan once, however often its listing repeats the
 	// resource. The resource settles when it hits 0: on documents it
 	// completes — every expected document and its version's edge set
-	// stored, stale mark cleared — and on nils it is deleted (gone).
+	// stored, stale mark cleared — and on nils it is deleted (gone), unless
+	// it is partial, which fails instead.
 	remaining int
 	// lastCounted is the Schema Version of the plan whose outcome counted
 	// last (0: none). Plans arrive in order, so an outcome of that version is
@@ -148,7 +149,8 @@ type pendingItem struct {
 // has flushed. A resource whose document is rejected is durably marked stale
 // instead of cleared, so the sweep recovers it, and the rebuild reports the
 // failure instead of success. A plan walk counts a plan's nil as that plan's
-// outcome too (gone): a resource every expected plan found gone is deleted,
+// outcome too (gone): a resource every expected plan found gone is deleted
+// unless it is partial (pendingResource.partial), which fails instead, and
 // one whose plans disagree fails. Its marks carry no metadata: the rebuild's
 // Metadata is the walk's fetch context, never a resource's own.
 type rebuildFlusher struct {

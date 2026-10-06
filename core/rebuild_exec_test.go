@@ -1377,6 +1377,48 @@ func TestRebuildAll_MultiPlan_FirstSightedByALaterPlan_Fails(t *testing.T) {
 	}
 }
 
+// L2.6 ruling R9 counts from the walk's first active plan, not its first
+// plan: a leading plan without an executer lists nothing, so an id the first
+// active plan lists is not partial.
+func TestRebuildAll_InactiveLeadingPlan_PartialCountsFromTheFirstActivePlan(t *testing.T) {
+	walk := func(t *testing.T, st *rebuildRecordingStore, plans ...projection.Plan) error {
+		t.Helper()
+		idx := mustNew(Config{Resources: threeVersionResources(), Plans: map[string][]projection.Plan{"product": plans}, ES: &captureBackend{}, Store: st})
+		return idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product"}})
+	}
+
+	t.Run("one active plan after an inactive one: completes", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		err := walk(t, st,
+			projection.Plan{Version: 1},
+			projection.Plan{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("X")}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if calls := st.callsSnapshot(); countPrefix(calls, "ClearStale:product/X:") != 1 || countPrefix(calls, "MarkStale:product/X") != 0 {
+			t.Fatalf("X must complete: %v", calls)
+		}
+	})
+
+	t.Run("two active plans after an inactive one: only the later plan's first sighting is partial", func(t *testing.T) {
+		st := &rebuildRecordingStore{}
+		err := walk(t, st,
+			projection.Plan{Version: 1},
+			projection.Plan{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("A")}}},
+			projection.Plan{Version: 3, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("A"), productDoc("B")}}})
+		if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
+			t.Fatalf("partial B must fail the walk once, got %v", err)
+		}
+		calls := st.callsSnapshot()
+		if countPrefix(calls, "ClearStale:product/A:") != 1 || countPrefix(calls, "MarkStale:product/A") != 0 {
+			t.Fatalf("A, listed by the first active plan, must complete: %v", calls)
+		}
+		if countPrefix(calls, "ClearStale:product/B:") != 0 || countPrefix(calls, "MarkStale:product/B") != 1 {
+			t.Fatalf("B, first listed by v3, is partial and must be marked once, not cleared: %v", calls)
+		}
+	})
+}
+
 // A multi-plan walk ignores a repeat of an outcome an id already completed
 // on: plan 2's listing repeats X after its document completed X (chunk size
 // 1 flushes each document as it is added), and the repeat is neither written
