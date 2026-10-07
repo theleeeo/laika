@@ -102,6 +102,8 @@ resource_config_path: "resources.yml"
 
 Every key maps directly to an environment variable by uppercasing and replacing `.` with `_` — for example, `es.addrs` → `ES_ADDRS` (comma-separated). The config file path itself is overridden with `APP_CONFIG_PATH`.
 
+The exception is `forward_walks` (the scheduled forward walks, see `example.indexer.yml`): it is a list, so it has no environment variables and is read only from the file.
+
 ### Resource DSL (`resources.yml`)
 
 This is where you define what gets indexed and how documents are assembled.

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -335,5 +336,63 @@ func TestLoadAppConfig_ForwardWalksAbsentByDefault(t *testing.T) {
 	}
 	if len(cfg.ForwardWalks) != 0 {
 		t.Fatalf("forward_walks in a file without the section = %#v, want none", cfg.ForwardWalks)
+	}
+}
+
+func TestLoadAppConfig_ForwardWalksInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		section string
+	}{
+		{name: "unknown key in an entry", section: `
+forward_walks:
+  - resource_type: product
+    enable: true
+`},
+		{name: "malformed duration", section: `
+forward_walks:
+  - resource_type: product
+    enabled: true
+    interval: 1 day
+`},
+		{name: "mapping where the list belongs", section: `
+forward_walks:
+  product:
+    enabled: true
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "indexer.yml")
+			if err := os.WriteFile(configPath, []byte(tc.section), 0o600); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+			cfg, err := loadAppConfig(configPath)
+			if err == nil {
+				t.Fatalf("loadAppConfig = %#v, want an error", cfg.ForwardWalks)
+			}
+			if strings.Contains(err.Error(), "needs a YAML config file") {
+				t.Errorf("error %q blames the file format of a YAML file", err)
+			}
+		})
+	}
+}
+
+func TestLoadAppConfig_ForwardWalksStrictnessScopedToSection(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+some_key_viper_ignores: true
+forward_walks:
+  - resource_type: product
+    enabled: true
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v (an unknown key outside forward_walks is viper's to ignore)", err)
+	}
+	if len(cfg.ForwardWalks) != 1 || !cfg.ForwardWalks[0].Enabled {
+		t.Fatalf("forward_walks = %#v, want the one enabled entry", cfg.ForwardWalks)
 	}
 }

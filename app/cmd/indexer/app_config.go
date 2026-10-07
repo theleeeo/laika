@@ -4,10 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
+	"github.com/goccy/go-yaml/ast"
 	"github.com/spf13/viper"
 )
 
@@ -226,17 +228,31 @@ func getStringSlice(v *viper.Viper, key string) []string {
 // readForwardWalks decodes the forward_walks section of the YAML config file
 // at path. Viper lowercases every map key it reads, those inside list items
 // included, which would turn a metadata key such as tenantId into tenantid;
-// decoding the section itself keeps each key as written.
+// decoding the section itself keeps each key as written. The section is
+// decoded strictly, so a misspelled key is an error rather than a walk that
+// silently isn't configured; the rest of the file is viper's.
 func readForwardWalks(path string) ([]forwardWalkConfig, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read app config forward_walks: %w", err)
 	}
 	var file struct {
-		ForwardWalks []forwardWalkConfig `yaml:"forward_walks"`
+		ForwardWalks ast.Node `yaml:"forward_walks"`
 	}
 	if err := yaml.Unmarshal(raw, &file); err != nil {
-		return nil, fmt.Errorf("decode app config forward_walks (the section needs a YAML config file): %w", err)
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".yml", ".yaml", ".json":
+			return nil, fmt.Errorf("decode app config forward_walks: %w", err)
+		default:
+			return nil, fmt.Errorf("decode app config forward_walks (the section needs a YAML config file): %w", err)
+		}
 	}
-	return file.ForwardWalks, nil
+	if file.ForwardWalks == nil {
+		return nil, nil
+	}
+	var walks []forwardWalkConfig
+	if err := yaml.NodeToValue(file.ForwardWalks, &walks, yaml.DisallowUnknownField()); err != nil {
+		return nil, fmt.Errorf("decode app config forward_walks: %w", err)
+	}
+	return walks, nil
 }
