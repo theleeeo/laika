@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core"
 )
 
@@ -147,10 +148,11 @@ func TestFederatedFanout_LegShapePerType(t *testing.T) {
 			t.Errorf("leg %d: expected primary word + primary infix + secondary clauses, got %d", i, len(shoulds))
 		}
 
-		// No _index pinning and no cross-Type groups: that is the point.
-		raw, _ := json.Marshal(body)
+		// No _index pinning and no cross-Type groups: that is the point. The
+		// only _index a leg names is its sort's tiebreaker.
+		raw, _ := json.Marshal(body["query"])
 		if strings.Contains(string(raw), "_index") {
-			t.Errorf("leg %d body pins _index: %s", i, raw)
+			t.Errorf("leg %d query pins _index: %s", i, raw)
 		}
 	}
 }
@@ -216,6 +218,26 @@ func TestFederatedFanout_MergesPagesAndCounts(t *testing.T) {
 	// Hits keep the concrete index names ES reported.
 	if res.Hits[0].Index != "product_search_v1" {
 		t.Errorf("hit index = %q, want concrete index name", res.Hits[0].Index)
+	}
+}
+
+// Each leg sorts as the merge does — score, index, resource_id — so the last
+// hit of a leg's window is the one the merge would rank there, with or
+// without a text query.
+func TestFederatedFanout_LegSortMatchesMerge(t *testing.T) {
+	for _, query := range []string{"q", ""} {
+		legs, _, _, err := captureFanout(t, core.FederatedSearchParams{
+			Query: query, FilterGroups: fedGroups(), PageSize: 25,
+		}, msearchResponse(legResponse("product_search_v1", 0), legResponse("order_search_v1", 0)))
+		if err != nil {
+			t.Fatalf("FederatedSearch: %v", err)
+		}
+		if len(legs) != 2 {
+			t.Fatalf("expected 2 legs, got %d", len(legs))
+		}
+		for i, leg := range legs {
+			require.Equal(t, wantFederatedSort, leg.body["sort"], "query %q leg %d", query, i)
+		}
 	}
 }
 

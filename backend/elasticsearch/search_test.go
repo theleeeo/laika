@@ -403,6 +403,17 @@ func TestSearch_QueryAndFilter_Both(t *testing.T) {
 
 // ---- sort / pagination tests ----
 
+// Every search sorts last on resource_id ascending, unmapped as a keyword, so
+// hits tied on everything before it keep one order across page requests.
+var (
+	wantScoreDescSort  = map[string]any{"_score": map[string]any{"order": "desc"}}
+	wantIndexAscSort   = map[string]any{"_index": map[string]any{"order": "asc"}}
+	wantResourceIDSort = map[string]any{resource.ResourceIDField: map[string]any{"order": "asc", "unmapped_type": "keyword"}}
+	// wantFederatedSort is the sort of every federated search body, single
+	// query and fan-out leg alike: the client-side merge's (score, index, id).
+	wantFederatedSort = []any{wantScoreDescSort, wantIndexAscSort, wantResourceIDSort}
+)
+
 func TestSearch_Sort_AscAndDesc(t *testing.T) {
 	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
@@ -415,40 +426,38 @@ func TestSearch_Sort_AscAndDesc(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	sortRaw, ok := body["sort"]
-	if !ok {
-		t.Fatal("expected sort key in body")
-	}
-	sorts := sortRaw.([]any)
-	if len(sorts) != 2 {
-		t.Fatalf("expected 2 sort clauses, got %d", len(sorts))
-	}
-
-	first := sorts[0].(map[string]any)["fields.name"].(map[string]any)
-	if first["order"] != "asc" {
-		t.Errorf("expected order=asc, got %v", first["order"])
-	}
-
-	second := sorts[1].(map[string]any)["fields.status"].(map[string]any)
-	if second["order"] != "desc" {
-		t.Errorf("expected order=desc, got %v", second["order"])
-	}
+	// The caller's sort, in order, then the resource_id tiebreaker.
+	require.Equal(t, []any{
+		map[string]any{"fields.name": map[string]any{"order": "asc"}},
+		map[string]any{"fields.status": map[string]any{"order": "desc"}},
+		wantResourceIDSort,
+	}, body["sort"])
 }
 
+// With no caller sort a search ranks by _score, then resource_id: a
+// filter-only query scores every hit the same, and without the tiebreaker
+// their order is ES-internal and changes between page requests.
+func TestSearch_Sort_NoneGiven_ScoreThenResourceID(t *testing.T) {
+	body, _, err := captureSearch(t, core.SearchRequest{PageSize: 10}, vcFlatOnly())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	require.Equal(t, []any{wantScoreDescSort, wantResourceIDSort}, body["sort"])
+}
+
+// Empty sort fields are skipped; a sort of only empty fields is no caller sort.
 func TestSearch_Sort_EmptyField_Skipped(t *testing.T) {
 	body, _, err := captureSearch(t, core.SearchRequest{
 		PageSize: 10,
 		Sort: []core.SortOption{
 			{Field: ""},
+			{Field: "", Desc: true},
 		},
 	}, vcFlatOnly())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if _, ok := body["sort"]; ok {
-		t.Error("expected no sort key when all sort fields are empty/nil")
-	}
+	require.Equal(t, []any{wantScoreDescSort, wantResourceIDSort}, body["sort"])
 }
 
 func TestSearch_Pagination_FromAndSize(t *testing.T) {
@@ -854,6 +863,17 @@ func TestFederatedSearch_QueryShapeAndSearchType(t *testing.T) {
 	if aggField != "_index" {
 		t.Errorf("agg field = %v, want _index", aggField)
 	}
+}
+
+// Single-query federated search orders by score, then index, then
+// resource_id — an id is unique only within a Type — with or without a text
+// query.
+func TestFederatedSearch_SortIsTotal(t *testing.T) {
+	body, _, _ := captureFederated(t, core.FederatedSearchParams{Query: "q", FilterGroups: fedGroups(), PageSize: 25})
+	require.Equal(t, wantFederatedSort, body["sort"])
+
+	filterOnly, _, _ := captureFederated(t, core.FederatedSearchParams{FilterGroups: fedGroups(), PageSize: 25})
+	require.Equal(t, wantFederatedSort, filterOnly["sort"])
 }
 
 func TestFederatedSearch_Pagination_LastPageInsideWindow(t *testing.T) {

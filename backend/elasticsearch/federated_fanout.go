@@ -24,13 +24,13 @@ import (
 // default query_then_fetch, so scores come from each index's local term
 // statistics and cross-Type comparability rests on the standardized search
 // fields rather than DFS. The merged ranking orders by score with a
-// deterministic (index, id) tie-break so page boundaries are stable. Counts
-// (spec D12) are each leg's hits.total, keyed by the group's alias (core
-// resolves aliases as well as concrete index names) — under ES's default
-// track_total_hits cap, the same looseness the single query's total has:
-// federated totals are tallies for a UI, not exact bookkeeping. A missing
-// index empties its own leg only, where the single query's 404 empties the
-// whole response.
+// deterministic (index, id) tie-break — the total order every leg also sorts
+// by in ES — so page boundaries are stable. Counts (spec D12) are each leg's
+// hits.total, keyed by the group's alias (core resolves aliases as well as
+// concrete index names) — under ES's default track_total_hits cap, the same
+// looseness the single query's total has: federated totals are tallies for a
+// UI, not exact bookkeeping. A missing index empties its own leg only, where
+// the single query's 404 empties the whole response.
 func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
 	// Every leg must over-fetch the full merged window from 0, because the
 	// merge cannot know in advance how the top of the combined ranking
@@ -148,7 +148,8 @@ func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchPara
 // leg fetches the full merged window from 0 — the merge needs each leg's
 // candidates for the requested page. hits.total feeds the per-Type counts
 // (D12) at ES's default track_total_hits accuracy; federated search does not
-// need exact totals.
+// need exact totals. A leg sorts by federatedSort, the merge's own order, so
+// the hits its window cuts off are the ones the merge would rank below it.
 func buildFanoutLegBody(p core.FederatedSearchParams, g core.IndexFilterGroup, globalFilters []any, window int) (map[string]any, error) {
 	filter := slices.Clone(globalFilters)
 	for _, f := range g.Filters {
@@ -171,6 +172,7 @@ func buildFanoutLegBody(p core.FederatedSearchParams, g core.IndexFilterGroup, g
 		"query": map[string]any{"bool": boolQ},
 		"from":  0,
 		"size":  window,
+		"sort":  federatedSort(),
 	}
 	if !p.IncludeSource {
 		body["_source"] = false

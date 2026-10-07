@@ -38,6 +38,37 @@ func pagingWindow(page, pageSize int32) (from, window int64, err error) {
 	return from, window, nil
 }
 
+// scoreDescSort ranks by relevance, the sort a search uses when the caller
+// gives none.
+func scoreDescSort() map[string]any {
+	return map[string]any{"_score": map[string]any{"order": "desc"}}
+}
+
+// resourceIDSort is the last clause of every search's sort, which makes the
+// order total: hits tied on everything before it — every hit of a filter-only
+// query ties on _score — keep one order across page requests instead of ES's
+// internal one, which moves with rewrites, merges and replicas. unmapped_type
+// lets an index without the field answer instead of failing (per shard and
+// silently, in a multi-index search).
+func resourceIDSort() map[string]any {
+	return map[string]any{resource.ResourceIDField: map[string]any{"order": "asc", "unmapped_type": "keyword"}}
+}
+
+// federatedSort is the sort of every federated search body, the single query
+// and each fan-out leg alike: score, then index — an id is unique only within
+// a Type — then resource_id, the same total order the fan-out merge applies
+// client-side.
+func federatedSort() []any {
+	return []any{
+		scoreDescSort(),
+		map[string]any{"_index": map[string]any{"order": "asc"}},
+		resourceIDSort(),
+	}
+}
+
+// Search runs one resource's search page: the caller's sort, or _score
+// descending when it gives none, then resourceIDSort, so every search has a
+// total order.
 func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias string, vc *resource.VersionConfig) (core.SearchResponse, error) {
 	start := time.Now()
 	logger := core.LoggerFromContext(ctx)
@@ -88,24 +119,23 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		"size":  req.PageSize,
 	}
 
-	if len(req.Sort) > 0 {
-		var sorts []any
-		for _, srt := range req.Sort {
-			if srt.Field == "" {
-				continue
-			}
-			order := "asc"
-			if srt.Desc {
-				order = "desc"
-			}
-			sorts = append(sorts, map[string]any{
-				srt.Field: map[string]any{"order": order},
-			})
+	var sorts []any
+	for _, srt := range req.Sort {
+		if srt.Field == "" {
+			continue
 		}
-		if len(sorts) > 0 {
-			body["sort"] = sorts
+		order := "asc"
+		if srt.Desc {
+			order = "desc"
 		}
+		sorts = append(sorts, map[string]any{
+			srt.Field: map[string]any{"order": order},
+		})
 	}
+	if len(sorts) == 0 {
+		sorts = append(sorts, scoreDescSort())
+	}
+	body["sort"] = append(sorts, resourceIDSort())
 
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -251,6 +281,7 @@ func (c *Client) federatedSingle(ctx context.Context, p core.FederatedSearchPara
 		"query": map[string]any{"bool": boolQ},
 		"from":  from,
 		"size":  p.PageSize,
+		"sort":  federatedSort(),
 		// Per-resource counts (D12): one bucket per concrete index, folded back
 		// to Types by core. size covers at most one index per requested Type.
 		"aggs": map[string]any{
