@@ -242,10 +242,10 @@ const failedAttemptsErrorLevel = 5
 // in a row. A row with a change of its own registered since the claim is
 // released without a backoff (ReleaseFailed returns it with no attempts) and
 // logged at Warn as such; a row whose ownership was lost meanwhile is
-// neither released nor backed off, and is logged without one. The mark stays either way. A
-// failure reached once ctx has ended — a cancellation or shutdown cut the
-// work short — is not the work's, so it releases through releaseOwners
-// without a backoff. The release runs on a context detached from ctx's
+// neither released nor backed off, and is logged without one. The mark
+// stays either way. A failure reached once ctx has ended — a cancellation
+// or shutdown cut the work short — is not the work's, so it releases
+// through releaseOwners without a backoff. The release runs on a context detached from ctx's
 // cancellation, as releaseOwners' does; a failed one is logged per entry,
 // and each ownership expires with its lease.
 func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned, cause error) {

@@ -234,9 +234,11 @@ type SweepBackoff struct {
 type BackedOff struct {
 	model.Resource
 	// Attempts is the row's failures in a row, this one included: its
-	// sweep_attempts after the release.
+	// sweep_attempts after the release. 0 means the row was released without
+	// a backoff: a change of its own was registered since the claim.
 	Attempts int
-	// After is when the sweep may serve the row again: its sweep_after.
+	// After is when the sweep may serve the row again: its sweep_after. Zero
+	// when Attempts is 0.
 	After time.Time
 }
 
