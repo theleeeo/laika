@@ -179,8 +179,9 @@ func (t *TestSuite) pgNow() time.Time {
 
 // Test_SweepStale_BacksOffAFailingResource: a/1, whose fetch always fails,
 // was stale before a/2, and the sweep serves one resource a pass. The first
-// pass takes a/1 and its failed build backs it off, so the next pass serves
-// a/2 instead of a/1 again. Each further failure of a/1 backs it off by
+// pass takes a/1 and its failed build backs it off: a pass skips a/1 while
+// its sweep_after is ahead, and once it has passed a/1 queues behind a/2's
+// mark, so the next pass serves a/2 instead of a/1 again. Each further failure of a/1 backs it off by
 // SweepBackoff doubled per attempt, up to SweepBackoffMax. Its backoff is
 // read against Postgres's clock: the failure's now() falls between the
 // clock read before the pass and the one after it, so sweep_after minus the
@@ -229,9 +230,22 @@ func (t *TestSuite) Test_SweepStale_BacksOffAFailingResource() {
 	t.Require().NotNil(t.staleSince("a", "2"), "pass 1 served a/1 only")
 	t.Require().False(t.docExists("a", "2"))
 
-	// Pass 2: a/1 is backed off — skipped while its sweep_after is ahead, and
-	// behind a/2's mark after — so the pass serves a/2.
-	n, err := x.SweepStale(ctx, 0, 1)
+	// A backed-off row is skipped while its sweep_after is ahead: with a/1's
+	// an hour ahead, a pass whose threshold (90s) only a/1's mark (2 minutes
+	// old) passes serves nothing.
+	_, err = t.pool.Exec(ctx, `UPDATE resources SET sweep_after = now() + interval '1 hour' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
+	n, err := x.SweepStale(ctx, 90*time.Second, 100)
+	t.Require().NoError(err)
+	t.Require().Zero(n, "a/1 is skipped while its sweep_after is ahead")
+	t.Require().Equal(1, t.fakeProvider.FetchCount("a", "1"))
+
+	// Pass 2: a/1's backoff has passed (its sweep_after backdated), so both
+	// are eligible; a/1's turn is now its sweep_after, behind a/2's mark, so
+	// the pass serves a/2 though a/1 was stale first.
+	_, err = t.pool.Exec(ctx, `UPDATE resources SET sweep_after = now() - interval '1 millisecond' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
+	n, err = x.SweepStale(ctx, 0, 1)
 	t.Require().NoError(err)
 	t.Require().Equal(1, n)
 	t.Require().Equal(1, t.fakeProvider.FetchCount("a", "1"), "pass 2 must not retry a/1")
