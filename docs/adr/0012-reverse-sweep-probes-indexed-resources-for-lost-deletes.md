@@ -34,9 +34,10 @@ _Accepted, 2026-10-06._
 > - **Paced as the sweep is.** A walk carries its type's pacing
 >   (`ResourceSelector.Pacing`; an explicit rebuild has none). Its plans are
 >   asked for pages of `PageSize` (`projection.BuildRequest.PageSize`). Before
->   taking each page, a later plan's first page included, it waits out the
->   rest of the previous page's `PageInterval`, measured from that page's
->   start, and then waits while the build pool is pressured. Pacing delays
+>   taking each page, a later plan's first page included, it flushes what it
+>   has begun, so no begun resource waits unwritten (seams S16), then waits
+>   out the rest of the previous page's `PageInterval`, measured from that
+>   page's start, and then while the build pool is pressured. Pacing delays
 >   when the walk takes a page, not the plan's fetch of it, and a plan may
 >   ignore the page size (seams S29 in the multirepo's records).
 > - **A walk whose failures are all marked is done.** Its failed resources are
