@@ -95,8 +95,8 @@ pool:
 # partition the source); no metadata means one walk with none. interval is how
 # often a run starts (default 24h), page_size the listing page size each walk
 # asks for (default 100), and page_interval a page's rate budget: a page that
-# finishes sooner waits out the rest (default 1s). Leave a value out, or 0, for
-# its default. Explicit rebuilds are not paced. One entry per type; resource
+# finishes sooner waits out the rest (default 1s). Leave a value out, or set it
+# to 0 (a duration to 0s), for its default. Explicit rebuilds are not paced. One entry per type; resource
 # types and metadata keys keep their case. No env overrides (see above).
 # forward_walks:
 #   - resource_type: product

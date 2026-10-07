@@ -360,6 +360,11 @@ forward_walks:
   product:
     enabled: true
 `},
+		{name: "section key in another case", section: `
+Forward_Walks:
+  - resource_type: product
+    enabled: true
+`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			configPath := filepath.Join(t.TempDir(), "indexer.yml")

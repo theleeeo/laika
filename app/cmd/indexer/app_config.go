@@ -58,7 +58,7 @@ type appConfig struct {
 
 // forwardWalkConfig is one forward_walks entry: the scheduled forward walk of
 // one resource type (core.ForwardWalkConfig). Zero values leave core's
-// defaults.
+// defaults; a duration's zero is written 0s, since a bare 0 doesn't decode.
 type forwardWalkConfig struct {
 	ResourceType string        `yaml:"resource_type"`
 	Enabled      bool          `yaml:"enabled"`
@@ -248,7 +248,9 @@ func readForwardWalks(path string) ([]forwardWalkConfig, error) {
 		}
 	}
 	if file.ForwardWalks == nil {
-		return nil, nil
+		// Viper found the section matching case-insensitively (InConfig), but
+		// it isn't spelled forward_walks: an error, not walks left out.
+		return nil, errors.New("decode app config forward_walks: write the section's key as forward_walks, in lower case")
 	}
 	var walks []forwardWalkConfig
 	if err := yaml.NodeToValue(file.ForwardWalks, &walks, yaml.DisallowUnknownField()); err != nil {
