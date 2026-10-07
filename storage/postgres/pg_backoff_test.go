@@ -174,6 +174,71 @@ func TestReleaseFailed_ReleasesAndBacksOffDoublingUpToTheCap(t *testing.T) {
 	}
 }
 
+// A registration of the resource itself accepted while its owned build ran
+// reset the backoff and is served by the owner's follow-up; when that build
+// fails, the change is not made to wait: the row is released without a
+// backoff and returned with Attempts 0. A Parent mark or MarkStale since the
+// claim is no such change: the row backs off as usual.
+func TestReleaseFailed_DoesNotBackOffARowRegisteredSinceTheClaim(t *testing.T) {
+	st := NewStore(testPool)
+	r := func(id string) model.Resource { return model.Resource{Type: "bo-rr", Id: id} }
+	registered, parented, marked, child := r("registered"), r("parented"), r("marked"), r("child")
+	relate(t, [2]model.Resource{parented, child})
+	reg := register(t, st,
+		core.Registration{Resource: registered, Version: 1},
+		core.Registration{Resource: parented, Version: 1},
+		core.Registration{Resource: marked, Version: 1})
+	tokens := map[model.Resource]int64{}
+	for i, res := range []model.Resource{registered, parented, marked} {
+		tokens[res] = reg.Items[i].Token
+		if tokens[res] == 0 {
+			t.Fatalf("%s: the registration must claim its row", res.Id)
+		}
+		backOff(t, testPool, res, 2, "-1 minute") // an earlier failure
+	}
+
+	// Under the live owners: the resource's own change, a Parent mark, a MarkStale.
+	if re := register(t, st, core.Registration{Resource: registered, Version: 2}).Items[0]; !re.Accepted || re.Token != 0 {
+		t.Fatalf("the change under a live owner: %+v, want accepted, unclaimed", re)
+	}
+	requireNoBackoff(t, testPool, registered, "the resource's own registration resets the backoff")
+	if got := register(t, st, core.Registration{Resource: child, Version: 1}); len(got.Parents) != 1 || got.Parents[0].Token != 0 {
+		t.Fatalf("the child's registration must mark its Parent without claiming it: %+v", got.Parents)
+	}
+	markUnclaimed(t, st, marked)
+	_, _, regSeq, regSince, _ := row(t, registered)
+
+	b := core.SweepBackoff{Base: time.Minute, Max: time.Hour}
+	got, before, after := releaseFailed(t, st, testPool, []core.Owned{
+		{Resource: registered, Token: tokens[registered]},
+		{Resource: parented, Token: tokens[parented]},
+		{Resource: marked, Token: tokens[marked]},
+	}, b)
+	byID := map[string]core.BackedOff{}
+	for _, g := range got {
+		byID[g.Id] = g
+	}
+	if len(got) != 3 || len(byID) != 3 {
+		t.Fatalf("got %+v, want all three rows, each once", got)
+	}
+	if g := byID["registered"]; g.Resource != registered || g.Attempts != 0 || !g.After.IsZero() {
+		t.Fatalf("registered since the claim: got %+v, want Attempts 0 and a zero After", g)
+	}
+	requireNoBackoff(t, testPool, registered, "a row registered since the claim is not backed off")
+	requireOwner(t, testPool, registered, owner{}, "a row registered since the claim is still released")
+	if _, _, seq, since, _ := row(t, registered); seq != regSeq || since == nil || !since.Equal(*regSince) {
+		t.Fatalf("the mark must stay: seq %d (was %d) since %v (was %v)", seq, regSeq, since, regSince)
+	}
+	for _, res := range []model.Resource{parented, marked} {
+		g := byID[res.Id]
+		if g.Resource != res || g.Attempts != 3 {
+			t.Fatalf("%s: got %+v, want backed off at attempt 3", res.Id, g)
+		}
+		requireTurnIn(t, g, before, after, 4*time.Minute)
+		requireOwner(t, testPool, res, owner{}, res.Id+": released")
+	}
+}
+
 func TestReleaseFailed_ReleasesOnlyMatchingTokensAndReturnsThoseRows(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)

@@ -704,8 +704,17 @@ func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 // sweep_after now() + min(backoff.Base × 2^(n−1), backoff.Max), which
 // ListStale waits for. The count saturates at the integer column's maximum,
 // 2^31−1, rather than failing the batch. The stale mark stays. It returns
-// the rows it backed off. It locks the rows in (type, id) order first, as
+// every row it released. It locks the rows in (type, id) order first, as
 // the marks do (seams S4).
+//
+// A row for which a registration of the resource itself was accepted since
+// the claim is released without a backoff: that registration reset the
+// columns, and its change is not made to wait for this build's failure. It
+// is returned with Attempts 0 and a zero After. Such a row's change_seq is
+// above the owner token: the token is the stale_seq the claim saw, and
+// change_seq is never above stale_seq at a claim. A Parent mark or MarkStale
+// bumps only stale_seq, so a row that got only those since the claim backs
+// off.
 //
 // The delay is computed in microseconds as double precision with the
 // exponent held at 62 at most: base × 2^62 exceeds every Max a
@@ -721,14 +730,20 @@ func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff c
 		`WITH `+lockedInput+`
 		 UPDATE resources r
 		 SET owner_seq = NULL, owner_since = NULL,
-		     sweep_attempts = LEAST(COALESCE(r.sweep_attempts, 0), 2147483646) + 1,
-		     sweep_after = now() + LEAST(
-		         $4::bigint::double precision * power(2::double precision, LEAST(COALESCE(r.sweep_attempts, 0), 62)),
-		         $5::bigint::double precision
-		     ) * interval '1 microsecond'
+		     sweep_attempts = CASE WHEN r.change_seq <= x.token
+		         THEN LEAST(COALESCE(r.sweep_attempts, 0), 2147483646) + 1
+		         ELSE r.sweep_attempts END,
+		     sweep_after = CASE WHEN r.change_seq <= x.token
+		         THEN now() + LEAST(
+		             $4::bigint::double precision * power(2::double precision, LEAST(COALESCE(r.sweep_attempts, 0), 62)),
+		             $5::bigint::double precision
+		         ) * interval '1 microsecond'
+		         ELSE r.sweep_after END
 		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token) CROSS JOIN (SELECT count(*) FROM locked) AS l
 		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token
-		 RETURNING r.type, r.id, r.sweep_attempts, r.sweep_after`,
+		 RETURNING r.type, r.id,
+		     CASE WHEN r.change_seq <= x.token THEN r.sweep_attempts ELSE 0 END,
+		     CASE WHEN r.change_seq <= x.token THEN r.sweep_after END`,
 		types, ids, tokens, backoff.Base.Microseconds(), backoff.Max.Microseconds(),
 	)
 	if err != nil {
@@ -738,8 +753,12 @@ func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff c
 	var out []core.BackedOff
 	for rows.Next() {
 		var b core.BackedOff
-		if err := rows.Scan(&b.Type, &b.Id, &b.Attempts, &b.After); err != nil {
+		var after *time.Time // NULL for a row registered since the claim
+		if err := rows.Scan(&b.Type, &b.Id, &b.Attempts, &after); err != nil {
 			return nil, err
+		}
+		if after != nil {
+			b.After = *after
 		}
 		out = append(out, b)
 	}

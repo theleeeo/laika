@@ -110,11 +110,16 @@ type Store interface {
 	// in the same statement. The row's sweep_attempts becomes n, one more
 	// than before, and its sweep_after now() + min(backoff.Base × 2^(n−1),
 	// backoff.Max); the exponent stops growing once the delay reaches Max,
-	// so no attempt count overflows. The stale mark stays. It returns the
-	// rows it backed off, each with its new attempt count; a row whose
-	// ownership was lost is neither released nor backed off. ListStale skips
-	// a row until its sweep_after, and a successful build or delete, or a
-	// registration of the resource itself, resets both columns (ADR 0008).
+	// so no attempt count overflows. The stale mark stays. A row for which a
+	// registration of the resource itself (RegisterChanges' own item, not a
+	// Parent mark or MarkStale) was accepted since the claim is released but
+	// not backed off: that registration reset its backoff, and its change is
+	// tried at once. It returns every row it released: a backed-off one with
+	// its new attempt count, one registered since the claim with Attempts 0
+	// and a zero After. A row whose ownership was lost is neither released
+	// nor backed off, and not returned. ListStale skips a row until its
+	// sweep_after, and a successful build or delete, or a registration of
+	// the resource itself, resets both columns (ADR 0008).
 	ReleaseFailed(ctx context.Context, owned []Owned, backoff SweepBackoff) ([]BackedOff, error)
 	// NextChangeSeq takes a value of the Change Sequence: the start of a
 	// Rebuild plan walk, taken before the walk fetches its first page.
