@@ -28,10 +28,14 @@ CREATE TABLE IF NOT EXISTS resources (
     metadata JSONB,                         -- the resource's own: its last registration's, or its plans' report while it has none (NULL or {}); a mark never writes it
     owner_seq BIGINT,                       -- Build owner token: the stale_seq its claim saw; NULL = no owner
     owner_since TIMESTAMPTZ,                -- when the owner last claimed or renewed; its lease runs from here
+    sweep_attempts INTEGER,                 -- failed owned builds or deletes in a row (ReleaseFailed); NULL = none since the last success or own registration
+    sweep_after TIMESTAMPTZ,                -- the sweep's next turn after the last such failure (ListStale skips the row until then); NULL = never failed
     UNIQUE (type, id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources (stale_since)
+-- ListStale's order: a row's turn is its backoff's sweep_after once a build
+-- of it failed, else its stale mark.
+CREATE INDEX IF NOT EXISTS idx_resources_stale ON resources ((COALESCE(sweep_after, stale_since)))
     WHERE stale_since IS NOT NULL;
 
 -- The edges of the Relation graph, Parent (resource) to Child (related), one

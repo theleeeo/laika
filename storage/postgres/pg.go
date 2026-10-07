@@ -289,6 +289,12 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // its own registrations and, while it has none, its plans' report
 // (ReplaceEdges); an owned build runs with what BeginBuild reads.
 //
+// The item upsert also resets the row's backoff (sweep_attempts and
+// sweep_after, set by ReleaseFailed), so a resource that changes is swept at
+// its mark's turn again; a Parent mark leaves it, so a busy child can't keep
+// a Parent whose builds keep failing at the front of the sweep. A stale
+// item writes nothing, so it resets nothing.
+//
 // Every accepted row — upsert, version-0 item or delete — is stamped with a
 // fresh Change Sequence value, which is both its change_seq and its mark's
 // stale_seq; a rejected item keeps its row's, and a marked Parent keeps its
@@ -368,7 +374,9 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		         stale_since = COALESCE(r.stale_since, now()),
 		         metadata = EXCLUDED.metadata,
 		         owner_seq = CASE WHEN `+claimable("$6")+` THEN EXCLUDED.stale_seq ELSE r.owner_seq END,
-		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END
+		         owner_since = CASE WHEN `+claimable("$6")+` THEN now() ELSE r.owner_since END,
+		         sweep_attempts = NULL,
+		         sweep_after = NULL
 		     WHERE EXCLUDED.deleted OR EXCLUDED.version = 0 OR r.version < EXCLUDED.version
 		     RETURNING r.type, r.id, r.stale_seq, r.owner_seq IS NOT DISTINCT FROM r.stale_seq AS claimed
 		 ),
@@ -690,10 +698,51 @@ func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 	return err
 }
 
-// ReleaseFailed releases the ownerships of a failed owned build or delete
-// and backs their rows off (core.Store.ReleaseFailed).
+// ReleaseFailed drops every given ownership whose token is still the row's
+// owner token, as ReleaseOwners does, and backs each of those rows off in
+// the same statement: sweep_attempts becomes n, one more than before, and
+// sweep_after now() + min(backoff.Base × 2^(n−1), backoff.Max), which
+// ListStale waits for. The stale mark stays. It returns the rows it backed
+// off. It locks the rows in (type, id) order first, as the marks do (seams
+// S4).
+//
+// The delay is computed in microseconds as double precision with the
+// exponent held at 62 at most: base × 2^62 exceeds every Max a
+// time.Duration can hold once base is a microsecond or more, so the cap
+// decides from there on as it would with the exponent unbounded, and no
+// attempt count overflows the arithmetic or the interval.
 func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff core.SweepBackoff) ([]core.BackedOff, error) {
-	return nil, errors.New("ReleaseFailed: not implemented")
+	if len(owned) == 0 {
+		return nil, nil
+	}
+	types, ids, tokens := ownedArrays(owned)
+	rows, err := s.pool.Query(ctx,
+		`WITH `+lockedInput+`
+		 UPDATE resources r
+		 SET owner_seq = NULL, owner_since = NULL,
+		     sweep_attempts = COALESCE(r.sweep_attempts, 0) + 1,
+		     sweep_after = now() + LEAST(
+		         $4::bigint::double precision * power(2::double precision, LEAST(COALESCE(r.sweep_attempts, 0), 62)),
+		         $5::bigint::double precision
+		     ) * interval '1 microsecond'
+		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token) CROSS JOIN (SELECT count(*) FROM locked) AS l
+		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token
+		 RETURNING r.type, r.id, r.sweep_attempts, r.sweep_after`,
+		types, ids, tokens, backoff.Base.Microseconds(), backoff.Max.Microseconds(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []core.BackedOff
+	for rows.Next() {
+		var b core.BackedOff
+		if err := rows.Scan(&b.Type, &b.Id, &b.Attempts, &b.After); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
 }
 
 // NextChangeSeq takes a value of the Change Sequence.
@@ -731,12 +780,18 @@ func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) 
 }
 
 // ClearStale clears the stale mark, and any ownership with it, only if no
-// newer change arrived since the build captured staleSeq. A moved seq makes
-// this a no-op, leaving the row stale for its owner's follow-up or the sweep.
+// newer change arrived since the build captured staleSeq. A moved seq leaves
+// the mark and the ownership, for the owner's follow-up or the sweep. Either
+// way the build succeeded, so it resets the row's backoff (sweep_attempts
+// and sweep_after); a row with a moved seq and no backoff is not written.
 func (s *Store) ClearStale(ctx context.Context, resource model.Resource, staleSeq int64) error {
 	_, err := s.pool.Exec(ctx,
-		`UPDATE resources SET stale_since = NULL, owner_seq = NULL, owner_since = NULL
-		 WHERE type=$1 AND id=$2 AND stale_seq=$3`,
+		`UPDATE resources
+		 SET stale_since = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_since END,
+		     owner_seq = CASE WHEN stale_seq = $3 THEN NULL ELSE owner_seq END,
+		     owner_since = CASE WHEN stale_seq = $3 THEN NULL ELSE owner_since END,
+		     sweep_attempts = NULL, sweep_after = NULL
+		 WHERE type=$1 AND id=$2 AND (stale_seq = $3 OR sweep_attempts IS NOT NULL OR sweep_after IS NOT NULL)`,
 		resource.Type, resource.Id, staleSeq,
 	)
 	return err
@@ -745,10 +800,12 @@ func (s *Store) ClearStale(ctx context.Context, resource model.Resource, staleSe
 // FinishOwned finishes an owned build in one statement: a settled mark
 // (stale_seq still staleSeq) is cleared with its ownership whatever the
 // token; a moved one is re-claimed for a follow-up if token is still the
-// owner token. The WHERE is re-checked against the latest row version when a
-// concurrent mark committed after the statement's snapshot, so a mark that
-// lands while it waits for the row lock moves it into the re-claim branch
-// rather than being cleared.
+// owner token. Both branches reset the row's backoff (sweep_attempts and
+// sweep_after): the build succeeded. A finish whose ownership was lost to a
+// moved mark changes nothing, the backoff included. The WHERE is re-checked
+// against the latest row version when a concurrent mark committed after the
+// statement's snapshot, so a mark that lands while it waits for the row lock
+// moves it into the re-claim branch rather than being cleared.
 func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
 	var f core.FollowUp
 	var owner *int64
@@ -756,7 +813,8 @@ func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleS
 		`UPDATE resources
 		 SET stale_since = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_since END,
 		     owner_seq = CASE WHEN stale_seq = $3 THEN NULL ELSE stale_seq END,
-		     owner_since = CASE WHEN stale_seq = $3 THEN NULL ELSE now() END
+		     owner_since = CASE WHEN stale_seq = $3 THEN NULL ELSE now() END,
+		     sweep_attempts = NULL, sweep_after = NULL
 		 WHERE type=$1 AND id=$2 AND (stale_seq = $3 OR ($4::bigint <> 0 AND owner_seq = $4))
 		 RETURNING owner_seq, deleted`,
 		resource.Type, resource.Id, staleSeq, token,
@@ -778,6 +836,14 @@ func (s *Store) FinishOwned(ctx context.Context, resource model.Resource, staleS
 // re-claims the row for its follow-up. The two statements run in order, each
 // on its own snapshot, so a re-create that commits while the delete waits for
 // the row lock is seen by the re-claim.
+//
+// When the seq moved, the second statement also resets the row's backoff
+// (sweep_attempts and sweep_after), whatever the token: the delete
+// succeeded. It locks the row first (cur) and decides the re-claim on the
+// row it locked, so it returns that decision: Postgres 17 has no RETURNING
+// OLD, and the row it leaves can't tell a re-claim from another owner's
+// claim at the same stale_seq. A row with no backoff that it doesn't
+// re-claim is not written; the delete branch takes the backoff with the row.
 func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (core.FollowUp, error) {
 	tag, err := s.pool.Exec(ctx,
 		`DELETE FROM resources WHERE type=$1 AND id=$2 AND stale_seq=$3`,
@@ -787,25 +853,42 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 		return core.FollowUp{}, err
 	}
 	var f core.FollowUp
+	var reclaimed bool
+	var owner *int64 // NULL when the row is unowned and only its backoff was reset
 	err = s.pool.QueryRow(ctx,
-		`UPDATE resources SET owner_seq = stale_seq, owner_since = now()
-		 WHERE type=$1 AND id=$2 AND stale_seq <> $3 AND $4::bigint <> 0 AND owner_seq = $4
-		 RETURNING owner_seq, deleted`,
+		`WITH cur AS MATERIALIZED (
+		     SELECT ($4::bigint <> 0 AND owner_seq IS NOT DISTINCT FROM $4) AS reclaim
+		     FROM resources WHERE type=$1 AND id=$2 AND stale_seq <> $3
+		     FOR UPDATE
+		 )
+		 UPDATE resources r
+		 SET owner_seq = CASE WHEN cur.reclaim THEN r.stale_seq ELSE r.owner_seq END,
+		     owner_since = CASE WHEN cur.reclaim THEN now() ELSE r.owner_since END,
+		     sweep_attempts = NULL, sweep_after = NULL
+		 FROM cur
+		 WHERE r.type=$1 AND r.id=$2 AND (cur.reclaim OR r.sweep_attempts IS NOT NULL OR r.sweep_after IS NOT NULL)
+		 RETURNING cur.reclaim, r.owner_seq, r.deleted`,
 		resource.Type, resource.Id, staleSeq, token,
-	).Scan(&f.Token, &f.Deleted)
-	if errors.Is(err, pgx.ErrNoRows) {
+	).Scan(&reclaimed, &owner, &f.Deleted)
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !reclaimed) {
 		return core.FollowUp{}, nil
 	}
 	if err != nil {
 		return core.FollowUp{}, err
 	}
+	f.Token = *owner
 	return f, nil
 }
 
 // ListStale returns up to limit resources whose stale mark is older than
-// before and that have no live owner, oldest first, including delete
-// tombstones, and claims each one in the same statement at its current
-// stale_seq (no bump), which is its Token. It returns no metadata: the build
+// before, whose turn has come and that have no live owner, earliest turn
+// first, including delete tombstones, and claims each one in the same
+// statement at its current stale_seq (no bump), which is its Token. A row's
+// turn is its stale mark or, once an owned build or delete of it failed
+// (ReleaseFailed), its sweep_after: a row whose sweep_after is later than
+// now() is skipped, and one whose turn has come queues behind the rows
+// marked before it, however old its own mark is (idx_resources_stale
+// follows that order). The claim leaves the backoff to the build's finish. It returns no metadata: the build
 // that serves an entry reads the row's at BeginBuild. The candidates are
 // locked FOR UPDATE SKIP LOCKED inside the claiming UPDATE, so of two
 // concurrent sweeps only one claims a row: the other skips it while it is
@@ -815,17 +898,18 @@ func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, leas
 	rows, err := s.pool.Query(ctx,
 		`WITH candidates AS (
 		     SELECT r.type, r.id FROM resources r
-		     WHERE r.stale_since IS NOT NULL AND r.stale_since < $1 AND `+claimable("$3")+`
-		     ORDER BY r.stale_since
+		     WHERE r.stale_since IS NOT NULL AND r.stale_since < $1
+		       AND (r.sweep_after IS NULL OR r.sweep_after <= now()) AND `+claimable("$3")+`
+		     ORDER BY COALESCE(r.sweep_after, r.stale_since)
 		     LIMIT $2
 		     FOR UPDATE SKIP LOCKED
 		 ),
 		 claimed AS (
 		     UPDATE resources r SET owner_seq = r.stale_seq, owner_since = now()
 		     FROM candidates c WHERE r.type = c.type AND r.id = c.id
-		     RETURNING r.type, r.id, r.stale_seq, r.deleted, r.stale_since
+		     RETURNING r.type, r.id, r.stale_seq, r.deleted, COALESCE(r.sweep_after, r.stale_since) AS turn
 		 )
-		 SELECT type, id, stale_seq, deleted FROM claimed ORDER BY stale_since`,
+		 SELECT type, id, stale_seq, deleted FROM claimed ORDER BY turn`,
 		before, limit, lease.Microseconds(),
 	)
 	if err != nil {
