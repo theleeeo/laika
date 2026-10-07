@@ -2,6 +2,57 @@
 
 _Accepted, 2026-10-06._
 
+> **Note (2026-10-07, runbook step L2.5):** the other direction is built, the
+> **forward walk**. The reverse sweep finds what the source no longer has; the
+> forward walk finds what Laika never heard of, a resource created or changed
+> at its source without a notification, by walking a configured type from its
+> source on a schedule. It is Rebuild walks and adds no build path.
+>
+> - **Configured per type.** `core.Config.ForwardWalks` maps a resource type
+>   to its `ForwardWalkConfig`: `Interval` (default 24h), `PageSize` (default
+>   100), `PageInterval` (default 1s), and `Metadata`, a function called at
+>   each run that returns the metadata maps the run walks with, so an embedder
+>   can derive them. A nil function is one walk with no metadata; one that
+>   returns no maps walks nothing that run, with a warning. `core.New` rejects
+>   an entry for a type the resource configs don't have, negative values, and
+>   a page size above the provider contract's `int32`.
+> - **Scheduled and run.** `EnsureForwardWalkSchedules` creates one schedule
+>   per entry, `laika-forward-walk-<type>`, every `Interval`, overlap _skip_,
+>   and, like `EnsureReverseSweepSchedules`, only creates. Each run is a
+>   `ForwardWalk` workflow: its `ForwardWalkSelectors` activity calls the
+>   `Metadata` function, and the workflow starts one `RebuildWalk` child per
+>   map, each walking the whole type with the map as its metadata, one after
+>   another, so the type's rate budget holds per type. A type the worker
+>   can't walk, unknown or without an entry, fails the run without retrying.
+>   `ForwardWalkNow` is the run's body in-process, as `RebuildNow` is
+>   `RebuildWalk`'s.
+> - **A map is the walk's actor and nothing else.** An actor lists only what
+>   it can see, so an embedder whose actors partition the source returns one
+>   map per actor. A row's metadata stays its own, its registrations' or else
+>   its plans' report (ADR 0008's L2.3 note), never the walk's map. A resource several actors see is built once
+>   per walk that lists it, and the Build Sequence orders the writes.
+> - **Paced as the sweep is.** A walk carries its type's pacing
+>   (`ResourceSelector.Pacing`; an explicit rebuild has none). Its plans are
+>   asked for pages of `PageSize` (`projection.BuildRequest.PageSize`). Before
+>   taking each page, a later plan's first page included, it waits out the
+>   rest of the previous page's `PageInterval`, measured from that page's
+>   start, and then waits while the build pool is pressured. Pacing delays
+>   when the walk takes a page, not the plan's fetch of it, and a plan may
+>   ignore the page size (seams S29 in the multirepo's records).
+> - **A walk whose failures are all marked is done.** Its failed resources are
+>   durably marked stale for the sweep, so `RunRebuild` fails it with the
+>   non-retryable `RebuildMarkedFailures` error ([ADR
+>   0011](./0011-resumable-rebuild-walks-via-heartbeat-cursors.md)'s L2.5
+>   note); the run counts its resources in `ForwardWalkResult.FailedResources`
+>   and logs them. Any other failure of a walk fails the run, once every walk
+>   has run.
+> - **The app** configures it in `indexer.yml`'s `forward_walks` list, with
+>   static metadata maps, and ensures the schedules at startup.
+>
+> The consequence "It heals nothing" below names the forward walk as what
+> heals; it now does so for a type configured for it, at its next run that
+> lists the resource.
+
 Laika's durability has had two legs.
 [ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md): concurrent builds
 and deletes of a resource land in Build Sequence order, and a build that raced a change

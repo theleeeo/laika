@@ -2,6 +2,32 @@
 
 _Accepted, 2026-09-04._
 
+> **Note (2026-10-07, runbook step L2.5):** two rules join the ones below,
+> and a scheduled walk runs under them.
+>
+> - **A walk checkpoints nothing more once one of its marks has failed.** A
+>   cursor promises that every resource behind it is settled or durably
+>   marked stale; a resource whose mark failed is neither. The rebuild
+>   flusher records a failed mark (`rebuildFlusher.markFailed`; a mark
+>   `fail` retries counts only when the retry fails too), and from then on
+>   the after-flush hook reports no checkpoint, so a retried attempt resumes
+>   before that resource.
+> - **A rebuild whose failures are all durably marked is not retried.** A
+>   retry would add nothing the sweep doesn't, so such a rebuild, walk or
+>   targeted, returns a `RebuildMarkedFailuresError` with the count, which
+>   `RunRebuild` returns as a non-retryable application error of type
+>   `RebuildMarkedFailuresErrorType` with the count as its details, for an
+>   explicit rebuild and a scheduled one alike. A rebuild that aborted (a
+>   page or write error, cancellation) or one of whose marks failed stays
+>   retryable, and a retried walk resumes by the rules below: a single-plan
+>   walk from its cursor, a multi-plan walk from the start.
+> - **The scheduled forward walk is `RebuildWalk`s** ([ADR
+>   0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md)'s
+>   L2.5 note), one per metadata map, so it checkpoints by the same rule: a
+>   walk of a type with one active plan resumes, and a walk of a type with
+>   several restarts. Its walks are paced (`ResourceSelector.Pacing`); pacing
+>   changes when a walk takes a page, never where it checkpoints.
+
 > **Note (2026-10-06, runbook step L2.4):** the reverse sweep
 > ([ADR 0012](./0012-reverse-sweep-probes-indexed-resources-for-lost-deletes.md))
 > resumes by this pattern — its `RunReverseSweep` activity heartbeats its

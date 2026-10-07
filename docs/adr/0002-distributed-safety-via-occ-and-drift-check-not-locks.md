@@ -1,5 +1,17 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-07, runbook step L2.5):** the L2.7 note's claim that a
+> single-plan walk's checkpoint can still step over an id whose marks failed
+> is no longer true. The rebuild flusher records a failed mark
+> (`rebuildFlusher.markFailed`): `fail`'s, `finish`'s or `salvage`'s, and a
+> mark `fail` retries, `leaveGone`'s or a drift re-mark's, only when the retry
+> fails too. Once one has failed, the walk's after-flush hook reports no
+> further checkpoint, so a retried attempt resumes before the id that may have
+> no mark (`TestRebuildAll_FailedMarkStopsCheckpointing`,
+> `core/rebuild_exec_test.go`). Such a rebuild's error stays retryable; one
+> whose failures are all marked is not retried ([ADR
+> 0011](./0011-resumable-rebuild-walks-via-heartbeat-cursors.md)'s L2.5 note).
+
 > **Note (2026-10-06, runbook step L2.7):** Decided 2026-10-06 (Q23): a
 > rebuild that selects versions (`RebuildArgs.Versions`) and so runs fewer
 > than all of its type's plans with an `Executer` never deletes on them alone. An id
@@ -9,7 +21,7 @@
 > rebuild doesn't count such an id as failed. A mark that fails does fail it,
 > so the rebuild reports it; a single-plan walk's checkpoint can still step
 > over an id whose marks failed, as over any failed id whose mark failed
-> (seams S27 in the multirepo's records). A rebuild that runs every plan with
+> _(no longer: see the L2.5 note above)_. A rebuild that runs every plan with
 > an `Executer`, whether by naming every such version or none, still deletes
 > as the L2.6 note says. Rejected: deleting from every version on the
 > selected plans' word, which removed documents that plans never asked still
