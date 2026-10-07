@@ -83,7 +83,8 @@ type Config struct {
 	// (ADR 0008). Default 5m.
 	SweepBackoff time.Duration
 	// SweepBackoffMax caps SweepBackoff's doubling: a resource that never
-	// builds is retried at this interval. Default 24h.
+	// builds is retried at this interval. Default 24h. New refuses a cap
+	// below SweepBackoff, once both defaults are applied.
 	SweepBackoffMax time.Duration
 
 	// ReverseSweeps enables the reverse sweep (ADR 0012) per resource type:
@@ -144,6 +145,10 @@ type Indexer struct {
 
 	ownerLease time.Duration
 
+	// sweepBackoff is Config.SweepBackoff and SweepBackoffMax with their
+	// defaults applied: every Store.ReleaseFailed gets it.
+	sweepBackoff SweepBackoff
+
 	// reverseSweeps is Config.ReverseSweeps with its defaults applied.
 	reverseSweeps map[string]ReverseSweepConfig
 	// forwardWalks is Config.ForwardWalks with its defaults applied.
@@ -176,6 +181,8 @@ const (
 	defaultPoolSize         = 10
 	defaultRebuildChunkSize = 500
 	defaultOwnerLease       = 30 * time.Second
+	defaultSweepBackoff     = 5 * time.Minute
+	defaultSweepBackoffMax  = 24 * time.Hour
 )
 
 // New creates a new Indexer with the given configuration.
@@ -223,6 +230,17 @@ func New(cfg Config) (*Indexer, error) {
 	idx.ownerLease = cfg.OwnerLease
 	if idx.ownerLease <= 0 {
 		idx.ownerLease = defaultOwnerLease
+	}
+
+	idx.sweepBackoff = SweepBackoff{Base: cfg.SweepBackoff, Max: cfg.SweepBackoffMax}
+	if idx.sweepBackoff.Base <= 0 {
+		idx.sweepBackoff.Base = defaultSweepBackoff
+	}
+	if idx.sweepBackoff.Max <= 0 {
+		idx.sweepBackoff.Max = defaultSweepBackoffMax
+	}
+	if idx.sweepBackoff.Max < idx.sweepBackoff.Base {
+		return nil, fmt.Errorf("sweep backoff max %s is below the sweep backoff %s", idx.sweepBackoff.Max, idx.sweepBackoff.Base)
 	}
 
 	sweeps, err := reverseSweepConfigs(cfg.ReverseSweeps, cfg.Resources)

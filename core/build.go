@@ -43,22 +43,39 @@ type RebuildArgs struct {
 // ClearStale. An id whose plans all returned nil is gone at source: its
 // documents are deleted, and it finishes with DeleteResourceIfSeq instead,
 // which removes its row — owned or not, tombstone or not — and hands on the
-// follow-up when a change moved the mark. A failed owned id releases its
-// ownership and keeps its mark, so the next change claims it or the sweep
-// rebuilds it; so does every owned id left unfinished when ctx ends.
+// follow-up when a change moved the mark. A failed owned id — a type no
+// longer configured or without plans included — keeps its mark and is
+// released through releaseFailed, which backs its row off, so the sweep
+// rebuilds it once the backoff has passed, or the next change claims it
+// first. Every owned id left unfinished when ctx ends, and one whose failure
+// the ending caused, is released without a backoff.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
 	cfg := idx.resources.Get(params.ResourceType)
 	if cfg == nil {
-		idx.releaseOwners(ctx, params.owned(params.ResourceIds))
-		return fmt.Errorf("resource type %q: %w", params.ResourceType, ErrUnknownResource)
+		err := fmt.Errorf("resource type %q: %w", params.ResourceType, ErrUnknownResource)
+		idx.releaseFailed(ctx, "build", params.owned(params.ResourceIds), err)
+		return err
 	}
 
 	plans := idx.plans[params.ResourceType]
 	if len(plans) == 0 {
-		idx.releaseOwners(ctx, params.owned(params.ResourceIds))
-		return fmt.Errorf("no plans for resource type %q", params.ResourceType)
+		err := fmt.Errorf("no plans for resource type %q", params.ResourceType)
+		idx.releaseFailed(ctx, "build", params.owned(params.ResourceIds), err)
+		return err
+	}
+
+	// fail ends id's build after err: an owned id is released through
+	// releaseFailed, which logs it with its attempt count; an id that owns
+	// nothing is logged here as msg.
+	fail := func(id, msg string, err error) {
+		owned := params.owned([]string{id})
+		if len(owned) == 0 {
+			logger.Warn(msg, slog.String("id", id), slog.String("error", err.Error()))
+			return
+		}
+		idx.releaseFailed(ctx, "build", owned, err)
 	}
 
 	var failed int
@@ -72,9 +89,8 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		token := params.OwnerTokens[id]
 		begun, err := idx.st.BeginBuild(ctx, res, token)
 		if err != nil {
-			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
-			idx.releaseOwners(ctx, params.owned([]string{id}))
+			fail(id, "failed to begin build", fmt.Errorf("begin build: %w", err))
 			continue
 		}
 
@@ -89,9 +105,8 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		// TODO: Build multiple documents in a batch.
 		gone, err := idx.buildOne(ctx, plans, params.ResourceType, id, metadata, begun.BuildIdx, begun.Start)
 		if err != nil {
-			logger.Warn("build failed", slog.String("id", id), slog.String("error", err.Error()))
 			failed++
-			idx.releaseOwners(ctx, params.owned([]string{id}))
+			fail(id, "build failed", err)
 			continue
 		}
 
@@ -102,9 +117,8 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 			// nothing.
 			fu, err := idx.st.DeleteResourceIfSeq(ctx, res, begun.StaleSeq, token)
 			if err != nil {
-				logger.Warn("removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
-					slog.String("id", id), slog.String("error", err.Error()))
-				idx.releaseOwners(ctx, params.owned([]string{id}))
+				fail(id, "removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
+					fmt.Errorf("removing the row of a resource gone at source: %w", err))
 				continue
 			}
 			idx.submitFollowUp(ctx, res, fu)
@@ -127,9 +141,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		// drift re-mark — re-claims the row for one follow-up instead.
 		fu, err := idx.st.FinishOwned(ctx, res, begun.StaleSeq, token)
 		if err != nil {
-			logger.Warn("finishing owned build failed; resource remains stale for sweep",
-				slog.String("id", id), slog.String("error", err.Error()))
-			idx.releaseOwners(ctx, params.owned([]string{id}))
+			fail(id, "finishing owned build failed", fmt.Errorf("finish owned build: %w", err))
 			continue
 		}
 		idx.submitFollowUp(ctx, res, fu)

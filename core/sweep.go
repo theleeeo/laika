@@ -13,9 +13,13 @@ import (
 // build or delete: it finishes like an inline one, and a follow-up it hands on
 // goes to the pool. An entry whose ownership was lost by the time the pass
 // reaches it is skipped: its new owner or a clean row covers it. It returns
-// the number of stale entries it listed. Per-resource failures, a failed
-// renewal among them, are logged, not returned: the mark or tombstone
-// survives, its ownership is released, and the next sweep retries it.
+// the number of stale entries it listed. Per-resource failures are logged,
+// not returned: the mark or tombstone survives, and a failed build or delete
+// releases its ownership through Store.ReleaseFailed, which backs the row
+// off, so a later sweep retries it once the backoff has passed (ListStale
+// skips it until then) and a row that keeps failing never holds the head of
+// the backlog. A failed renewal releases its ownership without a backoff, and
+// the next sweep retries it.
 //
 // This is the safety net behind the inline build pool (ADR 0008). It runs as
 // the body of the StaleSweep Temporal activity; embedders without Temporal

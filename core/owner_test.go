@@ -162,8 +162,9 @@ func TestOwner_ChangeDuringAFollowUp_GetsAFollowUpOfItsOwn(t *testing.T) {
 	}
 }
 
-// A submit the pool sheds releases the ownership the registration claimed, so
-// the next registration of P claims again and builds it.
+// A submit the pool sheds releases the ownership the registration claimed,
+// through ReleaseOwners — a shed build did not fail, so it is not backed off —
+// so the next registration of P claims again and builds it.
 func TestOwner_ShedSubmit_ReleasesItsClaim_SoTheNextRegistrationBuilds(t *testing.T) {
 	P := product("1")
 	st := &recordingStore{}
@@ -177,6 +178,9 @@ func TestOwner_ShedSubmit_ReleasesItsClaim_SoTheNextRegistrationBuilds(t *testin
 	tok := r.staleSeq // the claim's token is the registration's stale_seq
 	if st.indexOf(fmt.Sprintf("ReleaseOwners:product/1:%d", tok)) == -1 || st.owner(P) != 0 {
 		t.Errorf("a shed submit must release the ownership it claimed (token %d), owner now %d: %v", tok, st.owner(P), st.callsSnapshot())
+	}
+	if n := st.count("ReleaseFailed"); n != 0 {
+		t.Errorf("a shed submit is not a failure and must not back the row off: %v", st.callsSnapshot())
 	}
 	if r, _ := st.row(P); !r.stale {
 		t.Errorf("the shed build's mark must stay for the sweep: %+v", r)
@@ -563,8 +567,8 @@ func TestOwner_DeleteOverAMovedMark_DeletesAndHandsOnADeleteFollowUp(t *testing.
 }
 
 // A notified delete whose BeginDelete fails deletes nothing and does not
-// finish: its ownership is released and the tombstone stays for the next
-// change or the sweep.
+// finish: its ownership is released through ReleaseFailed, which backs the
+// row off, and the tombstone stays for the next change or the sweep.
 func TestOwner_BeginDeleteFails_DeletesNothingAndKeepsTheTombstone(t *testing.T) {
 	R := product("R")
 	st := &recordingStore{beginDeleteErr: errors.New("db down")}
@@ -584,14 +588,18 @@ func TestOwner_BeginDeleteFails_DeletesNothingAndKeepsTheTombstone(t *testing.T)
 			t.Fatalf("a delete that could not begin must not call %s: %v", p, st.callsSnapshot())
 		}
 	}
-	inOrder(t, st, "BeginDelete:product/R:1", "ReleaseOwners:product/R:1")
+	inOrder(t, st, "BeginDelete:product/R:1", "ReleaseFailed:product/R:1")
+	if n := st.count("ReleaseOwners"); n != 0 {
+		t.Fatalf("a failed delete releases through ReleaseFailed only: %v", st.callsSnapshot())
+	}
 	if r, ok := st.row(R); !ok || !r.deleted || !r.stale || r.owner != 0 {
 		t.Fatalf("the tombstone must stay, unowned: %+v (exists %v)", r, ok)
 	}
 }
 
-// A failed owned build releases its ownership and leaves the mark, so the
-// next change claims or the sweep rebuilds.
+// A failed owned build releases its ownership through ReleaseFailed, which
+// backs the row off, and leaves the mark, so the next change claims or the
+// sweep rebuilds once the backoff has passed.
 func TestOwner_FailedOwnedBuild_ReleasesAndKeepsTheMark(t *testing.T) {
 	cases := map[string]func(st *recordingStore, ex *recordingExecuter){
 		"BeginBuild fails": func(st *recordingStore, _ *recordingExecuter) { st.beginErr = errors.New("db down") },
@@ -607,8 +615,8 @@ func TestOwner_FailedOwnedBuild_ReleasesAndKeepsTheMark(t *testing.T) {
 			waitIdle(t, idx)
 
 			r, _ := st.row(product("1"))
-			if st.indexOf(fmt.Sprintf("ReleaseOwners:product/1:%d", r.staleSeq)) == -1 || r.owner != 0 {
-				t.Fatalf("a failed owned build must release its ownership (token %d), owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
+			if st.indexOf(fmt.Sprintf("ReleaseFailed:product/1:%d", r.staleSeq)) == -1 || r.owner != 0 || st.count("ReleaseOwners") != 0 {
+				t.Fatalf("a failed owned build must release its ownership (token %d) through ReleaseFailed, owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
 			}
 			if !r.stale {
 				t.Fatalf("a failed build's mark must stay: %+v", r)
@@ -620,7 +628,8 @@ func TestOwner_FailedOwnedBuild_ReleasesAndKeepsTheMark(t *testing.T) {
 	}
 }
 
-// A failed owned delete releases its ownership and leaves the tombstone.
+// A failed owned delete releases its ownership through ReleaseFailed and
+// leaves the tombstone.
 func TestOwner_FailedOwnedDelete_ReleasesAndKeepsTheTombstone(t *testing.T) {
 	st := &recordingStore{removeErr: errors.New("db down")}
 	idx, _ := newRecordingIndexer(st, 2, 4)
@@ -632,8 +641,8 @@ func TestOwner_FailedOwnedDelete_ReleasesAndKeepsTheTombstone(t *testing.T) {
 	if !ok || !r.deleted || !r.stale {
 		t.Fatalf("a failed delete must leave the tombstone: %+v (exists %v)", r, ok)
 	}
-	if st.indexOf(fmt.Sprintf("ReleaseOwners:product/R:%d", r.staleSeq)) == -1 || r.owner != 0 {
-		t.Fatalf("a failed owned delete must release its ownership (token %d), owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
+	if st.indexOf(fmt.Sprintf("ReleaseFailed:product/R:%d", r.staleSeq)) == -1 || r.owner != 0 || st.count("ReleaseOwners") != 0 {
+		t.Fatalf("a failed owned delete must release its ownership (token %d) through ReleaseFailed, owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
 	}
 	if st.count("DeleteResourceIfSeq") != 0 {
 		t.Fatalf("a failed delete must not finish the tombstone: %v", st.callsSnapshot())
@@ -828,8 +837,8 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 
 // A sweep entry whose renew fails is not served — the sweep can't tell it
 // still owns the row — and its mark or tombstone stays for the next pass. Its
-// ownership is released, as a failed owned build's is, so the next change or
-// sweep needn't wait for the lease.
+// ownership is released through ReleaseOwners, without a backoff, so the next
+// change or sweep needn't wait for the lease.
 func TestOwner_Sweep_RenewError_SkipsTheEntryAndKeepsItsMark(t *testing.T) {
 	st := &staleListingStore{entries: []StaleResource{
 		{Resource: product("1"), StaleSeq: 4, Token: 5},
@@ -867,6 +876,9 @@ func TestOwner_Sweep_RenewError_SkipsTheEntryAndKeepsItsMark(t *testing.T) {
 		if st.indexOf(want) == -1 {
 			t.Errorf("missing %s: %v", want, st.callsSnapshot())
 		}
+	}
+	if n := st.count("ReleaseFailed"); n != 0 {
+		t.Errorf("a failed renewal is not a failed build and must not back the row off: %v", st.callsSnapshot())
 	}
 }
 
@@ -1034,7 +1046,10 @@ func TestOwner_ShedFollowUp_ReleasesTheReclaim(t *testing.T) {
 }
 
 // R5: a Build whose ctx ends before an owned id is finished releases the
-// unfinished ids' ownership on a context detached from the cancellation.
+// unfinished ids' ownership on a context detached from the cancellation,
+// through ReleaseOwners: a cancellation is not a failure, so neither the
+// unreached id 2 nor id 1, whose build the cancellation cut short, is backed
+// off.
 func TestOwner_CancelledBuild_ReleasesUnfinishedOwnershipOnALiveCtx(t *testing.T) {
 	st := &recordingStore{}
 	idx := newHotPathIndexer(st, 2, 4)
@@ -1057,6 +1072,9 @@ func TestOwner_CancelledBuild_ReleasesUnfinishedOwnershipOnALiveCtx(t *testing.T
 	}
 	if got := st.owner(product("2")); got != 0 {
 		t.Fatalf("id 2's ownership must be dropped, owner %d", got)
+	}
+	if n := st.count("ReleaseFailed"); n != 0 {
+		t.Fatalf("a cancelled build must not back any id off: %v", st.callsSnapshot())
 	}
 	if n := st.count("BeginBuild:product/2:"); n != 0 {
 		t.Fatalf("nothing may be built for id 2 after the cancellation: %v", st.callsSnapshot())
@@ -1214,7 +1232,8 @@ func TestOwner_PoolTask_SkipsWhatItLostBeforeDequeue(t *testing.T) {
 
 // A queued owned task whose renew at dequeue fails does no work — it can't
 // tell it still owns the row — and finishes nothing: the mark or tombstone
-// stays for the next change or the sweep, and its ownership is released.
+// stays for the next change or the sweep, and its ownership is released
+// through ReleaseOwners, without a backoff.
 func TestOwner_PoolTask_RenewError_SkipsTheWorkAndKeepsTheMark(t *testing.T) {
 	failRenew := func(st *recordingStore) {
 		st.mu.Lock()
@@ -1249,8 +1268,8 @@ func TestOwner_PoolTask_RenewError_SkipsTheWorkAndKeepsTheMark(t *testing.T) {
 		if r, _ := st.row(product("1")); !r.stale || r.owner != 0 {
 			t.Errorf("the mark must stay and the ownership be released: %+v", r)
 		}
-		if st.indexOf("ReleaseOwners:product/1:1") == -1 {
-			t.Errorf("the ownership must be released: %v", st.callsSnapshot())
+		if st.indexOf("ReleaseOwners:product/1:1") == -1 || st.count("ReleaseFailed") != 0 {
+			t.Errorf("the ownership must be released through ReleaseOwners only: %v", st.callsSnapshot())
 		}
 	})
 
@@ -1278,8 +1297,8 @@ func TestOwner_PoolTask_RenewError_SkipsTheWorkAndKeepsTheMark(t *testing.T) {
 		if r, ok := st.row(product("R")); !ok || !r.stale || !r.deleted || r.owner != 0 {
 			t.Errorf("the tombstone must stay and its ownership be released: %+v (exists %v)", r, ok)
 		}
-		if st.indexOf("ReleaseOwners:product/R:1") == -1 {
-			t.Errorf("the ownership must be released: %v", st.callsSnapshot())
+		if st.indexOf("ReleaseOwners:product/R:1") == -1 || st.count("ReleaseFailed") != 0 {
+			t.Errorf("the ownership must be released through ReleaseOwners only: %v", st.callsSnapshot())
 		}
 	})
 }
@@ -1315,7 +1334,8 @@ func TestOwner_WaitForSlot_UnclaimedRegistrationDoesNotWait(t *testing.T) {
 }
 
 // A finishing statement that fails leaves the work unfinished: the owned
-// build or delete releases its ownership and the mark or tombstone stays.
+// build or delete releases its ownership through ReleaseFailed and the mark
+// or tombstone stays.
 func TestOwner_FailedFinish_Releases(t *testing.T) {
 	cases := map[string]struct {
 		kind ChangeKind
@@ -1337,8 +1357,8 @@ func TestOwner_FailedFinish_Releases(t *testing.T) {
 			if !ok || !r.stale {
 				t.Fatalf("the unfinished work's mark must stay: %+v (exists %v)", r, ok)
 			}
-			if st.indexOf(fmt.Sprintf("ReleaseOwners:product/1:%d", r.staleSeq)) == -1 || r.owner != 0 {
-				t.Fatalf("a failed finish must release its ownership (token %d), owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
+			if st.indexOf(fmt.Sprintf("ReleaseFailed:product/1:%d", r.staleSeq)) == -1 || r.owner != 0 || st.count("ReleaseOwners") != 0 {
+				t.Fatalf("a failed finish must release its ownership (token %d) through ReleaseFailed, owner now %d: %v", r.staleSeq, r.owner, st.callsSnapshot())
 			}
 		})
 	}

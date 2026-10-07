@@ -101,8 +101,10 @@ type Store interface {
 	// serving each entry.
 	RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error)
 	// ReleaseOwners drops every given ownership whose token is still the
-	// row's owner token, leaving the stale mark: a failed or shed owned
-	// build, so the next change claims or the sweep rebuilds.
+	// row's owner token, leaving the stale mark, with no backoff: owned work
+	// that did not fail — a shed submission, a failed renewal, the ids a
+	// cancellation left unfinished — so the next change claims or the sweep
+	// rebuilds. Failed owned work releases through ReleaseFailed.
 	ReleaseOwners(ctx context.Context, owned []Owned) error
 	// ReleaseFailed finishes an owned build or delete that returned an
 	// error: it drops every given ownership whose token is still the row's
@@ -147,8 +149,10 @@ type Store interface {
 	// token of 0, a delete that owns nothing, re-claims nothing.
 	DeleteResourceIfSeq(ctx context.Context, resource model.Resource, staleSeq, token int64) (FollowUp, error)
 	// ListStale returns up to limit resources whose stale mark predates
-	// before and that have no live owner under lease, and claims every row
-	// it returns in the same statement.
+	// before, that have no live owner under lease and whose backoff
+	// (ReleaseFailed's sweep_after) has passed, ordered by sweep_after, or
+	// by the mark's time for a row that has none, and claims every row it
+	// returns in the same statement.
 	ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]StaleResource, error)
 	// ListResources returns up to limit live (not tombstoned) rows of
 	// resourceType whose id sorts after after, in id order, each with its

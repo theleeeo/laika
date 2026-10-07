@@ -189,8 +189,8 @@ const ownerReleaseTimeout = 5 * time.Second
 // or hard delete dropped it — is logged at Info and not worked on: the new
 // owner or a clean row covers it. A failed renewal is logged and holds
 // nothing, so work whose ownership is unknown is never done: its ownership
-// is released, as a failed owned build's is, and its mark stays for the
-// next change or the sweep.
+// is released without a backoff — the work did not fail, it did not run —
+// and its mark stays for the next change or the sweep.
 func (idx *Indexer) renewOwners(ctx context.Context, owned []Owned) []Owned {
 	if len(owned) == 0 {
 		return nil
@@ -229,6 +229,61 @@ func (idx *Indexer) releaseOwners(ctx context.Context, owned []Owned) {
 	if err := idx.st.ReleaseOwners(rctx, owned); err != nil {
 		slog.Warn("releasing build ownership failed; it expires with its lease",
 			slog.Int("count", len(owned)), slog.String("error", err.Error()))
+	}
+}
+
+// failedAttemptsErrorLevel is the attempt count from which a failed owned
+// build or delete is logged at Error: a resource that failed this many times
+// in a row is not healing on its own.
+const failedAttemptsErrorLevel = 5
+
+// releaseFailed finishes the owned work on owned — an owned build or delete,
+// op says which — that failed with cause: it drops the ownership and backs
+// each row off with Store.ReleaseFailed under the Indexer's sweep backoff,
+// so the sweep leaves the row until the backoff has passed, and logs each
+// row it backed off with its attempt count, at Error from the fifth attempt
+// in a row; a row whose ownership was lost meanwhile is neither released nor
+// backed off, and is logged without one. The mark stays either way. A failure reached once ctx has ended
+// — a cancellation or shutdown cut the work short — is not the work's, so
+// it releases through releaseOwners without a backoff. The release runs on a
+// context detached from ctx's cancellation, as releaseOwners' does; a failed
+// one is logged, and the ownership expires with its lease.
+func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned, cause error) {
+	if len(owned) == 0 {
+		return
+	}
+	if ctx.Err() != nil {
+		for _, o := range owned {
+			slog.Info("owned "+op+" ended by cancellation or shutdown; released without a backoff, its mark stays",
+				slog.String("type", o.Type), slog.String("id", o.Id), slog.String("error", cause.Error()))
+		}
+		idx.releaseOwners(ctx, owned)
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ownerReleaseTimeout)
+	defer cancel()
+	backedOff, err := idx.st.ReleaseFailed(rctx, owned, idx.sweepBackoff)
+	if err != nil {
+		slog.Warn("owned "+op+" failed, and releasing its ownership failed; it expires with its lease and the sweep retries it",
+			slog.Int("count", len(owned)), slog.String("error", cause.Error()), slog.String("release_error", err.Error()))
+		return
+	}
+	logged := make(map[model.Resource]bool, len(backedOff))
+	for _, b := range backedOff {
+		logged[b.Resource] = true
+		level := slog.LevelWarn
+		if b.Attempts >= failedAttemptsErrorLevel {
+			level = slog.LevelError
+		}
+		slog.Log(rctx, level, "owned "+op+" failed; the stale sweep retries it after a backoff",
+			slog.String("type", b.Type), slog.String("id", b.Id), slog.Int("attempts", b.Attempts),
+			slog.Time("retry_after", b.After), slog.String("error", cause.Error()))
+	}
+	for _, o := range owned {
+		if !logged[o.Resource] {
+			slog.Warn("owned "+op+" failed after its ownership was lost; its new owner or a clean row covers it",
+				slog.String("type", o.Type), slog.String("id", o.Id), slog.String("error", cause.Error()))
+		}
 	}
 }
 

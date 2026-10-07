@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -185,5 +187,146 @@ func TestSweepStale_TombstoneOfDeconfiguredType_DoesNotWedgeSweep(t *testing.T) 
 	}
 	if st.indexOf("BeginBuild:product/1") == -1 {
 		t.Fatalf("entries behind the tombstone must still be served: %v", st.callsSnapshot())
+	}
+}
+
+// newBackoffIndexer is newRecordingIndexer with a SweepBackoff configured.
+func newBackoffIndexer(st Store, backoff SweepBackoff) (*Indexer, *recordingExecuter) {
+	ex := &recordingExecuter{}
+	return mustNew(Config{
+		Resources:       testResources(),
+		Plans:           map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+		ES:              &fakeBackend{},
+		Store:           st,
+		PoolSize:        2,
+		QueueSize:       4,
+		SweepBackoff:    backoff.Base,
+		SweepBackoffMax: backoff.Max,
+	}), ex
+}
+
+// A sweep build or delete that fails releases its row through ReleaseFailed,
+// with the Indexer's configured backoff, and not through ReleaseOwners: the
+// sweep leaves the row until its backoff has passed instead of serving it
+// again at the head of the next pass. Its mark or tombstone stays.
+func TestSweepStale_FailedBuildOrDelete_BacksOffThroughReleaseFailed(t *testing.T) {
+	backoff := SweepBackoff{Base: 7 * time.Minute, Max: 3 * time.Hour}
+	cases := map[string]struct {
+		entry StaleResource
+		fail  func(st *staleListingStore, ex *recordingExecuter)
+	}{
+		"plan fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5},
+			func(_ *staleListingStore, ex *recordingExecuter) { ex.failIDs = map[string]bool{"1": true} },
+		},
+		"BeginBuild fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5},
+			func(st *staleListingStore, _ *recordingExecuter) { st.beginErr = errors.New("db down") },
+		},
+		"FinishOwned fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5},
+			func(st *staleListingStore, _ *recordingExecuter) { st.finishErr = errors.New("db down") },
+		},
+		"type removed from config": {
+			StaleResource{Resource: model.Resource{Type: "ghost", Id: "1"}, StaleSeq: 4, Token: 5},
+			func(*staleListingStore, *recordingExecuter) {},
+		},
+		"BeginDelete fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5, Deleted: true},
+			func(st *staleListingStore, _ *recordingExecuter) { st.beginDeleteErr = errors.New("db down") },
+		},
+		"delete's edge removal fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5, Deleted: true},
+			func(st *staleListingStore, _ *recordingExecuter) { st.removeErr = errors.New("db down") },
+		},
+		"delete's DeleteResourceIfSeq fails": {
+			StaleResource{Resource: product("1"), StaleSeq: 4, Token: 5, Deleted: true},
+			func(st *staleListingStore, _ *recordingExecuter) { st.deleteErr = errors.New("db down") },
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			st := &staleListingStore{entries: []StaleResource{tc.entry}}
+			idx, ex := newBackoffIndexer(st, backoff)
+			tc.fail(st, ex)
+
+			if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+				t.Fatal(err)
+			}
+			waitIdle(t, idx)
+
+			res := tc.entry.Resource
+			if st.indexOf(fmt.Sprintf("ReleaseFailed:%s/%s:5", res.Type, res.Id)) == -1 {
+				t.Fatalf("the failed entry must be released through ReleaseFailed: %v", st.callsSnapshot())
+			}
+			if n := st.count("ReleaseOwners"); n != 0 {
+				t.Fatalf("a failure must not release through ReleaseOwners: %v", st.callsSnapshot())
+			}
+			if got := st.failedBackoffsSnapshot(); len(got) != 1 || got[0] != backoff {
+				t.Fatalf("ReleaseFailed must get the configured backoff %+v, got %+v", backoff, got)
+			}
+			r, ok := st.row(res)
+			if !ok || !r.stale || r.deleted != tc.entry.Deleted || r.owner != 0 {
+				t.Fatalf("the mark or tombstone must stay, unowned: %+v (exists %v)", r, ok)
+			}
+			if r.attempts != 1 {
+				t.Fatalf("the row must be backed off once, attempts %d", r.attempts)
+			}
+		})
+	}
+}
+
+// A failed owned build logs its attempt count, as ReleaseFailed returns it,
+// with its type, id, error and retry time, in one line: at Warn below the
+// fifth attempt in a row, at Error from the fifth on.
+func TestSweepStale_FailedBuild_LogsItsAttempts(t *testing.T) {
+	for _, tc := range []struct {
+		before    int
+		wantLevel string
+	}{
+		{0, "WARN"},
+		{3, "WARN"},
+		{4, "ERROR"},
+		{9, "ERROR"},
+	} {
+		t.Run(fmt.Sprintf("after %d failures", tc.before), func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &staleListingStore{entries: []StaleResource{{Resource: product("1"), StaleSeq: 4, Token: 5}}}
+			st.seedMetadata(product("1"), nil)
+			st.seedAttempts(product("1"), tc.before)
+			idx, ex := newBackoffIndexer(st, SweepBackoff{Base: time.Minute, Max: time.Hour})
+			ex.failIDs = map[string]bool{"1": true}
+
+			if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+				t.Fatal(err)
+			}
+			waitIdle(t, idx)
+
+			var lines []map[string]any
+			for _, rec := range logs.records(t) {
+				if rec["id"] == "1" && (rec["level"] == "WARN" || rec["level"] == "ERROR") {
+					lines = append(lines, rec)
+				}
+			}
+			if len(lines) != 1 {
+				t.Fatalf("the failure must be logged in one line naming product/1, got %v", lines)
+			}
+			rec := lines[0]
+			if rec["level"] != tc.wantLevel {
+				t.Errorf("level: got %v want %s (%v)", rec["level"], tc.wantLevel, rec)
+			}
+			if rec["type"] != "product" {
+				t.Errorf("the line must name the type: %v", rec)
+			}
+			if got, _ := rec["attempts"].(float64); int(got) != tc.before+1 {
+				t.Errorf("attempts: got %v want %d (%v)", rec["attempts"], tc.before+1, rec)
+			}
+			if e, _ := rec["error"].(string); !strings.Contains(e, "plan failed") {
+				t.Errorf("the line must carry the build's error: %v", rec)
+			}
+			if _, ok := rec["retry_after"]; !ok {
+				t.Errorf("the line must carry the retry time: %v", rec)
+			}
+		})
 	}
 }

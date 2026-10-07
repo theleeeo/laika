@@ -204,9 +204,10 @@ func TestBuildPathDelete_WalkRootRemarkedByItsDriftCheck_KeepsItsRow(t *testing.
 }
 
 // An owned build whose plans all return nil and whose row delete fails has
-// deleted the documents but not finished: it releases its ownership and keeps
-// the mark, so the next change claims it or the sweep re-builds it, finds it
-// gone and removes the row. It never finishes as a build.
+// deleted the documents but not finished: it releases its ownership through
+// ReleaseFailed and keeps the mark, so the next change claims it or the
+// sweep re-builds it, finds it gone and removes the row. It never finishes as
+// a build.
 func TestBuildPathDelete_RowDeleteFails_ReleasesAndKeepsTheMark(t *testing.T) {
 	R := product("R")
 	st := &recordingStore{deleteErr: errors.New("db down")}
@@ -218,7 +219,7 @@ func TestBuildPathDelete_RowDeleteFails_ReleasesAndKeepsTheMark(t *testing.T) {
 	if len(deletesOf(be, "R")) != 2 {
 		t.Fatalf("R's documents must be deleted before the row: %v", be.deletesAt())
 	}
-	inOrder(t, st, "DeleteResourceIfSeq:product/R:1:1", "ReleaseOwners:product/R:1")
+	inOrder(t, st, "DeleteResourceIfSeq:product/R:1:1", "ReleaseFailed:product/R:1")
 	for _, p := range []string{"FinishOwned:", "ClearStale:"} {
 		if st.count(p) != 0 {
 			t.Fatalf("a failed row delete must not finish as a build: %v", st.callsSnapshot())

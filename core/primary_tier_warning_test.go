@@ -96,6 +96,23 @@ func captureDefaultLogs(t *testing.T) *capturedLogs {
 	return c
 }
 
+// records returns every JSON record logged so far.
+func (c *capturedLogs) records(t *testing.T) []map[string]any {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(c.buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+		out = append(out, rec)
+	}
+	return out
+}
+
 // tierlessWarnings returns the tier-less-version warnings logged so far.
 func (c *capturedLogs) tierlessWarnings(t *testing.T) []tierlessWarning {
 	t.Helper()

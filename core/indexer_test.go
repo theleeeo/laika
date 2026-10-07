@@ -2,6 +2,7 @@ package core
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core/resource"
@@ -104,6 +105,44 @@ func TestNew_QueueHighWater(t *testing.T) {
 		t.Run("refuses "+tc.name, func(t *testing.T) {
 			_, err := New(Config{QueueSize: tc.queueSize, QueueHighWater: tc.highWater})
 			require.ErrorContains(t, err, "queue high water")
+		})
+	}
+}
+
+// New defaults SweepBackoff to 5m and SweepBackoffMax to 24h when either is
+// ≤ 0, as it does OwnerLease, and refuses a cap below the base once the
+// defaults are applied.
+func TestNew_SweepBackoff(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		base, max time.Duration
+		want      SweepBackoff
+	}{
+		{"both default", 0, 0, SweepBackoff{Base: 5 * time.Minute, Max: 24 * time.Hour}},
+		{"negative takes the default", -time.Second, -time.Second, SweepBackoff{Base: 5 * time.Minute, Max: 24 * time.Hour}},
+		{"explicit values kept", time.Second, time.Minute, SweepBackoff{Base: time.Second, Max: time.Minute}},
+		{"the cap may equal the base", time.Minute, time.Minute, SweepBackoff{Base: time.Minute, Max: time.Minute}},
+		{"explicit base, default cap", time.Hour, 0, SweepBackoff{Base: time.Hour, Max: 24 * time.Hour}},
+		{"default base, explicit cap", 0, time.Hour, SweepBackoff{Base: 5 * time.Minute, Max: time.Hour}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idx, err := New(Config{SweepBackoff: tc.base, SweepBackoffMax: tc.max})
+			require.NoError(t, err)
+			require.Equal(t, tc.want, idx.sweepBackoff)
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		base, max time.Duration
+	}{
+		{"a cap below the base", time.Hour, time.Minute},
+		{"a cap below the default base", 0, time.Minute},
+		{"a base above the default cap", 48 * time.Hour, 0},
+	} {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			_, err := New(Config{SweepBackoff: tc.base, SweepBackoffMax: tc.max})
+			require.ErrorContains(t, err, "sweep backoff")
 		})
 	}
 }

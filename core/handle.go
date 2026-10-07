@@ -64,33 +64,37 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq
 // DeleteResourceIfSeq, guarded by staleSeq, the tombstone's mark, as the
 // follow-up — a build for a recreate, a delete for a row still deleted — and
 // is submitted. Failures are logged, not returned: the tombstone stays stale,
-// its ownership is released, and the next change or the sweep retries it.
+// and an owned delete is released through releaseFailed, which backs its row
+// off, so the sweep retries it once the backoff has passed, or the next
+// change claims it first; one whose failure a cancellation or shutdown
+// caused is released without a backoff.
 func (idx *Indexer) deleteOne(ctx context.Context, res model.Resource, staleSeq, token int64) {
-	owned := []Owned{{Resource: res, Token: token}}
-	if token == 0 {
-		owned = nil
+	// fail ends the delete after err: an owned delete is released through
+	// releaseFailed, which logs it with its attempt count; one that owns
+	// nothing is logged here.
+	fail := func(err error) {
+		if token == 0 {
+			slog.Warn("delete failed; tombstone remains for sweep",
+				slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
+			return
+		}
+		idx.releaseFailed(ctx, "delete", []Owned{{Resource: res, Token: token}}, err)
 	}
 	begun, err := idx.st.BeginDelete(ctx, res, token)
 	if err != nil {
-		slog.Warn("begin delete failed; tombstone remains for sweep",
-			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
-		idx.releaseOwners(ctx, owned)
+		fail(fmt.Errorf("begin delete: %w", err))
 		return
 	}
 	if begun.Superseded {
 		slog.Info("delete superseded by a recreate or a finished delete; deleting nothing",
 			slog.String("type", res.Type), slog.String("id", res.Id))
 	} else if err := idx.handleDelete(ctx, RebuildPayload{ResourceType: res.Type, ResourceID: res.Id}, begun.BuildIdx); err != nil {
-		slog.Warn("inline delete failed; tombstone remains for sweep",
-			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
-		idx.releaseOwners(ctx, owned)
+		fail(err)
 		return
 	}
 	fu, err := idx.st.DeleteResourceIfSeq(ctx, res, staleSeq, token)
 	if err != nil {
-		slog.Warn("tombstone cleanup failed; sweep will retry",
-			slog.String("type", res.Type), slog.String("id", res.Id), slog.String("error", err.Error()))
-		idx.releaseOwners(ctx, owned)
+		fail(fmt.Errorf("tombstone cleanup: %w", err))
 		return
 	}
 	idx.submitFollowUp(ctx, res, fu)

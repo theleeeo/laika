@@ -95,6 +95,10 @@ type recordingStore struct {
 	onReplace  func(edgeReplace)
 	// markErr fails every MarkStale after recording it.
 	markErr error
+	// releaseFailedErr fails every ReleaseFailed as a done ctx does;
+	// failedBackoffs records the backoff of every ReleaseFailed that ran.
+	releaseFailedErr error
+	failedBackoffs   []SweepBackoff
 
 	rows     map[model.Resource]*memRow
 	seq      int64 // the last stale_seq handed out
@@ -125,6 +129,10 @@ type memRow struct {
 	changeSeq int64
 	metadata  map[string]string
 	deleted   bool
+	// attempts and after are the row's sweep_attempts and sweep_after, as
+	// ReleaseFailed leaves them; 0 and the zero time for never failed.
+	attempts int
+	after    time.Time
 }
 
 func (s *recordingStore) signalMarked() {
@@ -470,24 +478,57 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 	return err
 }
 
-// ReleaseFailed records the call per entry and drops each ownership whose
-// token is still the row's owner token, as ReleaseOwners does. It does not
-// model the backoff.
-func (s *recordingStore) ReleaseFailed(ctx context.Context, owned []Owned, _ SweepBackoff) ([]BackedOff, error) {
+// ReleaseFailed fails on a done ctx, as a real store's query would, and
+// with releaseFailedErr, and then records ReleaseFailedFailed per entry,
+// releasing nothing. Otherwise it records the call per entry and the backoff
+// it was given (failedBackoffs), and drops each ownership whose token is
+// still the row's owner token, as ReleaseOwners does, counting the row's
+// attempts up and setting its after as the contract says. It does not model
+// ListStale's skip or the resets.
+func (s *recordingStore) ReleaseFailed(ctx context.Context, owned []Owned, backoff SweepBackoff) ([]BackedOff, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := ctx.Err(); err != nil {
+	err := ctx.Err()
+	if err == nil {
+		err = s.releaseFailedErr
+	}
+	if err != nil {
+		for _, o := range owned {
+			s.recordLocked("ReleaseFailedFailed:%s/%s:%d", o.Type, o.Id, o.Token)
+		}
 		return nil, err
 	}
+	s.failedBackoffs = append(s.failedBackoffs, backoff)
 	var out []BackedOff
 	for _, o := range owned {
 		s.recordLocked("ReleaseFailed:%s/%s:%d", o.Type, o.Id, o.Token)
 		if row, ok := s.rows[o.Resource]; ok && row.owner == o.Token {
 			row.owner = 0
-			out = append(out, BackedOff{Resource: o.Resource, Attempts: 1})
+			row.attempts++
+			delay := backoff.Max
+			if n := row.attempts - 1; n < 63 && backoff.Base<<n > 0 && backoff.Base<<n < backoff.Max {
+				delay = backoff.Base << n
+			}
+			row.after = time.Now().Add(delay)
+			out = append(out, BackedOff{Resource: o.Resource, Attempts: row.attempts, After: row.after})
 		}
 	}
 	return out, nil
+}
+
+// failedBackoffsSnapshot is every backoff ReleaseFailed was given, in order.
+func (s *recordingStore) failedBackoffsSnapshot() []SweepBackoff {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]SweepBackoff(nil), s.failedBackoffs...)
+}
+
+// seedAttempts gives res's row n failed attempts in a row, as earlier failed
+// releases would leave it; the row must exist.
+func (s *recordingStore) seedAttempts(res model.Resource, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rows[res].attempts = n
 }
 
 // ReplaceEdges records the call, runs onReplace, and then fails with
