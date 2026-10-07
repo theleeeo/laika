@@ -2781,3 +2781,182 @@ func TestRebuildAll_RejectedDocumentOnCancellation_MarksTheResourceStaleBeforeTh
 		t.Fatalf("a resource with a rejected document must not clear its mark: %v", calls)
 	}
 }
+
+// failingResourceWalk runs a version-targeted single-plan walk — v1 of the
+// two-version product, so it may not delete (mayDelete) — in chunks of one,
+// over four one-resource pages: 1 (token p2), 2 (p3), 3 (p4), 4. doc3 is
+// resource 3's document on page 3; st and es make it fail. It returns the
+// checkpoints reported and the walk's error.
+func failingResourceWalk(t *testing.T, st *rebuildRecordingStore, es *captureBackend, doc3 projection.BuildDoc) ([]RebuildCursor, error) {
+	t.Helper()
+	plans := map[string][]projection.Plan{"product": {
+		{Version: 1, Executer: &cursorPagingExecuter{pages: []aggregation.ExecutionResult[projection.BuildDoc]{
+			{Items: []projection.BuildDoc{productDoc("1")}, NextPageToken: "p2"},
+			{Items: []projection.BuildDoc{productDoc("2")}, NextPageToken: "p3"},
+			{Items: []projection.BuildDoc{doc3}, NextPageToken: "p4"},
+			{Items: []projection.BuildDoc{productDoc("4")}},
+		}}},
+		{Version: 2, Executer: &staticExecuter{}},
+	}}
+	idx := newRebuildIndexer(st, es, plans, 1)
+	var cps []RebuildCursor
+	err := idx.RebuildNowResumable(t.Context(),
+		ResourceSelector{ResourceType: "product", Versions: []int{1}}, nil,
+		func(c RebuildCursor) { cps = append(cps, c) })
+	return cps, err
+}
+
+// A single-plan walk checkpoints over a failed resource only while its mark
+// is durable (ruling R11): once a mark of the walk has failed, no later
+// flush reports a cursor, so a retry resumes before the resource with no
+// mark. A mark that fails and is retried and lands is durable.
+func TestRebuildAll_FailedMarkStopsCheckpointing(t *testing.T) {
+	gone3 := projection.BuildDoc{Root: product("3")}
+	before := []RebuildCursor{{PlanVersion: 1, PageToken: "p2"}}
+	cases := map[string]struct {
+		st   *rebuildRecordingStore
+		es   *captureBackend
+		doc3 projection.BuildDoc
+		// want is every checkpoint the walk reports; marked whether its
+		// error is a RebuildMarkedFailuresError.
+		want   []RebuildCursor
+		marked bool
+	}{
+		"begin fails, its mark fails": {
+			st:   &rebuildRecordingStore{beginErrs: map[string]error{"3": errors.New("begin failed")}, markErrs: map[string]int{"product/3": 1}},
+			es:   &captureBackend{},
+			doc3: productDoc("3"),
+			want: before,
+		},
+		"document rejected, its mark fails": {
+			st:   &rebuildRecordingStore{markErrs: map[string]int{"product/3": 1}},
+			es:   &captureBackend{rejectIDs: map[string]bool{"3": true}},
+			doc3: productDoc("3"),
+			want: before,
+		},
+		"left for the sweep, both its marks fail": {
+			st:   &rebuildRecordingStore{markErrs: map[string]int{"product/3": 2}},
+			es:   &captureBackend{},
+			doc3: gone3,
+			want: before,
+		},
+		"begin fails, its mark lands": {
+			st:     &rebuildRecordingStore{beginErrs: map[string]error{"3": errors.New("begin failed")}},
+			es:     &captureBackend{},
+			doc3:   productDoc("3"),
+			want:   []RebuildCursor{{PlanVersion: 1, PageToken: "p2"}, {PlanVersion: 1, PageToken: "p4"}},
+			marked: true,
+		},
+		"document rejected, its mark lands": {
+			st:     &rebuildRecordingStore{},
+			es:     &captureBackend{rejectIDs: map[string]bool{"3": true}},
+			doc3:   productDoc("3"),
+			want:   []RebuildCursor{{PlanVersion: 1, PageToken: "p2"}, {PlanVersion: 1, PageToken: "p3"}, {PlanVersion: 1, PageToken: "p4"}},
+			marked: true,
+		},
+		"left for the sweep, its retried mark lands": {
+			st:     &rebuildRecordingStore{markErrs: map[string]int{"product/3": 1}},
+			es:     &captureBackend{},
+			doc3:   gone3,
+			want:   []RebuildCursor{{PlanVersion: 1, PageToken: "p2"}, {PlanVersion: 1, PageToken: "p4"}},
+			marked: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			cps, err := failingResourceWalk(t, tc.st, tc.es, tc.doc3)
+			if err == nil {
+				t.Fatal("a walk that failed a resource must not report success")
+			}
+			if !slices.Equal(cps, tc.want) {
+				t.Fatalf("checkpoints %v, want %v: %v", cps, tc.want, tc.st.callsSnapshot())
+			}
+			var me *RebuildMarkedFailuresError
+			if got := errors.As(err, &me); got != tc.marked {
+				t.Fatalf("errors.As(%v, *RebuildMarkedFailuresError) = %v, want %v", err, got, tc.marked)
+			}
+		})
+	}
+}
+
+// A rebuild whose failures are all durably marked returns a
+// RebuildMarkedFailuresError naming its type and count; one of whose marks
+// failed returns another error, which says so (ruling R9). A walk and a
+// targeted rebuild share errorIfFailed.
+func TestRebuild_FailuresAllMarked_ReturnsRebuildMarkedFailuresError(t *testing.T) {
+	beginErrs := map[string]error{"1": errors.New("begin failed"), "2": errors.New("begin failed")}
+	sels := map[string]ResourceSelector{
+		"walk":      {ResourceType: "product", Versions: []int{1}},
+		"by IDs":    {ResourceType: "product", Versions: []int{1}, ResourceIDs: []string{"1", "2", "3"}},
+		"all plans": {ResourceType: "product"},
+	}
+	for name, sel := range sels {
+		t.Run(name, func(t *testing.T) {
+			run := func(st *rebuildRecordingStore) error {
+				exec := &staticExecuter{
+					docs: []projection.BuildDoc{productDoc("1"), productDoc("2"), productDoc("3")},
+					byID: map[string][]projection.BuildDoc{"1": {productDoc("1")}, "2": {productDoc("2")}, "3": {productDoc("3")}},
+				}
+				idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {
+					{Version: 1, Executer: exec},
+					{Version: 2, Executer: exec},
+				}}, 0)
+				err := idx.RebuildNowResumable(t.Context(), sel, nil, nil)
+				if werr := idx.WaitForIdle(t.Context()); werr != nil {
+					t.Fatal(werr)
+				}
+				return err
+			}
+
+			err := run(&rebuildRecordingStore{beginErrs: beginErrs})
+			var me *RebuildMarkedFailuresError
+			if !errors.As(err, &me) {
+				t.Fatalf("a rebuild whose failures are all marked must return a *RebuildMarkedFailuresError, got %T: %v", err, err)
+			}
+			if me.ResourceType != "product" || me.Count != 2 {
+				t.Fatalf("got %+v, want type product and count 2", *me)
+			}
+
+			err = run(&rebuildRecordingStore{beginErrs: beginErrs, markErrs: map[string]int{"product/2": 1}})
+			if err == nil {
+				t.Fatal("a rebuild that failed resources must not report success")
+			}
+			if errors.As(err, &me) {
+				t.Fatalf("a rebuild one of whose marks failed must not return a *RebuildMarkedFailuresError, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "failed 2 resource(s)") || !strings.Contains(err.Error(), "mark") {
+				t.Fatalf("the error must count the failures and say some marks failed, got %v", err)
+			}
+		})
+	}
+}
+
+// A multi-plan walk's resource a later plan never listed is failed and
+// marked by finish; when that mark fails the rebuild's error is not a
+// RebuildMarkedFailuresError (ruling R9).
+func TestRebuildAll_FinishMarkFails_NotRebuildMarkedFailuresError(t *testing.T) {
+	for name, tc := range map[string]struct {
+		markErrs map[string]int
+		marked   bool
+	}{
+		"finish's mark lands": {marked: true},
+		"finish's mark fails": {markErrs: map[string]int{"product/3": 1}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{markErrs: tc.markErrs}
+			err := rebuildAllProducts(t, st,
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("3")}},
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1")}})
+			if err == nil {
+				t.Fatal("a walk that left a resource incomplete must not report success")
+			}
+			var me *RebuildMarkedFailuresError
+			if got := errors.As(err, &me); got != tc.marked {
+				t.Fatalf("errors.As(%v, *RebuildMarkedFailuresError) = %v, want %v: %v", err, got, tc.marked, st.callsSnapshot())
+			}
+			if tc.marked && me.Count != 1 {
+				t.Fatalf("count %d, want 1", me.Count)
+			}
+		})
+	}
+}

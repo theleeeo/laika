@@ -185,6 +185,13 @@ type rebuildFlusher struct {
 	pending []pendingItem
 	state   map[string]*pendingResource
 	failed  int
+	// markFailed records that a mark meant to hand a resource to the sweep
+	// failed — fail's, finish's or salvage's — so a resource may have no
+	// mark: the rebuild's error stays retryable (errorIfFailed) and a
+	// single-plan walk's checkpoint steps over nothing more (rebuildAll). A
+	// failed mark that fail retries (leaveGone's, a drift re-mark) is not
+	// recorded unless the retry fails too.
+	markFailed bool
 	// keepSettled keeps a settled resource's entry until finish, recording
 	// how it settled. A multi-plan walk sets it: a later sighting of an id
 	// that settled is held to that outcome — a repeat of it is ignored, the
@@ -413,7 +420,9 @@ func (f *rebuildFlusher) fail(ctx context.Context, id string) {
 	p.failed = true
 	f.failed++
 	f.dropPending(id)
-	_ = f.markStale(ctx, id) // logged; the failure is counted either way
+	if err := f.markStale(ctx, id); err != nil {
+		f.markFailed = true // logged; the failure is counted either way
+	}
 }
 
 // removeRow finishes a resource the rebuild deleted as gone at source: it
@@ -447,7 +456,8 @@ func docKey(index, id string) string { return index + "/" + id }
 // rebuild's cancellation: the walk may have been cancelled after the failure
 // it reacts to, and a checkpoint reported after this mark steps over the
 // resource, so the mark is its only recovery. It logs a failed mark and
-// returns its error; fail and finish go on, leaveGone fails the resource.
+// returns its error: fail and finish record it (markFailed) and go on,
+// leaveGone fails the resource, which retries the mark.
 func (f *rebuildFlusher) markStale(ctx context.Context, id string) error {
 	mctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), detachedMarkTimeout)
 	defer cancel()
@@ -686,7 +696,9 @@ func (f *rebuildFlusher) finish(ctx context.Context) error {
 		slog.Warn("rebuild left resource incomplete; marking stale for sweep",
 			slog.String("type", f.resourceType), slog.String("id", id))
 		f.failed++
-		_ = f.markStale(ctx, id) // logged; the failure is counted either way
+		if err := f.markStale(ctx, id); err != nil {
+			f.markFailed = true // logged; the failure is counted either way
+		}
 	}
 	return nil
 }
@@ -715,6 +727,7 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 		return
 	}
 	if _, err := f.idx.st.MarkStale(sctx, roots, 0); err != nil {
+		f.markFailed = true
 		slog.Error("failed to mark unfinished rebuild resources stale; sweep cannot recover them",
 			slog.String("type", f.resourceType), slog.Int("count", len(roots)), slog.String("error", err.Error()))
 	}
@@ -722,10 +735,17 @@ func (f *rebuildFlusher) salvage(ctx context.Context) {
 
 // errorIfFailed converts accumulated per-resource failures into a rebuild
 // error, so the Temporal workflow surfaces the failure instead of a silent
-// partial success. The failed resources are already marked stale.
+// partial success. When every failed resource is durably marked stale it is a
+// RebuildMarkedFailuresError, which RunRebuild does not retry: the sweep
+// recovers them. When a mark failed (markFailed) it is a plain error, which
+// RunRebuild retries: a resource may have no mark, and the sweep may not
+// recover it.
 func (f *rebuildFlusher) errorIfFailed() error {
 	if f.failed == 0 {
 		return nil
 	}
-	return fmt.Errorf("rebuild of %s failed %d resource(s); they are marked stale for sweep recovery", f.resourceType, f.failed)
+	if f.markFailed {
+		return fmt.Errorf("rebuild of %s failed %d resource(s); some of their stale marks failed, so the sweep may not recover every one", f.resourceType, f.failed)
+	}
+	return &RebuildMarkedFailuresError{ResourceType: f.resourceType, Count: f.failed}
 }

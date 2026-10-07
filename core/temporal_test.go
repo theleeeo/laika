@@ -481,3 +481,50 @@ func TestEnsureReverseSweepSchedules_ReturnsOtherErrors(t *testing.T) {
 	})
 	require.ErrorIs(t, err, boom)
 }
+
+// runRebuildFailingBegins runs the RunRebuild activity over a targeted
+// rebuild of products 1–3 whose BeginBuild fails for 1 and 2; markErrs sets
+// which of their marks fail.
+func runRebuildFailingBegins(t *testing.T, markErrs map[string]int) error {
+	t.Helper()
+	st := &rebuildRecordingStore{
+		beginErrs: map[string]error{"1": errors.New("begin failed"), "2": errors.New("begin failed")},
+		markErrs:  markErrs,
+	}
+	exec := &staticExecuter{byID: map[string][]projection.BuildDoc{"3": {productDoc("3")}}}
+	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}}, 0)
+
+	var ts testsuite.WorkflowTestSuite
+	env := ts.NewTestActivityEnvironment()
+	env.RegisterActivityWithOptions((&temporalActivities{idx: idx}).RunRebuild, activity.RegisterOptions{Name: rebuildActivityName})
+	_, err := env.ExecuteActivity(rebuildActivityName, ResourceSelector{ResourceType: "product", ResourceIDs: []string{"1", "2", "3"}})
+	return err
+}
+
+// A rebuild whose only failures are resources it durably marked fails the
+// activity non-retryably: a retry would add nothing the sweep doesn't
+// (ruling R10). The error's type names the case and its details carry the
+// count.
+func TestRunRebuild_FailuresAllMarkedFailNonRetryable(t *testing.T) {
+	err := runRebuildFailingBegins(t, nil)
+	require.Error(t, err)
+	var appErr *temporal.ApplicationError
+	require.True(t, errors.As(err, &appErr), "want an application error, got %T: %v", err, err)
+	require.True(t, appErr.NonRetryable(), "want a non-retryable error, got %v", err)
+	require.Equal(t, RebuildMarkedFailuresErrorType, appErr.Type())
+	var count int
+	require.NoError(t, appErr.Details(&count))
+	require.Equal(t, 2, count)
+}
+
+// A rebuild one of whose marks failed stays retryable: a resource has no
+// mark, so only a retry may still serve it.
+func TestRunRebuild_FailedMarkStaysRetryable(t *testing.T) {
+	err := runRebuildFailingBegins(t, map[string]int{"product/2": 1})
+	require.Error(t, err)
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		require.False(t, appErr.NonRetryable(), "want a retryable error, got %v", err)
+		require.NotEqual(t, RebuildMarkedFailuresErrorType, appErr.Type())
+	}
+}

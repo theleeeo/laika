@@ -498,14 +498,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 
 	// completed is the last fully consumed page boundary. The flusher's
 	// afterFlush hook checkpoints it: right after a flush, everything before
-	// that boundary is durably written and settled. Mid-page flushes
-	// checkpoint the previous boundary — conservative, never ahead of what was
-	// flushed.
+	// that boundary is durably written and settled, or failed and durably
+	// marked stale. Mid-page flushes checkpoint the previous boundary —
+	// conservative, never ahead of what was flushed. Once a mark of the walk
+	// has failed (rebuildFlusher.markFailed) it checkpoints nothing more: a
+	// resource may have no mark, and a retry must resume before it.
 	checkpointing := resumable && resume.checkpoint != nil
 	var completed *RebuildCursor
 	if checkpointing {
 		fl.afterFlush = func() {
-			if completed != nil {
+			if completed != nil && !fl.markFailed {
 				resume.checkpoint(*completed)
 			}
 		}

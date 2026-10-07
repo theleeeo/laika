@@ -76,6 +76,13 @@ func (a *temporalActivities) SweepStale(ctx context.Context, p SweepParams) (int
 // dead worker is detected and the activity retried on another instance. The
 // walk's cursor rides the heartbeat details: a retried attempt resumes where
 // the dead one durably stopped instead of restarting from scratch (ADR 0011).
+//
+// A rebuild whose failures are all resources it durably marked stale
+// (RebuildMarkedFailuresError) fails non-retryably, with type
+// RebuildMarkedFailuresErrorType and the count of failed resources as its
+// details: the sweep recovers them, and a retry would add nothing. Every
+// other error — an aborted rebuild, or one of whose marks failed — is
+// returned as it is, and retried.
 func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelector) error {
 	var start *RebuildCursor
 	if activity.HasHeartbeatDetails(ctx) {
@@ -90,7 +97,14 @@ func (a *temporalActivities) RunRebuild(ctx context.Context, sel ResourceSelecto
 
 	checkpoint, stop := heartbeatCursor(ctx, start, a.livenessInterval())
 	defer stop()
-	return a.idx.RebuildNowResumable(ctx, sel, start, checkpoint)
+	err := a.idx.RebuildNowResumable(ctx, sel, start, checkpoint)
+	var marked *RebuildMarkedFailuresError
+	if errors.As(err, &marked) {
+		activity.GetLogger(ctx).Warn("rebuild failed resources, all marked stale for the sweep; not retrying",
+			"resource_type", marked.ResourceType, "failed", marked.Count)
+		return temporal.NewNonRetryableApplicationError(err.Error(), RebuildMarkedFailuresErrorType, err, marked.Count)
+	}
+	return err
 }
 
 // RunReverseSweep runs one pass of a type's reverse sweep synchronously,
