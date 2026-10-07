@@ -702,9 +702,10 @@ func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 // owner token, as ReleaseOwners does, and backs each of those rows off in
 // the same statement: sweep_attempts becomes n, one more than before, and
 // sweep_after now() + min(backoff.Base × 2^(n−1), backoff.Max), which
-// ListStale waits for. The stale mark stays. It returns the rows it backed
-// off. It locks the rows in (type, id) order first, as the marks do (seams
-// S4).
+// ListStale waits for. The count saturates at the integer column's maximum,
+// 2^31−1, rather than failing the batch. The stale mark stays. It returns
+// the rows it backed off. It locks the rows in (type, id) order first, as
+// the marks do (seams S4).
 //
 // The delay is computed in microseconds as double precision with the
 // exponent held at 62 at most: base × 2^62 exceeds every Max a
@@ -720,7 +721,7 @@ func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff c
 		`WITH `+lockedInput+`
 		 UPDATE resources r
 		 SET owner_seq = NULL, owner_since = NULL,
-		     sweep_attempts = COALESCE(r.sweep_attempts, 0) + 1,
+		     sweep_attempts = LEAST(COALESCE(r.sweep_attempts, 0), 2147483646) + 1,
 		     sweep_after = now() + LEAST(
 		         $4::bigint::double precision * power(2::double precision, LEAST(COALESCE(r.sweep_attempts, 0), 62)),
 		         $5::bigint::double precision
@@ -887,18 +888,27 @@ func (s *Store) DeleteResourceIfSeq(ctx context.Context, resource model.Resource
 // turn is its stale mark or, once an owned build or delete of it failed
 // (ReleaseFailed), its sweep_after: a row whose sweep_after is later than
 // now() is skipped, and one whose turn has come queues behind the rows
-// marked before it, however old its own mark is (idx_resources_stale
-// follows that order). The claim leaves the backoff to the build's finish. It returns no metadata: the build
-// that serves an entry reads the row's at BeginBuild. The candidates are
-// locked FOR UPDATE SKIP LOCKED inside the claiming UPDATE, so of two
-// concurrent sweeps only one claims a row: the other skips it while it is
-// locked, and re-checks the owner condition against the claimed row once it
-// has committed.
+// marked before it, however old its own mark is. The claim leaves the
+// backoff to the build's finish. It returns no metadata: the build that
+// serves an entry reads the row's at BeginBuild.
+//
+// idx_resources_stale follows the turn order, and the candidates are bounded
+// on it by turn <= GREATEST(before, now()), which every eligible row meets
+// (its turn is a stale_since before before or a sweep_after not after
+// now()): the scan stops at that bound rather than reading every stale row,
+// the backed-off ones included, when fewer than limit are eligible.
+//
+// The candidates are locked FOR UPDATE SKIP LOCKED inside the claiming
+// UPDATE, so of two concurrent sweeps only one claims a row: the other skips
+// it while it is locked, and re-checks the owner condition against the
+// claimed row once it has committed.
 func (s *Store) ListStale(ctx context.Context, before time.Time, limit int, lease time.Duration) ([]core.StaleResource, error) {
 	rows, err := s.pool.Query(ctx,
 		`WITH candidates AS (
 		     SELECT r.type, r.id FROM resources r
-		     WHERE r.stale_since IS NOT NULL AND r.stale_since < $1
+		     WHERE r.stale_since IS NOT NULL
+		       AND COALESCE(r.sweep_after, r.stale_since) <= GREATEST($1::timestamptz, now())
+		       AND r.stale_since < $1
 		       AND (r.sweep_after IS NULL OR r.sweep_after <= now()) AND `+claimable("$3")+`
 		     ORDER BY COALESCE(r.sweep_after, r.stale_since)
 		     LIMIT $2

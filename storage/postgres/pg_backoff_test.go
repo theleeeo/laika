@@ -215,16 +215,22 @@ func TestReleaseFailed_ReleasesOnlyMatchingTokensAndReturnsThoseRows(t *testing.
 func TestReleaseFailed_AHugeAttemptCountBacksOffByTheCap(t *testing.T) {
 	st := NewStore(testPool)
 	b := core.SweepBackoff{Base: 5 * time.Minute, Max: 24 * time.Hour}
-	for _, prior := range []int{1000, math.MaxInt32 - 1} {
-		res := model.Resource{Type: "bo-rh", Id: fmt.Sprint(prior)}
+	// The count saturates at the column's maximum instead of failing.
+	for _, c := range []struct{ prior, want int }{
+		{1000, 1001},
+		{math.MaxInt32 - 1, math.MaxInt32},
+		{math.MaxInt32, math.MaxInt32},
+	} {
+		res := model.Resource{Type: "bo-rh", Id: fmt.Sprint(c.prior)}
 		markUnclaimed(t, st, res)
-		backOff(t, testPool, res, prior, "-1 second")
+		backOff(t, testPool, res, c.prior, "-1 second")
 		tok := own(t, testPool, res)
 
 		got, before, after := releaseFailed(t, st, testPool, []core.Owned{{Resource: res, Token: tok}}, b)
-		if len(got) != 1 || got[0].Attempts != prior+1 {
-			t.Fatalf("after %d failures: got %+v, want attempt %d", prior, got, prior+1)
+		if len(got) != 1 || got[0].Attempts != c.want {
+			t.Fatalf("after %d failures: got %+v, want attempt %d", c.prior, got, c.want)
 		}
+		requireOwner(t, testPool, res, owner{}, "the release")
 		requireTurnIn(t, got[0], before, after, b.Max)
 	}
 }
