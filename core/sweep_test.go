@@ -160,10 +160,11 @@ func TestSweepStale_EmptyBacklog(t *testing.T) {
 	}
 }
 
-// A tombstone whose type was dropped from config must not wedge the sweep:
-// ListStale serves oldest-first, so a panic (or a permanent skip) on that
-// entry would starve everything behind it. The ES documents live in
-// de-configured indices — cleanup's territory — but the relation edges and
+// A tombstone whose type was dropped from config must still be finished, not
+// left failing: a panic would take the sweep down with the entries behind it,
+// and a delete that refused it would fail every time, retried by the sweep at
+// a growing interval up to the backoff's cap forever. The ES documents live
+// in de-configured indices — cleanup's territory — but the relation edges and
 // the tombstone row must still be finished.
 func TestSweepStale_TombstoneOfDeconfiguredType_DoesNotWedgeSweep(t *testing.T) {
 	st := &staleListingStore{
@@ -185,7 +186,7 @@ func TestSweepStale_TombstoneOfDeconfiguredType_DoesNotWedgeSweep(t *testing.T) 
 		t.Fatalf("the de-configured tombstone's relation edges must still be cleaned: %v", st.callsSnapshot())
 	}
 	if st.indexOf("DeleteResourceIfSeq:ghost/g1:9") == -1 {
-		t.Fatalf("the de-configured tombstone must be finished, or the oldest-first backlog never advances: %v", st.callsSnapshot())
+		t.Fatalf("the de-configured tombstone must be finished, not left failing for the sweep to retry forever: %v", st.callsSnapshot())
 	}
 	if st.indexOf("BeginBuild:product/1") == -1 {
 		t.Fatalf("entries behind the tombstone must still be served: %v", st.callsSnapshot())

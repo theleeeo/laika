@@ -24,8 +24,10 @@ func (idx *Indexer) handleDelete(ctx context.Context, p RebuildPayload, buildSeq
 
 	// A type dropped from config has an unknowable version set: its ES
 	// documents live in de-configured indices, which are cleanup's territory.
-	// The relation edges and the tombstone must still be finished — the sweep
-	// serves oldest-first, so refusing here would wedge it forever.
+	// The relation edges and the tombstone must still be finished: refusing
+	// here would fail the delete every time, so the sweep would retry it at
+	// a growing interval up to the backoff's cap forever, and its row and
+	// edges would never go.
 	cfg := idx.resources.Get(p.ResourceType)
 	if cfg == nil {
 		logger.Warn("deleting resource of a type no longer in config; leaving its de-configured indices to cleanup")

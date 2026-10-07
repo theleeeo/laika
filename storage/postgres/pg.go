@@ -483,9 +483,12 @@ const lockedInput = `locked AS MATERIALIZED (
 // lock it, each above every number the row carried. A row created by a
 // transaction still uncommitted when the statement started is not in locked,
 // so a mark of it can draw before that creator's numbers and write a lower
-// stale_seq; the guards only compare stale_seq and owner tokens for
-// equality, and the value is unique, so that costs nothing. MATERIALIZED
-// draws each value once, however often the write reads seq.
+// stale_seq (seams S14). The guards compare stale_seq and owner tokens only
+// for equality, and the value is unique, so that costs them nothing.
+// ReleaseFailed does order change_seq against an owner token, and backs off
+// a row whose change_seq is above its stale_seq, so a lowered stale_seq
+// doesn't spare it the backoff (see ReleaseFailed). MATERIALIZED draws each
+// value once, however often the write reads seq.
 const drawnInput = `drawn AS MATERIALIZED (
 		     SELECT x.t, x.i, nextval('change_sequence') AS seq
 		     FROM (SELECT DISTINCT t, i FROM unnest($1::text[], $2::text[]) AS u(t, i)) AS x
