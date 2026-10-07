@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
@@ -14,7 +15,12 @@ import (
 // federated query test can control the standardized search fields (search /
 // search_secondary) without driving the full Build pipeline (covered separately).
 func (t *TestSuite) indexRaw(index, id string, doc map[string]any) {
-	b, err := json.Marshal(doc)
+	// Carry resource_id as every built document does, set on a copy so the
+	// caller's map stays as given.
+	withID := make(map[string]any, len(doc)+1)
+	maps.Copy(withID, doc)
+	withID[resource.ResourceIDField] = id
+	b, err := json.Marshal(withID)
 	t.Require().NoError(err)
 	res, err := t.esClient.Index(
 		index,
