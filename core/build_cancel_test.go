@@ -86,6 +86,9 @@ func (s *cancellingStore) RenewOwners(_ context.Context, owned []Owned) ([]Owned
 	return owned, nil
 }
 func (s *cancellingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
+func (s *cancellingStore) ReleaseFailed(context.Context, []Owned, SweepBackoff) ([]BackedOff, error) {
+	return nil, nil
+}
 func (s *cancellingStore) FinishOwned(context.Context, model.Resource, int64, int64) (FollowUp, error) {
 	return FollowUp{}, nil
 }

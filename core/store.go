@@ -104,6 +104,18 @@ type Store interface {
 	// row's owner token, leaving the stale mark: a failed or shed owned
 	// build, so the next change claims or the sweep rebuilds.
 	ReleaseOwners(ctx context.Context, owned []Owned) error
+	// ReleaseFailed finishes an owned build or delete that returned an
+	// error: it drops every given ownership whose token is still the row's
+	// owner token, as ReleaseOwners does, and backs each of those rows off
+	// in the same statement. The row's sweep_attempts becomes n, one more
+	// than before, and its sweep_after now() + min(backoff.Base × 2^(n−1),
+	// backoff.Max); the exponent stops growing once the delay reaches Max,
+	// so no attempt count overflows. The stale mark stays. It returns the
+	// rows it backed off, each with its new attempt count; a row whose
+	// ownership was lost is neither released nor backed off. ListStale skips
+	// a row until its sweep_after, and a successful build or delete, or a
+	// registration of the resource itself, resets both columns (ADR 0008).
+	ReleaseFailed(ctx context.Context, owned []Owned, backoff SweepBackoff) ([]BackedOff, error)
 	// NextChangeSeq takes a value of the Change Sequence: the start of a
 	// Rebuild plan walk, taken before the walk fetches its first page.
 	NextChangeSeq(ctx context.Context) (int64, error)
@@ -199,6 +211,24 @@ type ChangeCheck struct {
 type Owned struct {
 	model.Resource
 	Token int64
+}
+
+// SweepBackoff is how long the StaleSweep leaves a resource whose owned
+// build or delete failed: Base after its first failure in a row, doubling
+// with each further one, never more than Max (ADR 0008).
+type SweepBackoff struct {
+	Base time.Duration
+	Max  time.Duration
+}
+
+// BackedOff is a row ReleaseFailed backed off.
+type BackedOff struct {
+	model.Resource
+	// Attempts is the row's failures in a row, this one included: its
+	// sweep_attempts after the release.
+	Attempts int
+	// After is when the sweep may serve the row again: its sweep_after.
+	After time.Time
 }
 
 // FollowUp is what finishing an owned build or delete hands on.

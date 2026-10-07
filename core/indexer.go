@@ -76,6 +76,16 @@ type Config struct {
 	// (seams S16). Default 30s.
 	OwnerLease time.Duration
 
+	// SweepBackoff is how long the StaleSweep leaves a resource after its
+	// first failed owned build or delete in a row (Store.ReleaseFailed);
+	// each further failure doubles it, up to SweepBackoffMax. A successful
+	// build or delete, or a registration of the resource itself, resets it
+	// (ADR 0008). Default 5m.
+	SweepBackoff time.Duration
+	// SweepBackoffMax caps SweepBackoff's doubling: a resource that never
+	// builds is retried at this interval. Default 24h.
+	SweepBackoffMax time.Duration
+
 	// ReverseSweeps enables the reverse sweep (ADR 0012) per resource type:
 	// each entry's type is swept on its own schedule
 	// (EnsureReverseSweepSchedules), paced by its config. A type without an

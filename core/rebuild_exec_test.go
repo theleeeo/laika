@@ -416,6 +416,9 @@ func (s *rebuildRecordingStore) RenewOwners(_ context.Context, owned []Owned) ([
 	return owned, nil
 }
 func (s *rebuildRecordingStore) ReleaseOwners(context.Context, []Owned) error { return nil }
+func (s *rebuildRecordingStore) ReleaseFailed(context.Context, []Owned, SweepBackoff) ([]BackedOff, error) {
+	return nil, nil
+}
 func (s *rebuildRecordingStore) FinishOwned(_ context.Context, r model.Resource, _, _ int64) (FollowUp, error) {
 	s.record("FinishOwned:%s/%s", r.Type, r.Id)
 	return FollowUp{}, nil

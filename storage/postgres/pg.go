@@ -690,6 +690,12 @@ func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 	return err
 }
 
+// ReleaseFailed releases the ownerships of a failed owned build or delete
+// and backs their rows off (core.Store.ReleaseFailed).
+func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff core.SweepBackoff) ([]core.BackedOff, error) {
+	return nil, errors.New("ReleaseFailed: not implemented")
+}
+
 // NextChangeSeq takes a value of the Change Sequence.
 func (s *Store) NextChangeSeq(ctx context.Context) (int64, error) {
 	var seq int64
