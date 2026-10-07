@@ -164,6 +164,12 @@ func (c Config) Validate() error {
 	return nil
 }
 
+// ResourceIDField is the root keyword field every document carries, equal to
+// its document id. Every search sorts on it last, so hits tied on everything
+// before it keep one order across page requests; Elasticsearch 8 refuses a
+// sort on _id by default. It is a reserved top-level document key.
+const ResourceIDField = "resource_id"
+
 func (vc VersionConfig) Validate(resourceName string, version int) error {
 	for i, f := range vc.Fields {
 		if err := f.Validate(); err != nil {
