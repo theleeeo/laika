@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"go.temporal.io/sdk/client"
@@ -97,6 +98,7 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 			Versions:     sel.Versions,
 			ResourceIDs:  sel.ResourceIDs,
 			Metadata:     sel.Metadata,
+			Pacing:       sel.Pacing,
 		}, rebuildResume{}); err != nil {
 			return fmt.Errorf("rebuild %s: %w", sel.ResourceType, err)
 		}
@@ -120,6 +122,11 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 // Such walks, and targeted (by-ID) rebuilds, ignore
 // start and never checkpoint — they restart from scratch, as before (ADR 0011).
 //
+// A selector's Pacing paces an all-of-type walk (walkPacer): its plans are
+// asked for pages of PageSize, and before each page the walk waits out the
+// rest of the previous page's PageInterval and while the build pool is
+// pressured. A targeted rebuild ignores it.
+//
 // Resuming also requires the plan's Executer to honour
 // projection.BuildRequest.PageToken: one that ignores it restarts from the head
 // of the listing on every resume. That is safe — a full re-walk settles
@@ -133,6 +140,7 @@ func (idx *Indexer) RebuildNowResumable(ctx context.Context, sel ResourceSelecto
 		Versions:     sel.Versions,
 		ResourceIDs:  sel.ResourceIDs,
 		Metadata:     sel.Metadata,
+		Pacing:       sel.Pacing,
 	}, rebuildResume{start: start, checkpoint: checkpoint}); err != nil {
 		return fmt.Errorf("rebuild %s: %w", sel.ResourceType, err)
 	}
@@ -173,6 +181,57 @@ func (idx *Indexer) validateSelectors(selectors []ResourceSelector) error {
 				return &InvalidArgumentError{Msg: fmt.Sprintf("resource %q has no version %d", sel.ResourceType, v)}
 			}
 		}
+		if p := sel.Pacing; p != nil {
+			if p.PageSize < 0 || p.PageInterval < 0 {
+				return &InvalidArgumentError{Msg: fmt.Sprintf("resource %q: negative walk page size or page interval", sel.ResourceType)}
+			}
+			if p.PageSize > math.MaxInt32 {
+				// A listing's page size is an int32 on the provider contract.
+				return &InvalidArgumentError{Msg: fmt.Sprintf("resource %q: walk page size %d above %d", sel.ResourceType, p.PageSize, math.MaxInt32)}
+			}
+		}
 	}
+	return nil
+}
+
+// walkPacer paces an all-of-type rebuild walk by its selector's WalkPacing;
+// a nil pacing paces nothing.
+type walkPacer struct {
+	idx    *Indexer
+	pacing *WalkPacing
+	// pageStart is when the walk asked for its last page; zero before the
+	// first.
+	pageStart time.Time
+}
+
+// pageSize is the listing page size the walk asks its plans for: the
+// pacing's, or 0 — the plan's own — when unpaced.
+func (w *walkPacer) pageSize() int {
+	if w.pacing == nil {
+		return 0
+	}
+	return w.pacing.PageSize
+}
+
+// beforePage runs before the walk asks for a page: before a plan's Execute,
+// which may fetch its first page at once, and after a page that has a next.
+// It waits out the rest of the previous page's PageInterval, measured from
+// that page's start, then waits while the build pool is pressured, then
+// starts the new page's clock. Called only when another page follows, it
+// never waits after the walk's last page. A ctx that ends during a wait
+// returns its error.
+func (w *walkPacer) beforePage(ctx context.Context) error {
+	if w.pacing == nil {
+		return nil
+	}
+	if !w.pageStart.IsZero() {
+		if err := w.idx.waitPageInterval(ctx, w.pacing.PageInterval-time.Since(w.pageStart)); err != nil {
+			return err
+		}
+	}
+	if err := w.idx.awaitPoolRelief(ctx, "rebuild walk"); err != nil {
+		return err
+	}
+	w.pageStart = time.Now()
 	return nil
 }

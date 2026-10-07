@@ -26,9 +26,9 @@ const (
 	// defaultReverseSweepPageInterval is a page's rate budget when
 	// ReverseSweepConfig.PageInterval is zero.
 	defaultReverseSweepPageInterval = time.Second
-	// defaultReverseSweepBackoff is how long the sweep waits before it
-	// checks the pool's pressure again.
-	defaultReverseSweepBackoff = time.Second
+	// defaultPoolBackoff is how long a paced walk — the reverse sweep, or a
+	// paced rebuild walk — waits before it checks the pool's pressure again.
+	defaultPoolBackoff = time.Second
 )
 
 // ReverseSweepConfig enables the reverse sweep for one resource type and
@@ -95,9 +95,10 @@ func reverseSweepConfigs(in map[string]ReverseSweepConfig, resources resource.Co
 // type, fails it without retrying: no retry could make it succeed.
 var errReverseSweepNotEnabled = errors.New("not enabled in Config.ReverseSweeps")
 
-// reverseSweepBackoffMsg is the Debug message of each wait the sweep makes
-// while the pool reports pressure.
-const reverseSweepBackoffMsg = "reverse sweep backing off: build pool pressured"
+// poolBackoffMsg is the Debug message of each wait a paced walk — the
+// reverse sweep, or a paced rebuild walk — makes while the pool reports
+// pressure; its "walk" attribute names which.
+const poolBackoffMsg = "walk backing off: build pool pressured"
 
 // ReverseSweepNow runs one pass of resourceType's reverse sweep in-process,
 // from its first id to its last. It is the body of the ReverseSweep activity,
@@ -145,7 +146,7 @@ func (idx *Indexer) ReverseSweepNow(ctx context.Context, resourceType string) (R
 //
 // Pacing: before each page, the first included, the run waits while the
 // build pool is pressured (its queue at Config.QueueHighWater), checking
-// again every reverseSweepBackoff: it starts no page while the pool is
+// again every poolBackoff: it starts no page while the pool is
 // pressured. After a page it waits out the rest of PageInterval, measured
 // from the page's start, so it probes at most PageSize ids per PageInterval;
 // it doesn't wait after the last page. A ctx that ends during a wait, or
@@ -170,7 +171,7 @@ func (idx *Indexer) ReverseSweepResumable(ctx context.Context, resourceType, aft
 	}
 
 	for {
-		if err := idx.awaitPoolRelief(ctx); err != nil {
+		if err := idx.awaitPoolRelief(ctx, "reverse sweep"); err != nil {
 			return res, err
 		}
 		pageStart := time.Now()
@@ -304,8 +305,9 @@ func metadataKey(md map[string]string) string {
 }
 
 // awaitPoolRelief returns once the build pool is not pressured, checking
-// every reverseSweepBackoff, or with ctx's error once ctx ends.
-func (idx *Indexer) awaitPoolRelief(ctx context.Context) error {
+// every poolBackoff, or with ctx's error once ctx ends. walk names the paced
+// walk that waits, for the back-off's log.
+func (idx *Indexer) awaitPoolRelief(ctx context.Context, walk string) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -313,8 +315,8 @@ func (idx *Indexer) awaitPoolRelief(ctx context.Context) error {
 		if !idx.pool.pressured() {
 			return nil
 		}
-		slog.Debug(reverseSweepBackoffMsg, slog.Duration("backoff", idx.reverseSweepBackoff))
-		if err := sleepCtx(ctx, idx.reverseSweepBackoff); err != nil {
+		slog.Debug(poolBackoffMsg, slog.String("walk", walk), slog.Duration("backoff", idx.poolBackoff))
+		if err := sleepCtx(ctx, idx.poolBackoff); err != nil {
 			return err
 		}
 	}

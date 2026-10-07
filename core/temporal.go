@@ -26,13 +26,19 @@ const (
 	// reverseSweepScheduleIDPrefix, followed by the resource type, is the ID
 	// of a type's ReverseSweep schedule.
 	reverseSweepScheduleIDPrefix = "laika-reverse-sweep-"
+	// forwardWalkScheduleIDPrefix, followed by the resource type, is the ID
+	// of a type's ForwardWalk schedule.
+	forwardWalkScheduleIDPrefix = "laika-forward-walk-"
 
 	staleSweepWorkflowName   = "StaleSweep"
 	rebuildWalkWorkflowName  = "RebuildWalk"
 	reverseSweepWorkflowName = "ReverseSweep"
+	forwardWalkWorkflowName  = "ForwardWalk"
 	sweepActivityName        = "SweepStale"
 	rebuildActivityName      = "RunRebuild"
 	reverseSweepActivityName = "RunReverseSweep"
+	// forwardWalkSelectorsActivityName resolves a ForwardWalk run's walks.
+	forwardWalkSelectorsActivityName = "ForwardWalkSelectors"
 )
 
 // ReverseSweepParams names the resource type one ReverseSweep run sweeps. Its
@@ -153,6 +159,21 @@ func (a *temporalActivities) RunReverseSweep(ctx context.Context, p ReverseSweep
 	return res, err
 }
 
+// ForwardWalkSelectors resolves one ForwardWalk run's walks, one selector per
+// metadata map (Indexer.forwardWalkSelectors). It runs the config's Metadata
+// func, which is not deterministic, so the workflow never calls it itself. A
+// type the worker's config can't walk — unknown to Resources, or without a
+// Config.ForwardWalks entry — fails with a non-retryable error, so the run
+// fails after one attempt; a failing Metadata func is retried.
+func (a *temporalActivities) ForwardWalkSelectors(ctx context.Context, p ForwardWalkParams) ([]ResourceSelector, error) {
+	sels, err := a.idx.forwardWalkSelectors(ctx, p.ResourceType)
+	if errors.Is(err, ErrUnknownResource) || errors.Is(err, errForwardWalkNotEnabled) {
+		// The worker's config can't walk the type; no retry would.
+		return nil, temporal.NewNonRetryableApplicationError(err.Error(), "ForwardWalkNotConfigured", err)
+	}
+	return sels, err
+}
+
 // livenessInterval is heartbeatInterval, or rebuildHeartbeatInterval when it
 // is zero.
 func (a *temporalActivities) livenessInterval() time.Duration {
@@ -254,6 +275,48 @@ func ReverseSweepWorkflow(ctx workflow.Context, p ReverseSweepParams) (ReverseSw
 	return res, err
 }
 
+// ForwardWalkWorkflow runs one run of a type's forward walk: its
+// ForwardWalkSelectors activity resolves the run's walks from the worker's
+// Config.ForwardWalks entry, one per metadata map, and the workflow starts a
+// RebuildWalk child per walk, one after another in the maps' order, waiting
+// for each, so the type's rate budget holds per type. Each walk is an
+// all-of-type RebuildWalk paced by the config. A child that failed with the
+// non-retryable RebuildMarkedFailuresErrorType application error is a done
+// walk: its failed resources are marked stale for the sweep, so its count
+// (the error's details) adds to the result's FailedResources and is logged.
+// Every walk runs even if an earlier one failed; any other child failure is
+// joined into the run's error.
+func ForwardWalkWorkflow(ctx workflow.Context, p ForwardWalkParams) (ForwardWalkResult, error) {
+	actx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 5 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
+	})
+	var sels []ResourceSelector
+	if err := workflow.ExecuteActivity(actx, forwardWalkSelectorsActivityName, p).Get(ctx, &sels); err != nil {
+		return ForwardWalkResult{}, err
+	}
+	return runForwardWalks(p.ResourceType, sels, workflow.GetLogger(ctx), func(sel ResourceSelector) error {
+		return workflow.ExecuteChildWorkflow(ctx, rebuildWalkWorkflowName, sel).Get(ctx, nil)
+	}, markedFailuresOfChild)
+}
+
+// markedFailuresOfChild reads a RebuildWalk child's error as a
+// marked-failures outcome: the RebuildMarkedFailuresErrorType application
+// error RunRebuild returns, found through the child and activity errors that
+// wrap it, with its count from its details. An unreadable count counts 0:
+// the walk is done either way, its failed resources marked for the sweep.
+func markedFailuresOfChild(err error) (int, bool) {
+	var appErr *temporal.ApplicationError
+	if !errors.As(err, &appErr) || appErr.Type() != RebuildMarkedFailuresErrorType {
+		return 0, false
+	}
+	var n int
+	if appErr.HasDetails() && appErr.Details(&n) != nil {
+		return 0, true
+	}
+	return n, true
+}
+
 // NewWorker creates a Temporal worker hosting the Indexer's workflows and
 // activities. The caller starts and stops it. Every embedder runs the same
 // worker, so the sweep safety net has exactly one implementation.
@@ -262,10 +325,12 @@ func (idx *Indexer) NewWorker() worker.Worker {
 	w.RegisterWorkflowWithOptions(StaleSweepWorkflow, workflow.RegisterOptions{Name: staleSweepWorkflowName})
 	w.RegisterWorkflowWithOptions(RebuildWalkWorkflow, workflow.RegisterOptions{Name: rebuildWalkWorkflowName})
 	w.RegisterWorkflowWithOptions(ReverseSweepWorkflow, workflow.RegisterOptions{Name: reverseSweepWorkflowName})
+	w.RegisterWorkflowWithOptions(ForwardWalkWorkflow, workflow.RegisterOptions{Name: forwardWalkWorkflowName})
 	a := &temporalActivities{idx: idx}
 	w.RegisterActivityWithOptions(a.SweepStale, activity.RegisterOptions{Name: sweepActivityName})
 	w.RegisterActivityWithOptions(a.RunRebuild, activity.RegisterOptions{Name: rebuildActivityName})
 	w.RegisterActivityWithOptions(a.RunReverseSweep, activity.RegisterOptions{Name: reverseSweepActivityName})
+	w.RegisterActivityWithOptions(a.ForwardWalkSelectors, activity.RegisterOptions{Name: forwardWalkSelectorsActivityName})
 	return w
 }
 
@@ -326,6 +391,27 @@ func ensureReverseSweepSchedules(ctx context.Context, sc scheduleCreator, taskQu
 		})
 		if err != nil && !errors.Is(err, temporal.ErrScheduleAlreadyRunning) {
 			return fmt.Errorf("reverse sweep schedule for resource type %q: %w", typ, err)
+		}
+	}
+	return nil
+}
+
+func ensureForwardWalkSchedules(ctx context.Context, sc scheduleCreator, taskQueue string, walks map[string]ForwardWalkConfig) error {
+	for _, typ := range slices.Sorted(maps.Keys(walks)) {
+		_, err := sc.Create(ctx, client.ScheduleOptions{
+			ID: forwardWalkScheduleIDPrefix + typ,
+			Spec: client.ScheduleSpec{
+				Intervals: []client.ScheduleIntervalSpec{{Every: walks[typ].Interval}},
+			},
+			Action: &client.ScheduleWorkflowAction{
+				Workflow:  forwardWalkWorkflowName,
+				Args:      []any{ForwardWalkParams{ResourceType: typ}},
+				TaskQueue: taskQueue,
+			},
+			Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+		})
+		if err != nil && !errors.Is(err, temporal.ErrScheduleAlreadyRunning) {
+			return fmt.Errorf("forward walk schedule for resource type %q: %w", typ, err)
 		}
 	}
 	return nil

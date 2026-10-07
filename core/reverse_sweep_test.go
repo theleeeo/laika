@@ -119,7 +119,7 @@ func newSweepIndexer(st *recordingStore, ex *sweepExecuter, p *fakeProbe, sweep 
 		QueueSize:     16,
 		ReverseSweeps: map[string]ReverseSweepConfig{"product": sweep},
 	})
-	idx.reverseSweepBackoff = time.Millisecond
+	idx.poolBackoff = time.Millisecond
 	return idx, be
 }
 
@@ -593,7 +593,7 @@ func newPressureIndexer(st *recordingStore, p *fakeProbe) *Indexer {
 		QueueHighWater: 2,
 		ReverseSweeps:  map[string]ReverseSweepConfig{"product": {PageSize: 2, PageInterval: time.Nanosecond}},
 	})
-	idx.reverseSweepBackoff = time.Millisecond
+	idx.poolBackoff = time.Millisecond
 	return idx
 }
 
@@ -613,7 +613,7 @@ func TestReverseSweep_BacksOffWhileThePoolIsPressured(t *testing.T) {
 		"after a page":          {midRun: true, listedWhilePressured: []string{"ListResources:product::2"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			backoff := signalLogs(t, reverseSweepBackoffMsg)
+			backoff := signalLogs(t, poolBackoffMsg)
 			st := &recordingStore{}
 			seedRows(st, nil, "a", "b", "c", "d")
 			p := &fakeProbe{}
@@ -781,8 +781,8 @@ func TestNew_ReverseSweeps(t *testing.T) {
 	if got, want := idx.reverseSweeps["product"], (ReverseSweepConfig{Interval: 24 * time.Hour, PageSize: 200, PageInterval: time.Second}); got != want {
 		t.Fatalf("defaults: got %+v, want %+v", got, want)
 	}
-	if idx.reverseSweepBackoff != time.Second {
-		t.Fatalf("the pressure back-off defaults to 1s, got %v", idx.reverseSweepBackoff)
+	if idx.poolBackoff != time.Second {
+		t.Fatalf("the pressure back-off defaults to 1s, got %v", idx.poolBackoff)
 	}
 
 	set := ReverseSweepConfig{Interval: time.Hour, PageSize: 5, PageInterval: time.Millisecond}

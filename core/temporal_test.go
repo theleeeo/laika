@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"go.temporal.io/sdk/converter"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
 )
 
 func TestStaleSweepWorkflow_LoopsUntilBacklogDrained(t *testing.T) {
@@ -526,4 +528,239 @@ func TestRunRebuild_FailedMarkStaysRetryable(t *testing.T) {
 	require.True(t, errors.As(err, &appErr), "want an application error, got %T: %v", err, err)
 	require.False(t, appErr.NonRetryable(), "want a retryable error, got %v", err)
 	require.NotEqual(t, RebuildMarkedFailuresErrorType, appErr.Type())
+}
+
+// logRecord is one message a captureLogger saw.
+type logRecord struct {
+	level   string
+	msg     string
+	keyvals []any
+}
+
+// captureLogger is a Temporal log.Logger that records every message.
+type captureLogger struct {
+	mu   sync.Mutex
+	recs []logRecord
+}
+
+func (l *captureLogger) add(level, msg string, keyvals []any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recs = append(l.recs, logRecord{level, msg, keyvals})
+}
+func (l *captureLogger) Debug(msg string, kv ...any) { l.add("debug", msg, kv) }
+func (l *captureLogger) Info(msg string, kv ...any)  { l.add("info", msg, kv) }
+func (l *captureLogger) Warn(msg string, kv ...any)  { l.add("warn", msg, kv) }
+func (l *captureLogger) Error(msg string, kv ...any) { l.add("error", msg, kv) }
+
+// withMsg is every record whose message is msg.
+func (l *captureLogger) withMsg(msg string) []logRecord {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []logRecord
+	for _, r := range l.recs {
+		if r.msg == msg {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// rebuildCalls records the selectors a stand-in RunRebuild activity got, and
+// answers each with the outcome its metadata's actor names.
+type rebuildCalls struct {
+	outcome map[string]error
+
+	mu   sync.Mutex
+	sels []ResourceSelector
+}
+
+func (c *rebuildCalls) run(_ context.Context, sel ResourceSelector) error {
+	c.mu.Lock()
+	c.sels = append(c.sels, sel)
+	c.mu.Unlock()
+	return c.outcome[sel.Metadata["actor"]]
+}
+
+func (c *rebuildCalls) snapshot() []ResourceSelector {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.sels)
+}
+
+// forwardWalkWorkflowEnv runs ForwardWalkWorkflow over idx's own
+// ForwardWalkSelectors activity and the real RebuildWalk child, its RunRebuild
+// activity stood in by calls.
+func forwardWalkWorkflowEnv(idx *Indexer, calls *rebuildCalls, logger *captureLogger) *testsuite.TestWorkflowEnvironment {
+	var ts testsuite.WorkflowTestSuite
+	ts.SetLogger(logger)
+	env := ts.NewTestWorkflowEnvironment()
+	a := &temporalActivities{idx: idx}
+	env.RegisterWorkflowWithOptions(RebuildWalkWorkflow, workflow.RegisterOptions{Name: rebuildWalkWorkflowName})
+	env.RegisterActivityWithOptions(a.ForwardWalkSelectors, activity.RegisterOptions{Name: forwardWalkSelectorsActivityName})
+	env.RegisterActivityWithOptions(calls.run, activity.RegisterOptions{Name: rebuildActivityName})
+	return env
+}
+
+// twoActorWalks configures product's forward walk with two actors' maps.
+func twoActorWalks() map[string]ForwardWalkConfig {
+	return map[string]ForwardWalkConfig{"product": {
+		PageSize:     7,
+		PageInterval: 3 * time.Second,
+		Metadata: func(context.Context) ([]map[string]string, error) {
+			return []map[string]string{actor("A"), actor("B")}, nil
+		},
+	}}
+}
+
+// A ForwardWalk run starts one RebuildWalk child per metadata map, one after
+// another in the func's order, each selecting the type with the map as its
+// Metadata and the config's pacing.
+func TestForwardWalkWorkflow_StartsOneRebuildWalkPerMap(t *testing.T) {
+	idx, _, _ := newWalkIndexer(&walkExecuter{}, twoActorWalks())
+	calls := &rebuildCalls{}
+	env := forwardWalkWorkflowEnv(idx, calls, &captureLogger{})
+
+	env.ExecuteWorkflow(ForwardWalkWorkflow, ForwardWalkParams{ResourceType: "product"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError())
+	pacing := &WalkPacing{PageSize: 7, PageInterval: 3 * time.Second}
+	require.Equal(t, []ResourceSelector{
+		{ResourceType: "product", Metadata: actor("A"), Pacing: pacing},
+		{ResourceType: "product", Metadata: actor("B"), Pacing: pacing},
+	}, calls.snapshot())
+	var res ForwardWalkResult
+	require.NoError(t, env.GetWorkflowResult(&res))
+	require.Equal(t, ForwardWalkResult{Walks: 2}, res)
+}
+
+// A child that failed with the marked-failures application error is a done
+// walk: the run succeeds, its result counts the walk's failed resources, and
+// the count is logged.
+func TestForwardWalkWorkflow_MarkedFailuresAreADoneWalk(t *testing.T) {
+	idx, _, _ := newWalkIndexer(&walkExecuter{}, twoActorWalks())
+	marked := &RebuildMarkedFailuresError{ResourceType: "product", Count: 4}
+	calls := &rebuildCalls{outcome: map[string]error{
+		"A": temporal.NewNonRetryableApplicationError(marked.Error(), RebuildMarkedFailuresErrorType, marked, marked.Count),
+	}}
+	logger := &captureLogger{}
+	env := forwardWalkWorkflowEnv(idx, calls, logger)
+
+	env.ExecuteWorkflow(ForwardWalkWorkflow, ForwardWalkParams{ResourceType: "product"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.NoError(t, env.GetWorkflowError(), "a walk whose failures are all marked is done")
+	var res ForwardWalkResult
+	require.NoError(t, env.GetWorkflowResult(&res))
+	require.Equal(t, ForwardWalkResult{Walks: 2, FailedResources: 4}, res)
+	require.Len(t, calls.snapshot(), 2)
+	recs := logger.withMsg(forwardWalkMarkedFailuresMsg)
+	require.Len(t, recs, 1, "the walk's marked failures must be logged")
+	require.Contains(t, recs[0].keyvals, 4, "the log must carry the count")
+}
+
+// A child that fails with any other error fails the run — after the remaining
+// walks ran.
+func TestForwardWalkWorkflow_OtherChildFailureFailsTheRunAfterTheRest(t *testing.T) {
+	idx, _, _ := newWalkIndexer(&walkExecuter{}, twoActorWalks())
+	calls := &rebuildCalls{outcome: map[string]error{
+		"A": temporal.NewNonRetryableApplicationError("listing failed", "Other", nil),
+	}}
+	env := forwardWalkWorkflowEnv(idx, calls, &captureLogger{})
+
+	env.ExecuteWorkflow(ForwardWalkWorkflow, ForwardWalkParams{ResourceType: "product"})
+
+	require.True(t, env.IsWorkflowCompleted())
+	require.ErrorContains(t, env.GetWorkflowError(), "listing failed")
+	sels := calls.snapshot()
+	require.Len(t, sels, 2, "the walk after a failed one must run")
+	require.Equal(t, actor("B"), sels[1].Metadata)
+}
+
+// The selectors activity fails a type the worker's config can't walk with a
+// non-retryable error, and a failing metadata func with a retryable one.
+func TestForwardWalkSelectors_Errors(t *testing.T) {
+	walks := map[string]ForwardWalkConfig{"product": {
+		Metadata: func(context.Context) ([]map[string]string, error) { return nil, errors.New("directory down") },
+	}}
+	configured, _, _ := newWalkIndexer(&walkExecuter{}, walks)
+	unconfigured, _, _ := newWalkIndexer(&walkExecuter{}, nil)
+
+	for name, tc := range map[string]struct {
+		idx          *Indexer
+		typ          string
+		nonRetryable bool
+	}{
+		"unknown type":          {configured, "ghost", true},
+		"no ForwardWalks entry": {unconfigured, "product", true},
+		"metadata func error":   {configured, "product", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var ts testsuite.WorkflowTestSuite
+			env := ts.NewTestActivityEnvironment()
+			a := &temporalActivities{idx: tc.idx}
+			env.RegisterActivityWithOptions(a.ForwardWalkSelectors, activity.RegisterOptions{Name: forwardWalkSelectorsActivityName})
+			_, err := env.ExecuteActivity(forwardWalkSelectorsActivityName, ForwardWalkParams{ResourceType: tc.typ})
+			require.Error(t, err)
+			var appErr *temporal.ApplicationError
+			require.True(t, errors.As(err, &appErr), "want an application error, got %T: %v", err, err)
+			require.Equal(t, tc.nonRetryable, appErr.NonRetryable(), "non-retryable: %v", err)
+		})
+	}
+}
+
+func TestEnsureForwardWalkSchedules_OnePerTypeInSortedOrder(t *testing.T) {
+	f := &fakeScheduleCreator{}
+	err := ensureForwardWalkSchedules(context.Background(), f, "laika-indexer", map[string]ForwardWalkConfig{
+		"product":  {Interval: time.Hour, PageSize: 100, PageInterval: time.Second},
+		"category": {Interval: 2 * time.Hour, PageSize: 50, PageInterval: time.Second},
+	})
+	require.NoError(t, err)
+	require.Len(t, f.opts, 2)
+
+	for i, want := range []struct {
+		typ   string
+		every time.Duration
+	}{{"category", 2 * time.Hour}, {"product", time.Hour}} {
+		o := f.opts[i]
+		require.Equal(t, "laika-forward-walk-"+want.typ, o.ID, "schedule %d", i)
+		require.Equal(t, []client.ScheduleIntervalSpec{{Every: want.every}}, o.Spec.Intervals, "schedule %d", i)
+		require.Equal(t, enumspb.SCHEDULE_OVERLAP_POLICY_SKIP, o.Overlap, "schedule %d", i)
+		require.Equal(t, &client.ScheduleWorkflowAction{
+			Workflow:  "ForwardWalk",
+			Args:      []any{ForwardWalkParams{ResourceType: want.typ}},
+			TaskQueue: "laika-indexer",
+		}, o.Action, "schedule %d", i)
+	}
+}
+
+func TestEnsureForwardWalkSchedules_ToleratesExistingAndCreatesTheRest(t *testing.T) {
+	f := &fakeScheduleCreator{errByID: map[string]error{
+		"laika-forward-walk-category": temporalErrScheduleAlreadyRunning(),
+	}}
+	err := ensureForwardWalkSchedules(context.Background(), f, "laika-indexer", map[string]ForwardWalkConfig{
+		"category": {Interval: time.Hour},
+		"product":  {Interval: time.Hour},
+	})
+	require.NoError(t, err, "an already-existing schedule is success")
+	require.Len(t, f.opts, 2, "an existing schedule must not stop the remaining types' schedules")
+	require.Equal(t, "laika-forward-walk-product", f.opts[1].ID)
+}
+
+func TestEnsureForwardWalkSchedules_ReturnsOtherErrors(t *testing.T) {
+	boom := errors.New("boom")
+	f := &fakeScheduleCreator{err: boom}
+	err := ensureForwardWalkSchedules(context.Background(), f, "laika-indexer", map[string]ForwardWalkConfig{
+		"product": {Interval: time.Hour},
+	})
+	require.ErrorIs(t, err, boom)
+}
+
+// With no ForwardWalks entries there is nothing to schedule: the app calls
+// EnsureForwardWalkSchedules unconditionally at startup.
+func TestEnsureForwardWalkSchedules_NoEntriesCreatesNothing(t *testing.T) {
+	f := &fakeScheduleCreator{}
+	require.NoError(t, ensureForwardWalkSchedules(context.Background(), f, "laika-indexer", nil))
+	require.Empty(t, f.opts)
 }

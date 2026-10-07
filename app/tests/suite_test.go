@@ -42,6 +42,7 @@ type FakeProvider struct {
 	fetchResourceCount int
 	listResourcesCount int
 	fetchCounts        map[string]int // "type|id" -> FetchResource calls
+	listCalls          []source.ListResourcesParams
 
 	// pageSize bounds how many resources one ListResources call returns.
 	// 0 — the default, restored by Clear — serves everything in a single page,
@@ -83,13 +84,23 @@ func (f *FakeProvider) CallCounts() (fetchResource, listResources int) {
 	return f.fetchResourceCount, f.listResourcesCount
 }
 
-// ResetCallCounts zeros the provider call counters without touching data.
+// ResetCallCounts zeros the provider call counters, and forgets the recorded
+// ListResources calls, without touching data.
 func (f *FakeProvider) ResetCallCounts() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fetchResourceCount = 0
 	f.listResourcesCount = 0
 	f.fetchCounts = nil
+	f.listCalls = nil
+}
+
+// ListCalls returns every ListResources call's params, in call order, since
+// the last Clear or ResetCallCounts.
+func (f *FakeProvider) ListCalls() []source.ListResourcesParams {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.listCalls)
 }
 
 // FetchCount returns the number of FetchResource calls for one resource since
@@ -111,6 +122,7 @@ func (f *FakeProvider) ListResources(ctx context.Context, params source.ListReso
 	defer f.mu.Unlock()
 
 	f.listResourcesCount++
+	f.listCalls = append(f.listCalls, params)
 
 	var resources []source.ListedResource
 	prefix := params.ResourceType + "|"
@@ -182,6 +194,7 @@ func (f *FakeProvider) Clear() {
 	f.fetchResourceCount = 0
 	f.listResourcesCount = 0
 	f.fetchCounts = nil
+	f.listCalls = nil
 	f.pageSize = 0
 }
 

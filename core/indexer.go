@@ -98,10 +98,11 @@ type Config struct {
 
 	// Temporal is the Temporal client used for the durable slow lane:
 	// RebuildWalk workflows, the StaleSweep schedule, and the ReverseSweep
-	// workflows and their per-type schedules. Required for any deployment;
-	// construction does not nil-check so search-only tests can omit it, but
-	// Rebuild, NewWorker, EnsureSweepSchedule and EnsureReverseSweepSchedules
-	// will panic without it.
+	// and ForwardWalk workflows and their per-type schedules. Required for
+	// any deployment; construction does not nil-check so search-only tests
+	// can omit it, but Rebuild, NewWorker, EnsureSweepSchedule,
+	// EnsureReverseSweepSchedules and EnsureForwardWalkSchedules will panic
+	// without it.
 	Temporal client.Client
 
 	// TaskQueue is the Temporal task queue for the Indexer's workflows.
@@ -135,9 +136,15 @@ type Indexer struct {
 
 	// reverseSweeps is Config.ReverseSweeps with its defaults applied.
 	reverseSweeps map[string]ReverseSweepConfig
-	// reverseSweepBackoff is how long a reverse sweep waits before checking
-	// the pool's pressure again; tests shorten it.
-	reverseSweepBackoff time.Duration
+	// forwardWalks is Config.ForwardWalks with its defaults applied.
+	forwardWalks map[string]ForwardWalkConfig
+	// poolBackoff is how long a paced walk — the reverse sweep, or a paced
+	// rebuild walk — waits before checking the pool's pressure again; tests
+	// shorten it.
+	poolBackoff time.Duration
+	// waitPageInterval waits out the rest of a paced rebuild walk's page
+	// interval (sleepCtx); tests record the waits instead.
+	waitPageInterval func(ctx context.Context, d time.Duration) error
 
 	temporal  client.Client
 	taskQueue string
@@ -213,7 +220,13 @@ func New(cfg Config) (*Indexer, error) {
 		return nil, err
 	}
 	idx.reverseSweeps = sweeps
-	idx.reverseSweepBackoff = defaultReverseSweepBackoff
+	walks, err := forwardWalkConfigs(cfg.ForwardWalks, cfg.Resources)
+	if err != nil {
+		return nil, err
+	}
+	idx.forwardWalks = walks
+	idx.poolBackoff = defaultPoolBackoff
+	idx.waitPageInterval = sleepCtx
 
 	taskQueue := cfg.TaskQueue
 	if taskQueue == "" {

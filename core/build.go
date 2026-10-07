@@ -30,6 +30,9 @@ type RebuildArgs struct {
 	Versions     []int             `json:"versions"`
 	ResourceIDs  []string          `json:"resource_ids,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
+	// Pacing paces an all-of-type walk (ResourceSelector.Pacing); a
+	// targeted rebuild ignores it.
+	Pacing *WalkPacing `json:"pacing,omitempty"`
 }
 
 // Build builds each of params' ids. An id with an owner token (OwnerTokens)
@@ -513,6 +516,8 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 		}
 	}
 
+	pacer := &walkPacer{idx: idx, pacing: params.Pacing}
+
 	for planIdx, plan := range plans {
 		if plan.Executer == nil {
 			continue
@@ -532,6 +537,14 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			}
 		}
 
+		// A paced walk waits before the plan's first page — before Execute,
+		// which may fetch it at once — and so before the walk start, which
+		// it would only widen.
+		if err := pacer.beforePage(ctx); err != nil {
+			fl.salvage(ctx)
+			return err
+		}
+
 		// The walk start: every root this walk begins, and every child its
 		// pages carry, is drift-checked from here. It must precede Execute —
 		// the pipeline may fetch pages as soon as it is called, ahead of the
@@ -549,6 +562,9 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			// Non-empty only on a resumable walk, whose sole active plan this
 			// is; every other walk starts its plans at the listing's head.
 			PageToken: startToken,
+			// The pacing's page size on a paced walk; 0, the plan's own,
+			// otherwise.
+			PageSize: pacer.pageSize(),
 		})
 
 		for page := range ch {
@@ -623,6 +639,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			// the walk still runs, it just restarts this plan on retry.
 			if tok, ok := page.NextPageToken.(string); ok && checkpointing {
 				completed = &RebuildCursor{PlanVersion: plan.Version, PageToken: tok}
+			}
+
+			// A page with a next is followed by one: a paced walk waits
+			// before taking it. The final page (nil token) waits for
+			// nothing — another plan's first page waits before its Execute.
+			if page.NextPageToken != nil {
+				if err := pacer.beforePage(ctx); err != nil {
+					fl.salvage(ctx)
+					return err
+				}
 			}
 		}
 
