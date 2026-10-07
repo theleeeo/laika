@@ -50,6 +50,7 @@ func (s *staleListingStore) ListStale(_ context.Context, before time.Time, limit
 			s.rows[e.Resource] = r
 		}
 		r.staleSeq, r.stale, r.owner, r.deleted = e.StaleSeq, true, e.Token, e.Deleted
+		r.registeredSinceClaim = false
 		s.seq = max(s.seq, e.StaleSeq, e.Token)
 	}
 	return entries, nil
@@ -463,4 +464,53 @@ func rangeInts(lo, hi int) []int {
 		out = append(out, i)
 	}
 	return out
+}
+
+// R7: a failed owned build of a resource whose own change was registered
+// after the claim is released without a backoff — ReleaseFailed returns it
+// with no attempts — so the sweep, or the change's next owner, retries it at
+// once. It is logged at Warn as a change registered meanwhile, with its type,
+// id and error, and never with an attempt count or at Error, however many
+// times it failed before.
+func TestSweepStale_FailedBuild_ChangeRegisteredMeanwhile_IsNotBackedOff(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	st := &staleListingStore{entries: []StaleResource{{Resource: product("1"), StaleSeq: 4, Token: 5}}}
+	st.seedMetadata(product("1"), nil)
+	st.seedAttempts(product("1"), 7)
+	var once sync.Once
+	st.onRenew = func([]Owned) {
+		once.Do(func() {
+			if _, err := st.RegisterChanges(t.Context(), []Registration{{Resource: product("1")}}, time.Minute); err != nil {
+				t.Errorf("registering: %v", err)
+			}
+		})
+	}
+	idx, ex := newBackoffIndexer(st, SweepBackoff{Base: time.Minute, Max: time.Hour})
+	ex.failIDs = map[string]bool{"1": true}
+
+	if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, idx)
+
+	if st.indexOf("ReleaseFailed:product/1:5") == -1 || st.count("ReleaseOwners") != 0 {
+		t.Fatalf("the failure must still be released through ReleaseFailed: %v", st.callsSnapshot())
+	}
+	r, _ := st.row(product("1"))
+	if !r.stale || r.owner != 0 || r.attempts != 0 || !r.after.IsZero() {
+		t.Fatalf("the row must keep its mark, be released and not be backed off: %+v", r)
+	}
+	lines := failureLines(t, logs)
+	if len(lines) != 1 {
+		t.Fatalf("the failure must be logged once, got %d lines: %v", len(lines), lines)
+	}
+	rec := lines[0]
+	msg, _ := rec["msg"].(string)
+	e, _ := rec["error"].(string)
+	if rec["level"] != "WARN" || rec["type"] != "product" || rec["id"] != "1" || !strings.Contains(e, "plan failed") || !strings.Contains(msg, "registered meanwhile") {
+		t.Fatalf("the line must be a Warn naming the change registered meanwhile, the type, id and error: %v", rec)
+	}
+	if _, ok := rec["attempts"]; ok {
+		t.Fatalf("the line must not carry an attempt count: %v", rec)
+	}
 }

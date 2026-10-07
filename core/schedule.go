@@ -239,8 +239,10 @@ const failedAttemptsErrorLevel = 5
 // each row off with Store.ReleaseFailed under the Indexer's sweep backoff,
 // so the sweep leaves the row until the backoff has passed, and logs each
 // row it backed off with its attempt count, at Error from the fifth attempt
-// in a row; a row whose ownership was lost meanwhile is neither released nor
-// backed off, and is logged without one. The mark stays either way. A
+// in a row. A row with a change of its own registered since the claim is
+// released without a backoff (ReleaseFailed returns it with no attempts) and
+// logged at Warn as such; a row whose ownership was lost meanwhile is
+// neither released nor backed off, and is logged without one. The mark stays either way. A
 // failure reached once ctx has ended — a cancellation or shutdown cut the
 // work short — is not the work's, so it releases through releaseOwners
 // without a backoff. The release runs on a context detached from ctx's
@@ -272,6 +274,11 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 	logged := make(map[model.Resource]bool, len(backedOff))
 	for _, b := range backedOff {
 		logged[b.Resource] = true
+		if b.Attempts == 0 {
+			slog.Warn("owned "+op+" failed, but a change to the resource was registered meanwhile; released without a backoff, the sweep or the change's owner retries it",
+				slog.String("type", b.Type), slog.String("id", b.Id), slog.String("error", cause.Error()))
+			continue
+		}
 		level := slog.LevelWarn
 		if b.Attempts >= failedAttemptsErrorLevel {
 			level = slog.LevelError

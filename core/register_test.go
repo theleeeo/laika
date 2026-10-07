@@ -130,9 +130,14 @@ type memRow struct {
 	metadata  map[string]string
 	deleted   bool
 	// attempts and after are the row's sweep_attempts and sweep_after, as
-	// ReleaseFailed leaves them; 0 and the zero time for never failed.
+	// ReleaseFailed leaves them; 0 and the zero time for never failed. An
+	// accepted registration of the row resets them.
 	attempts int
 	after    time.Time
+	// registeredSinceClaim is set by an accepted registration of the row that
+	// did not claim it, and cleared by every claim: ReleaseFailed then
+	// releases the row without backing it off.
+	registeredSinceClaim bool
 }
 
 func (s *recordingStore) signalMarked() {
@@ -254,6 +259,7 @@ func claimLocked(r *memRow) int64 {
 		return 0
 	}
 	r.owner = r.staleSeq
+	r.registeredSinceClaim = false
 	return r.owner
 }
 
@@ -264,6 +270,7 @@ func (s *recordingStore) followUpLocked(res model.Resource, r *memRow, token int
 		return FollowUp{}
 	}
 	r.owner = r.staleSeq
+	r.registeredSinceClaim = false
 	fu := FollowUp{Token: r.owner, Deleted: r.deleted}
 	if s.followUps == nil {
 		s.followUps = make(map[model.Resource][]FollowUp)
@@ -483,8 +490,10 @@ func (s *recordingStore) ReleaseOwners(ctx context.Context, owned []Owned) error
 // releasing nothing. Otherwise it records the call per entry and the backoff
 // it was given (failedBackoffs), and drops each ownership whose token is
 // still the row's owner token, as ReleaseOwners does, counting the row's
-// attempts up and setting its after as the contract says. It does not model
-// ListStale's skip or the resets.
+// attempts up and setting its after as the contract says — except on a row
+// with a registration of its own accepted since the claim, which it releases
+// without a backoff and returns with no attempts and a zero After. It does
+// not model ListStale's skip, nor the resets but a registration's.
 func (s *recordingStore) ReleaseFailed(ctx context.Context, owned []Owned, backoff SweepBackoff) ([]BackedOff, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -504,6 +513,10 @@ func (s *recordingStore) ReleaseFailed(ctx context.Context, owned []Owned, backo
 		s.recordLocked("ReleaseFailed:%s/%s:%d", o.Type, o.Id, o.Token)
 		if row, ok := s.rows[o.Resource]; ok && row.owner == o.Token {
 			row.owner = 0
+			if row.registeredSinceClaim {
+				out = append(out, BackedOff{Resource: o.Resource})
+				continue
+			}
 			row.attempts++
 			row.after = time.Now().Add(backoffDelay(backoff, row.attempts))
 			out = append(out, BackedOff{Resource: o.Resource, Attempts: row.attempts, After: row.after})
@@ -642,7 +655,12 @@ func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration
 		r.metadata = maps.Clone(it.Metadata)
 		s.changes++
 		r.changeSeq = s.changes
-		out.Items[i] = RegisteredItem{Accepted: true, StaleSeq: r.staleSeq, Token: claimLocked(r)}
+		r.attempts, r.after = 0, time.Time{}
+		token := claimLocked(r)
+		if token == 0 {
+			r.registeredSinceClaim = true
+		}
+		out.Items[i] = RegisteredItem{Accepted: true, StaleSeq: r.staleSeq, Token: token}
 		for _, p := range s.parentsOf[it.Resource] {
 			addParent(p)
 		}

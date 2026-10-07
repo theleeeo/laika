@@ -727,6 +727,7 @@ func steal(st *recordingStore, res model.Resource, deleted bool) int64 {
 	r := st.markLocked(res, &deleted)
 	r.metadata = map[string]string{"m": "stolen"}
 	r.owner = r.staleSeq
+	r.registeredSinceClaim = false
 	return r.owner
 }
 
