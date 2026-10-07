@@ -115,11 +115,14 @@ type Store interface {
 	// so no attempt count overflows. The stale mark stays. A row for which a
 	// registration of the resource itself (RegisterChanges' own item, not a
 	// Parent mark or MarkStale) was accepted since the claim is released but
-	// not backed off: that registration reset its backoff, and its change is
-	// tried at once. It returns every row it released: a backed-off one with
-	// its new attempt count, one registered since the claim with Attempts 0
-	// and a zero After. A row whose ownership was lost is neither released
-	// nor backed off, and not returned. ListStale skips a row until its
+	// not backed off, since that registration reset its backoff. Nothing
+	// tries its change at once: the registration claimed nothing, as the
+	// failing owner held the row, and no follow-up is submitted; it is left
+	// for the sweep, whose next pass serves it once its mark passes the
+	// threshold. It returns every row it released: a backed-off one with its
+	// new attempt count, one registered since the claim with Attempts 0 and
+	// a zero After. A row whose ownership was lost is neither released nor
+	// backed off, and not returned. ListStale skips a row until its
 	// sweep_after, and a successful build or delete, or a registration of
 	// the resource itself, resets both columns (ADR 0008).
 	ReleaseFailed(ctx context.Context, owned []Owned, backoff SweepBackoff) ([]BackedOff, error)

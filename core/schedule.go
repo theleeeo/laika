@@ -275,7 +275,7 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 	for _, b := range backedOff {
 		logged[b.Resource] = true
 		if b.Attempts == 0 {
-			slog.Warn("owned "+op+" failed, but a change to the resource was registered meanwhile; released without a backoff, the sweep or the change's owner retries it",
+			slog.Warn("owned "+op+" failed, but a change to the resource was registered meanwhile; released without a backoff, left for the sweep",
 				slog.String("type", b.Type), slog.String("id", b.Id), slog.String("error", cause.Error()))
 			continue
 		}
