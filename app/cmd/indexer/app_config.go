@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/goccy/go-yaml"
 	"github.com/spf13/viper"
 )
 
@@ -35,6 +36,9 @@ import (
 //	pool.queue_size        → POOL_QUEUE_SIZE
 //	pool.queue_high_water  → POOL_QUEUE_HIGH_WATER
 //	pool.owner_lease       → POOL_OWNER_LEASE
+//
+// forward_walks has no env var: it is a list, which doesn't map onto env
+// vars, and it is read from the file without viper (see readForwardWalks).
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -45,6 +49,23 @@ type appConfig struct {
 	Temporal           temporalConfig `mapstructure:"temporal"`
 	Sweep              sweepConfig    `mapstructure:"sweep"`
 	Pool               poolConfig     `mapstructure:"pool"`
+	// ForwardWalks is read from the file by readForwardWalks, not by viper,
+	// and has no env overrides.
+	ForwardWalks []forwardWalkConfig `mapstructure:"-"`
+}
+
+// forwardWalkConfig is one forward_walks entry: the scheduled forward walk of
+// one resource type (core.ForwardWalkConfig). Zero values leave core's
+// defaults.
+type forwardWalkConfig struct {
+	ResourceType string        `yaml:"resource_type"`
+	Enabled      bool          `yaml:"enabled"`
+	Interval     time.Duration `yaml:"interval"`
+	PageSize     int           `yaml:"page_size"`
+	PageInterval time.Duration `yaml:"page_interval"`
+	// Metadata is the static list of metadata maps a run walks with, one
+	// walk per map. Empty means one walk with no metadata.
+	Metadata []map[string]string `yaml:"metadata"`
 }
 
 type logConfig struct {
@@ -156,6 +177,14 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 		return appConfig{}, fmt.Errorf("unmarshal app config: %w", err)
 	}
 
+	if v.InConfig("forward_walks") {
+		walks, err := readForwardWalks(configFilePath)
+		if err != nil {
+			return appConfig{}, err
+		}
+		cfg.ForwardWalks = walks
+	}
+
 	// ES_ADDRS may arrive as a comma-separated string when set via env var.
 	// cast.ToStringSlice (used by Viper) splits on whitespace, not commas,
 	// so we read the raw value and split on commas ourselves.
@@ -192,4 +221,22 @@ func getStringSlice(v *viper.Viper, key string) []string {
 	default:
 		return v.GetStringSlice(key)
 	}
+}
+
+// readForwardWalks decodes the forward_walks section of the YAML config file
+// at path. Viper lowercases every map key it reads, those inside list items
+// included, which would turn a metadata key such as tenantId into tenantid;
+// decoding the section itself keeps each key as written.
+func readForwardWalks(path string) ([]forwardWalkConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read app config forward_walks: %w", err)
+	}
+	var file struct {
+		ForwardWalks []forwardWalkConfig `yaml:"forward_walks"`
+	}
+	if err := yaml.Unmarshal(raw, &file); err != nil {
+		return nil, fmt.Errorf("decode app config forward_walks (the section needs a YAML config file): %w", err)
+	}
+	return file.ForwardWalks, nil
 }

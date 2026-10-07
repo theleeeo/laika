@@ -20,6 +20,7 @@
 #   pool.queue_size     -> POOL_QUEUE_SIZE
 #   pool.queue_high_water -> POOL_QUEUE_HIGH_WATER
 #   pool.owner_lease    -> POOL_OWNER_LEASE
+# forward_walks has no env vars: it is a list, which doesn't map onto them.
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -86,3 +87,23 @@ pool:
   queue_size: 100
   queue_high_water: 0
   owner_lease: "0s"
+
+# Scheduled forward walks: each enabled entry walks its resource type from the
+# source on a schedule, so a resource created or changed without a notification
+# is indexed. Each run walks the type once per metadata map (the walk's actor:
+# an actor lists only what it can see, so give one map per actor when actors
+# partition the source); no metadata means one walk with none. interval is how
+# often a run starts (default 24h), page_size the listing page size each walk
+# asks for (default 100), and page_interval a page's rate budget: a page that
+# finishes sooner waits out the rest (default 1s). Leave a value out, or 0, for
+# its default. Explicit rebuilds are not paced. One entry per type; resource
+# types and metadata keys keep their case. No env overrides (see above).
+# forward_walks:
+#   - resource_type: product
+#     enabled: true
+#     interval: 24h
+#     page_size: 100
+#     page_interval: 1s
+#     metadata:
+#       - tenantId: a
+#       - tenantId: b

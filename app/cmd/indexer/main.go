@@ -116,6 +116,11 @@ func main() {
 	}
 	defer temporalClient.Close()
 
+	forwardWalks, err := coreForwardWalks(cfg.ForwardWalks)
+	if err != nil {
+		log.Fatalf("app config: %v", err)
+	}
+
 	idx, err := core.New(core.Config{
 		Plans:          plans,
 		Resources:      resources,
@@ -127,6 +132,7 @@ func main() {
 		QueueSize:      cfg.Pool.QueueSize,
 		QueueHighWater: cfg.Pool.QueueHighWater,
 		OwnerLease:     cfg.Pool.OwnerLease,
+		ForwardWalks:   forwardWalks,
 	})
 	if err != nil {
 		log.Fatalf("construct indexer: %v", err)
@@ -142,6 +148,10 @@ func main() {
 		BatchSize: cfg.Sweep.BatchSize,
 	}); err != nil {
 		log.Fatalf("ensure sweep schedule: %v", err)
+	}
+
+	if err := idx.EnsureForwardWalkSchedules(context.Background()); err != nil {
+		log.Fatalf("ensure forward walk schedules: %v", err)
 	}
 
 	idxSrv := server.NewIndexer(idx)

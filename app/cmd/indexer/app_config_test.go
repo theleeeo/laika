@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -269,5 +270,70 @@ pool:
 	}
 	if cfg.Pool.OwnerLease != 90*time.Second {
 		t.Errorf("POOL_OWNER_LEASE override = %v, want 90s", cfg.Pool.OwnerLease)
+	}
+}
+
+func TestLoadAppConfig_ForwardWalks(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+forward_walks:
+  - resource_type: Product
+    enabled: true
+    interval: 12h
+    page_size: 50
+    page_interval: 2s
+    metadata:
+      - tenantId: a
+        regionCode: EU
+      - tenantId: b
+  - resource_type: order
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+
+	want := []forwardWalkConfig{
+		{
+			ResourceType: "Product",
+			Enabled:      true,
+			Interval:     12 * time.Hour,
+			PageSize:     50,
+			PageInterval: 2 * time.Second,
+			Metadata: []map[string]string{
+				{"tenantId": "a", "regionCode": "EU"},
+				{"tenantId": "b"},
+			},
+		},
+		{ResourceType: "order"},
+	}
+	if !reflect.DeepEqual(cfg.ForwardWalks, want) {
+		t.Fatalf("forward_walks = %#v, want %#v (resource types and metadata keys keep their case)", cfg.ForwardWalks, want)
+	}
+}
+
+func TestLoadAppConfig_ForwardWalksAbsentByDefault(t *testing.T) {
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if len(cfg.ForwardWalks) != 0 {
+		t.Fatalf("forward_walks without a file = %#v, want none", cfg.ForwardWalks)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	if err := os.WriteFile(configPath, []byte("log:\n  level: info\n"), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if len(cfg.ForwardWalks) != 0 {
+		t.Fatalf("forward_walks in a file without the section = %#v, want none", cfg.ForwardWalks)
 	}
 }
