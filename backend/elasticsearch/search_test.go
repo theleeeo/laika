@@ -3,7 +3,10 @@ package elasticsearch
 import (
 	"context"
 	"encoding/json/v2"
+	"errors"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -465,6 +468,60 @@ func TestSearch_Pagination_FromAndSize(t *testing.T) {
 	}
 }
 
+// requirePagingRefused asserts err is the caller's mistake (an
+// *core.InvalidArgumentError) whose message names the paging window, the page,
+// the page size and index.max_result_window.
+func requirePagingRefused(t *testing.T, err error, page, pageSize int32, window int64) {
+	t.Helper()
+	var invalid *core.InvalidArgumentError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("expected *core.InvalidArgumentError, got %T: %v", err, err)
+	}
+	for _, want := range []string{
+		fmt.Sprintf("paging window %d", window),
+		fmt.Sprintf("page %d", page),
+		fmt.Sprintf("page_size %d", pageSize),
+		"max_result_window",
+	} {
+		if !strings.Contains(invalid.Msg, want) {
+			t.Errorf("message %q does not contain %q", invalid.Msg, want)
+		}
+	}
+}
+
+func TestSearch_Pagination_LastPageInsideWindow(t *testing.T) {
+	// (99+1)*100 = 10000 = index.max_result_window: the deepest page ES serves.
+	body, _, err := captureSearch(t, core.SearchRequest{Page: 99, PageSize: 100}, vcFlatOnly())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if body["from"] != float64(9900) || body["size"] != float64(100) {
+		t.Errorf("from/size = %v/%v, want 9900/100", body["from"], body["size"])
+	}
+}
+
+func TestSearch_Pagination_PastWindowIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		page, pageSize int32
+		window         int64
+	}{
+		{"first page past the window", 100, 100, 10100},
+		// 42949673*100 wraps to 4 in int32: a deep page must not come back as
+		// the first page.
+		{"page whose int32 from wraps", 42949673, 100, 4294967400},
+		{"max int32 page", math.MaxInt32, 100, 214748364800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _, err := captureSearch(t, core.SearchRequest{Page: tc.page, PageSize: tc.pageSize}, vcFlatOnly())
+			requirePagingRefused(t, err, tc.page, tc.pageSize, tc.window)
+			if body != nil {
+				t.Errorf("transport reached with body %v", body)
+			}
+		})
+	}
+}
+
 // ---- response handling tests ----
 
 func TestSearch_404_ReturnsEmpty(t *testing.T) {
@@ -677,6 +734,17 @@ func TestBuildSecondaryClause_EmptyScopeUnscoped(t *testing.T) {
 // the built query and the response parsing can be asserted.
 func captureFederated(t *testing.T, p core.FederatedSearchParams) (body map[string]any, url string, _ core.FederatedSearchResult) {
 	t.Helper()
+	body, url, res, err := captureFederatedErr(t, p)
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	return body, url, res
+}
+
+// captureFederatedErr is captureFederated returning the call's error instead
+// of failing on it. A nil body means the transport was never reached.
+func captureFederatedErr(t *testing.T, p core.FederatedSearchParams) (body map[string]any, url string, _ core.FederatedSearchResult, _ error) {
+	t.Helper()
 	var captured map[string]any
 	var capturedURL string
 
@@ -714,11 +782,8 @@ func captureFederated(t *testing.T, p core.FederatedSearchParams) (body map[stri
 	if err != nil {
 		t.Fatalf("new es client: %v", err)
 	}
-	res, err := New(esClient, false).FederatedSearch(context.Background(), p)
-	if err != nil {
-		t.Fatalf("FederatedSearch: %v", err)
-	}
-	return captured, capturedURL, res
+	res, callErr := New(esClient, false).FederatedSearch(context.Background(), p)
+	return captured, capturedURL, res, callErr
 }
 
 func fedGroups() []core.IndexFilterGroup {
@@ -788,6 +853,43 @@ func TestFederatedSearch_QueryShapeAndSearchType(t *testing.T) {
 	aggField := body["aggs"].(map[string]any)["per_index"].(map[string]any)["terms"].(map[string]any)["field"]
 	if aggField != "_index" {
 		t.Errorf("agg field = %v, want _index", aggField)
+	}
+}
+
+func TestFederatedSearch_Pagination_LastPageInsideWindow(t *testing.T) {
+	// (99+1)*100 = 10000 = index.max_result_window: the deepest page ES serves.
+	body, _, _, err := captureFederatedErr(t, core.FederatedSearchParams{
+		Query: "q", FilterGroups: fedGroups(), Page: 99, PageSize: 100,
+	})
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	if body["from"] != float64(9900) || body["size"] != float64(100) {
+		t.Errorf("from/size = %v/%v, want 9900/100", body["from"], body["size"])
+	}
+}
+
+func TestFederatedSearch_Pagination_PastWindowIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		page, pageSize int32
+		window         int64
+	}{
+		{"first page past the window", 100, 100, 10100},
+		// 42949673*100 wraps to 4 in int32: a deep page must not come back as
+		// the first page.
+		{"page whose int32 from wraps", 42949673, 100, 4294967400},
+		{"max int32 page", math.MaxInt32, 100, 214748364800},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body, _, _, err := captureFederatedErr(t, core.FederatedSearchParams{
+				Query: "q", FilterGroups: fedGroups(), Page: tc.page, PageSize: tc.pageSize,
+			})
+			requirePagingRefused(t, err, tc.page, tc.pageSize, tc.window)
+			if body != nil {
+				t.Errorf("transport reached with body %v", body)
+			}
+		})
 	}
 }
 

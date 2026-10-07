@@ -15,9 +15,37 @@ import (
 	"github.com/theleeeo/laika/core/resource"
 )
 
+// maxPagingWindow bounds how deep any search may page: the window
+// (page+1) * page_size, the from+size a single query asks for and the size
+// every fan-out leg over-fetches. It is ES's default index.max_result_window,
+// so a page past it fails here, as the caller's mistake, instead of opaquely
+// inside ES.
+const maxPagingWindow = 10000
+
+// pagingWindow returns page's from offset and window in int64 — core's
+// normalizePaging caps page_size but not page, and page * page_size wraps in
+// int32, which would send a deep page as a shallow one — or an
+// *core.InvalidArgumentError when the window is past maxPagingWindow. Every
+// search path calls it before building its body.
+func pagingWindow(page, pageSize int32) (from, window int64, err error) {
+	from = int64(page) * int64(pageSize)
+	window = from + int64(pageSize)
+	if window > maxPagingWindow {
+		return 0, 0, &core.InvalidArgumentError{Msg: fmt.Sprintf(
+			"paging window %d ((page %d + 1) x page_size %d) exceeds index.max_result_window %d",
+			window, page, pageSize, maxPagingWindow)}
+	}
+	return from, window, nil
+}
+
 func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias string, vc *resource.VersionConfig) (core.SearchResponse, error) {
 	start := time.Now()
 	logger := core.LoggerFromContext(ctx)
+
+	from, _, err := pagingWindow(req.Page, req.PageSize)
+	if err != nil {
+		return core.SearchResponse{}, err
+	}
 
 	boolQ := map[string]any{
 		"must":   []any{},
@@ -56,7 +84,7 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 
 	body := map[string]any{
 		"query": map[string]any{"bool": boolQ},
-		"from":  req.Page * req.PageSize,
+		"from":  from,
 		"size":  req.PageSize,
 	}
 
@@ -187,6 +215,11 @@ func (c *Client) FederatedSearch(ctx context.Context, p core.FederatedSearchPara
 // aliases and returns results keyed by concrete index (spec D3, D12, D13).
 // searchType "" leaves the cluster default (query_then_fetch).
 func (c *Client) federatedSingle(ctx context.Context, p core.FederatedSearchParams, searchType string) (core.FederatedSearchResult, error) {
+	from, _, err := pagingWindow(p.Page, p.PageSize)
+	if err != nil {
+		return core.FederatedSearchResult{}, err
+	}
+
 	indices := make([]string, 0, len(p.FilterGroups))
 	for _, g := range p.FilterGroups {
 		indices = append(indices, g.Alias)
@@ -216,7 +249,7 @@ func (c *Client) federatedSingle(ctx context.Context, p core.FederatedSearchPara
 
 	body := map[string]any{
 		"query": map[string]any{"bool": boolQ},
-		"from":  p.Page * p.PageSize,
+		"from":  from,
 		"size":  p.PageSize,
 		// Per-resource counts (D12): one bucket per concrete index, folded back
 		// to Types by core. size covers at most one index per requested Type.

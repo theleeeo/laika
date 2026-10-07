@@ -14,14 +14,6 @@ import (
 	"github.com/theleeeo/laika/core"
 )
 
-// fanoutMaxWindow bounds how deep fan-out paging may reach. Every leg must
-// over-fetch the full merged window ((page+1) * page_size, from 0) because the
-// merge cannot know in advance how the top of the combined ranking distributes
-// across Types. ES's default index.max_result_window (10k) bounds each leg the
-// same way it bounds the single query's from+size, so the guard fails loudly
-// here instead of opaquely inside every leg.
-const fanoutMaxWindow = 10000
-
 // federatedFanout executes a Federated Search as one sub-search per Type — a
 // single _msearch round trip — merged client-side: the execution swap ADR 0007
 // reserved as a documented future experiment.
@@ -40,13 +32,13 @@ const fanoutMaxWindow = 10000
 // index empties its own leg only, where the single query's 404 empties the
 // whole response.
 func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
-	// int64: core's normalizePaging does not cap Page, and (Page+1)*PageSize
-	// wraps in int32, sneaking a huge window past this guard.
-	window := (int64(p.Page) + 1) * int64(p.PageSize)
-	if window > fanoutMaxWindow {
-		return core.FederatedSearchResult{}, fmt.Errorf(
-			"federated fan-out paging window %d exceeds %d: page %d x page_size %d over-fetches past index.max_result_window",
-			window, fanoutMaxWindow, p.Page, p.PageSize)
+	// Every leg must over-fetch the full merged window from 0, because the
+	// merge cannot know in advance how the top of the combined ranking
+	// distributes across Types; maxPagingWindow bounds each leg as it bounds
+	// the single query's from+size.
+	from, window, err := pagingWindow(p.Page, p.PageSize)
+	if err != nil {
+		return core.FederatedSearchResult{}, err
 	}
 
 	globalFilters := []any{}
@@ -145,9 +137,8 @@ func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchPara
 		}
 		return cmp.Compare(a.ID, b.ID)
 	})
-	from := int(p.Page) * int(p.PageSize)
-	if from < len(merged) {
-		result.Hits = merged[from:min(from+int(p.PageSize), len(merged))]
+	if from < int64(len(merged)) {
+		result.Hits = merged[from:min(window, int64(len(merged)))]
 	}
 	return result, nil
 }

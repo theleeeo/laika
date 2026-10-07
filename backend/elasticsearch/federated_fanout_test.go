@@ -323,6 +323,7 @@ func TestFederatedFanout_PagingWindowCap(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "max_result_window") {
 		t.Fatalf("expected paging window cap error, got %v", err)
 	}
+	requirePagingRefused(t, err, 100, 100, 10100)
 }
 
 func TestFederatedFanout_PagingWindowCapSurvivesInt32Overflow(t *testing.T) {
@@ -332,6 +333,26 @@ func TestFederatedFanout_PagingWindowCapSurvivesInt32Overflow(t *testing.T) {
 	}, "") // transport must not be reached
 	if err == nil || !strings.Contains(err.Error(), "max_result_window") {
 		t.Fatalf("expected paging window cap error, got %v", err)
+	}
+	requirePagingRefused(t, err, math.MaxInt32, 100, 214748364800)
+}
+
+func TestFederatedFanout_LastPageInsideWindow(t *testing.T) {
+	// (99+1)*100 = 10000 = index.max_result_window: every leg over-fetches the
+	// whole window, and that is still allowed.
+	legs, _, _, err := captureFanout(t, core.FederatedSearchParams{
+		Query: "q", FilterGroups: fedGroups(), Page: 99, PageSize: 100,
+	}, msearchResponse(
+		legResponse("product_search_v1", 0),
+		legResponse("order_search_v1", 0),
+	))
+	if err != nil {
+		t.Fatalf("FederatedSearch: %v", err)
+	}
+	for i, leg := range legs {
+		if leg.body["from"] != float64(0) || leg.body["size"] != float64(10000) {
+			t.Errorf("leg %d window = from %v size %v, want 0/10000", i, leg.body["from"], leg.body["size"])
+		}
 	}
 }
 
