@@ -415,10 +415,10 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		// root: only its children are checked.
 		fl.begin(id, begun, driftBase{start: begun.Start}, expected, false)
 
-		// Same existence rule as the live path (buildOne): all selected plans
-		// run first, and only unanimity decides — a nil from one version must
-		// not delete what another version's plan just built, nor what an
-		// unselected version's plan would still build.
+		// Same existence rule as the live path (buildOne, ADR 0013): every
+		// selected plan runs first, and each plan's outcome is its own
+		// version's — a nil deletes that version's document and empties its
+		// edge set, never another version's.
 		docs, missing, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
 			ResourceID:   id,
@@ -430,34 +430,16 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			continue
 		}
 
-		// Every selected plan agrees: gone at source. A rebuild running
-		// every plan with an Executer deletes it from all versions, and the
-		// row with them; one that selected fewer versions leaves it marked
-		// for the sweep, whose build runs every plan (leaveGone).
-		if len(docs) == 0 && len(missing) > 0 {
-			fl.discard(id)
-			if !fl.mayDelete {
-				fl.leaveGone(ctx, id)
-				continue
-			}
-			if err := idx.handleDelete(ctx, RebuildPayload{
-				ResourceType: params.ResourceType,
-				ResourceID:   id,
-			}, begun.BuildIdx); err != nil {
-				logger.Warn("delete missing resource", slog.String("id", id), slog.String("error", err.Error()))
-				fl.fail(ctx, id)
-				continue
-			}
-			fl.removeRow(ctx, id, begun.StaleSeq)
-			continue
+		// The nils count first, each its own version's outcome
+		// (rebuildFlusher.gone), so the id settles when its documents flush,
+		// with the nils applied (dropNils). Every selected plan nil settles
+		// it at once: a rebuild running every plan with an Executer deletes
+		// it from all versions, and the row with them (removeGone); one that
+		// selected fewer versions deletes their documents and leaves it
+		// marked for the sweep, whose build runs every plan (leaveGone).
+		for _, v := range missing {
+			fl.gone(ctx, id, v)
 		}
-		if len(missing) > 0 {
-			logger.Warn("plans disagree on existence; leaving resource stale for retry",
-				slog.String("id", id), slog.Any("versions_without_data", missing))
-			fl.fail(ctx, id)
-			continue
-		}
-
 		for _, vd := range docs {
 			if err := fl.add(ctx, BulkItem{
 				Index:   IndexName(params.ResourceType, vd.version),
@@ -646,12 +628,16 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				}
 
 				// Source listed the resource but returned no data: that is
-				// this plan's outcome for it. Existence is decided across
-				// every plan, as the live build does: the resource is deleted
-				// only once every expected plan found it gone — or left marked
-				// for the sweep, if the walk runs fewer than every plan with an
-				// Executer (mayDelete) — and a plan
-				// that disagrees fails it (rebuildFlusher.gone).
+				// this plan's outcome for it, and its own version's answer
+				// (ADR 0013), applied once every expected plan's outcome has
+				// arrived: with another plan's document it deletes this
+				// version's document and empties its edge set, and the row
+				// stays; with every plan nil the resource is deleted, row
+				// included — or its versions' documents are, and it is left
+				// marked for the sweep, if the walk runs fewer than every
+				// plan with an Executer (mayDelete). A document of this
+				// version contradicts it and fails the resource
+				// (rebuildFlusher.gone).
 				if doc.Doc == nil {
 					fl.gone(ctx, id, plan.Version)
 					continue

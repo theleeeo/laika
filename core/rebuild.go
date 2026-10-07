@@ -13,9 +13,11 @@ import (
 type ResourceSelector struct {
 	ResourceType string
 	// Versions selects the Schema Versions whose plans the rebuild runs;
-	// empty runs every plan. A rebuild that leaves out a version with an
-	// executing plan deletes nothing: a resource its plans all find gone is
-	// left marked stale for the sweep, whose build runs every plan.
+	// empty runs every plan. Each plan's nil deletes its own version's
+	// document (ADR 0013). A rebuild that leaves out a version with an
+	// executing plan never removes a resource's row: a resource its plans all
+	// find gone loses their versions' documents and is left marked stale for
+	// the sweep, whose build runs every plan and decides the row.
 	Versions    []int
 	ResourceIDs []string
 	// Metadata is the rebuild's own fetch context (e.g. the acting tenant),

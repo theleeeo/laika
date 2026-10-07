@@ -84,6 +84,9 @@ type captureBackend struct {
 	// recorded — e.g. to cancel the walk between the write and its drift
 	// check.
 	onBulk func()
+	// deleteErrs fails the Delete of each "index/id" it names; the delete is
+	// still recorded.
+	deleteErrs map[string]error
 }
 
 func (b *captureBackend) Upsert(_ context.Context, index, docID string, _ any, _ int64) error {
@@ -121,7 +124,7 @@ func (b *captureBackend) Delete(_ context.Context, index, docID string, version 
 	defer b.mu.Unlock()
 	b.deletes = append(b.deletes, index+"/"+docID)
 	b.deleteVersions = append(b.deleteVersions, version)
-	return nil
+	return b.deleteErrs[index+"/"+docID]
 }
 
 func (b *captureBackend) Search(context.Context, SearchRequest, string, *resource.VersionConfig) (SearchResponse, error) {
@@ -205,6 +208,9 @@ type rebuildRecordingStore struct {
 	// the ReplaceEdges of each resource whose id it names.
 	replaced    []edgeReplace
 	replaceErrs map[string]error
+	// replaceHook, when set, may fail a ReplaceEdges call by what it carries;
+	// the call is still recorded, and a failed one writes nothing.
+	replaceHook func(edgeReplace) error
 	// beginErrs fails the BeginBuild of each resource whose id it names; the
 	// call is still recorded.
 	beginErrs map[string]error
@@ -432,9 +438,15 @@ func (s *rebuildRecordingStore) ReplaceEdges(_ context.Context, r model.Resource
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, fmt.Sprintf("ReplaceEdges:%s/%s:%d", r.Type, r.Id, buildSeq))
-	s.replaced = append(s.replaced, edgeReplace{resource: r, buildSeq: buildSeq, sets: slices.Clone(sets), declared: slices.Clone(declared), reported: maps.Clone(reported)})
+	call := edgeReplace{resource: r, buildSeq: buildSeq, sets: slices.Clone(sets), declared: slices.Clone(declared), reported: maps.Clone(reported)}
+	s.replaced = append(s.replaced, call)
 	if err := s.replaceErrs[r.Id]; err != nil {
 		return err
+	}
+	if s.replaceHook != nil {
+		if err := s.replaceHook(call); err != nil {
+			return err
+		}
 	}
 	if row, ok := s.rows[r]; ok && len(row.metadata) == 0 && len(reported) > 0 {
 		row.metadata = maps.Clone(reported)
@@ -668,7 +680,7 @@ func TestRebuildByIDs_FailureNamingNoChunkDocument_RejectsEveryDocumentOfItsID(t
 }
 
 // L2.6 ruling R7: a targeted rebuild serves each id once, however often its
-// ResourceIDs list it: an id whose plans disagree is begun, marked and
+// ResourceIDs list it: an id whose document is rejected is begun, marked and
 // counted once.
 func TestRebuildByIDs_RepeatedID_IsBuiltOnce(t *testing.T) {
 	st := &rebuildRecordingStore{}
@@ -676,7 +688,7 @@ func TestRebuildByIDs_RepeatedID_IsBuiltOnce(t *testing.T) {
 		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("X")}}},
 		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}}},
 	}}
-	idx := newRebuildIndexer(st, &captureBackend{}, plans, 0)
+	idx := newRebuildIndexer(st, &captureBackend{rejectIDs: map[string]bool{"X": true}}, plans, 0)
 
 	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"X", "X"}}})
 	if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
@@ -869,7 +881,7 @@ func TestRebuildAll_NilDocDeletesFromAllVersions(t *testing.T) {
 // A plan walk deletes a resource listed without data at a Build Sequence of
 // its own: one first seen as nil begins a build for it, one an earlier plan's
 // nil already began in this walk is deleted at that build's sequence once the
-// last plan's nil agrees, and one whose BeginBuild fails is deleted nowhere
+// last plan's nil arrives, and one whose BeginBuild fails is deleted nowhere
 // and marked stale instead.
 func TestRebuildAll_NilDoc_DeletesAtTheResourcesSequence(t *testing.T) {
 	t.Run("first seen as nil: begins a build for the delete", func(t *testing.T) {
@@ -1092,58 +1104,195 @@ func assertFailedOnce(t *testing.T, st *rebuildRecordingStore, err error, id str
 	}
 }
 
-// A multi-plan walk decides an id's existence across all its plans, as the
-// live build does: plans that disagree fail the id — marked stale for the
-// sweep, whose build runs every plan — and delete nothing. A later plan's nil
-// fails an id an earlier plan's document began, whether that document is
-// still queued or already flushed; what flushed stays written.
-func TestRebuildAll_MultiPlan_DocumentThenNil_FailsWithoutDeleting(t *testing.T) {
+// assertRebuildDroppedVersion checks ADR 0013's rule for id in a rebuild
+// whose plan of version kept returned a document and whose plan of version
+// dropped returned nil: only kept's document is written; dropped's is deleted
+// once, at id's Build Sequence seq, and dropped's edge set is replaced with an
+// empty one, once, at seq; no other version is deleted, and the edges are
+// never removed wholesale. id settles — its mark cleared once, never marked —
+// and its row stays.
+func assertRebuildDroppedVersion(t *testing.T, st *rebuildRecordingStore, es *captureBackend, id string, seq int64, kept, dropped int) {
+	t.Helper()
+	var written []string
+	for _, it := range es.allBulkItems() {
+		if it.ID == id && !slices.Contains(written, it.Index) {
+			written = append(written, it.Index)
+		}
+	}
+	if want := []string{IndexName("product", kept)}; !slices.Equal(written, want) {
+		t.Fatalf("only v%d's document of %s may be written, wrote %v", kept, id, written)
+	}
+	var deleted []string
+	for _, d := range es.deletesAt() {
+		if strings.Contains(d, "/"+id+"@") {
+			deleted = append(deleted, d)
+		}
+	}
+	if want := []string{fmt.Sprintf("%s/%s@%d", IndexName("product", dropped), id, seq)}; !slices.Equal(deleted, want) {
+		t.Fatalf("v%d's nil must delete v%d's document of %s once, at its Build Sequence %d: got %v want %v", dropped, dropped, id, seq, deleted, want)
+	}
+	emptied := 0
+	for _, c := range st.replacedFor(product(id)) {
+		if c.buildSeq != seq {
+			t.Fatalf("every edge set of %s must be stored at its Build Sequence %d, got a ReplaceEdges at %d", id, seq, c.buildSeq)
+		}
+		for _, set := range c.sets {
+			if set.SchemaVersion != dropped {
+				continue
+			}
+			if len(set.Children) != 0 {
+				t.Fatalf("v%d's edge set of %s must be replaced with an empty one, got %+v", dropped, id, set)
+			}
+			emptied++
+		}
+	}
+	if emptied != 1 {
+		t.Fatalf("v%d's edge set of %s must be emptied once, got %d: %v", dropped, id, emptied, st.callsSnapshot())
+	}
+	calls := st.callsSnapshot()
+	if n := countPrefix(calls, "ClearStale:product/"+id+":"); n != 1 {
+		t.Fatalf("%s must settle, its mark cleared once, got %d: %v", id, n, calls)
+	}
+	if n := countPrefix(calls, "MarkStale:product/"+id); n != 0 {
+		t.Fatalf("%s settled and must not be marked: %v", id, calls)
+	}
+	for _, p := range []string{"RemoveResource:product/" + id + ":", "DeleteResourceIfSeq:product/" + id + ":"} {
+		if countPrefix(calls, p) != 0 {
+			t.Fatalf("v%d still has %s, so its edges and row must stay: %v", kept, id, calls)
+		}
+	}
+	if _, ok := st.rowMetadata(product(id)); !ok {
+		t.Fatalf("%s's row must stay", id)
+	}
+}
+
+// ADR 0013: a multi-plan walk applies each plan's outcome for an id to that
+// plan's own version. Plan 2's nil after plan 1's document — still queued, or
+// already flushed — deletes v2's document of X and empties v2's edge set at
+// the Build Sequence the walk began X at, and X settles on plan 2's outcome.
+func TestRebuildAll_MultiPlan_DocumentThenNil_DeletesOnlyTheNilVersion(t *testing.T) {
 	for name, chunk := range map[string]int{"document queued": 0, "document flushed": 1} {
 		t.Run(name, func(t *testing.T) {
-			st := &rebuildRecordingStore{}
+			st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
 			es := &captureBackend{}
 			err := walkProducts(t, st, es, chunk, twoVersionResources(),
 				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
 				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRebuildDroppedVersion(t, st, es, "X", 43, 1, 2)
+		})
+	}
+}
+
+// The other order: plan 1's nil begins X, plan 2's document is written, and
+// once it lands X settles with v1's document deleted and v1's edge set
+// emptied, at X's one Build Sequence.
+func TestRebuildAll_MultiPlan_NilThenDocument_DeletesOnlyTheNilVersion(t *testing.T) {
+	for name, chunk := range map[string]int{"one flush": 0, "flush per document": 1} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
+			es := &captureBackend{}
+			err := walkProducts(t, st, es, chunk, twoVersionResources(),
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}},
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertRebuildDroppedVersion(t, st, es, "X", 43, 2, 1)
+			if n := st.count("BeginBuild:product/X"); n != 1 {
+				t.Fatalf("X is begun once, by plan 1's nil, got %d: %v", n, st.callsSnapshot())
+			}
+		})
+	}
+}
+
+// rootChecksAfter counts the drift checks of root against start recorded
+// after the call at index from of st's call log.
+func rootChecksAfter(st *rebuildRecordingStore, from int, root model.Resource, start int64) int {
+	calls, checks := st.callsSnapshot(), st.checksSnapshot()
+	n, batch := 0, 0
+	for i, c := range calls {
+		if !strings.HasPrefix(c, "AnyChangedSince:") {
+			continue
+		}
+		if i > from && slices.Contains(checks[batch], ChangeCheck{Resource: root, Start: start}) {
+			n++
+		}
+		batch++
+	}
+	return n
+}
+
+// A walk's per-version delete is followed by the root's drift check from the
+// start of the walk that began it, as an all-nil delete is: a recreate built
+// between the page's fetch and X's BeginBuild wrote below X's Build Sequence.
+// The emptied edge set is written after the delete, so a check after it
+// follows the delete.
+func TestRebuildAll_MultiPlan_NilVersionDelete_IsFollowedByTheRootsDriftCheck(t *testing.T) {
+	for name, tc := range map[string]struct {
+		chunk  int
+		v1, v2 projection.BuildDoc
+	}{
+		"document then nil, queued":  {0, productDoc("X"), nilDoc("X")},
+		"document then nil, flushed": {1, productDoc("X"), nilDoc("X")},
+		"nil then document":          {0, nilDoc("X"), productDoc("X")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{buildIdx: 41} // X begins at 42
+			err := walkProducts(t, st, &captureBackend{}, tc.chunk, twoVersionResources(),
+				&staticExecuter{docs: []projection.BuildDoc{tc.v1}},
+				&staticExecuter{docs: []projection.BuildDoc{tc.v2}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := st.callsSnapshot()
+			writes := callIndexes(calls, "ReplaceEdges:product/X:42")
+			if len(writes) == 0 {
+				t.Fatalf("X's edge sets must be stored: %v", calls)
+			}
+			if n := rootChecksAfter(st, writes[len(writes)-1], product("X"), 1001); n != 1 {
+				t.Fatalf("the delete must be followed by one check of X from the walk start, got %d: %v %v", n, calls, st.checksSnapshot())
+			}
+		})
+	}
+}
+
+// Ruling R3: two outcomes of one version for an id that contradict each
+// other in one walk — a document, then a nil, or a nil, then a document —
+// fail the id, counted and marked once, deleting nothing of it: a queued
+// bulk write and a delete of one version never meet at one Build Sequence.
+// Plan 2's later document of X is ignored.
+func TestRebuildAll_MultiPlan_OneVersionContradictsItself_FailsOnce(t *testing.T) {
+	for name, tc := range map[string]struct {
+		chunk int
+		v1    []projection.BuildDoc
+	}{
+		"document then nil, queued":  {0, []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}},
+		"document then nil, flushed": {1, []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}},
+		"nil then document":          {0, []projection.BuildDoc{productDoc("1"), nilDoc("X"), productDoc("X")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{}
+			es := &captureBackend{}
+			err := walkProducts(t, st, es, tc.chunk, twoVersionResources(),
+				&staticExecuter{docs: tc.v1},
+				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
 
 			assertNothingDeleted(t, st, es, "X")
 			assertFailedOnce(t, st, err, "X")
 			for _, it := range es.allBulkItems() {
 				if it.ID == "X" && it.Index != "product_search_v1" {
-					t.Fatalf("only plan 1's document of X may be written: %+v", it)
+					t.Fatalf("no later plan's document of a failed id may be written: %+v", it)
 				}
 			}
 		})
 	}
 }
 
-// An earlier plan's nil and a later plan's document disagree too: the
-// document is never written, so no version of the id is written without the
-// other, and nothing is deleted.
-func TestRebuildAll_MultiPlan_NilThenDocument_FailsWithoutWriting(t *testing.T) {
-	st := &rebuildRecordingStore{}
-	es := &captureBackend{}
-	err := walkProducts(t, st, es, 0, twoVersionResources(),
-		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}},
-		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
-
-	assertNothingDeleted(t, st, es, "X")
-	assertFailedOnce(t, st, err, "X")
-	for _, it := range es.allBulkItems() {
-		if it.ID == "X" {
-			t.Fatalf("no version of a resource whose plans disagree may be written: %+v", it)
-		}
-	}
-	if got := st.replacedFor(product("X")); len(got) != 0 {
-		t.Fatalf("no edge set of X may be replaced: %+v", got)
-	}
-	if n := st.count("BeginBuild:product/X"); n != 1 {
-		t.Fatalf("X is begun once, by plan 1's nil, got %d: %v", n, st.callsSnapshot())
-	}
-}
-
-// Every plan's nil deletes the id once its last plan agrees: every version's
-// document once, at the Build Sequence the walk began it at — plan 1's nil
+// Every plan's nil deletes the id once its last plan's nil arrives: every
+// version's document once, at the Build Sequence the walk began it at — plan 1's nil
 // begins it — then the root's drift check from the start of the walk that
 // began it (plan 1's, 1001; plan 2's is 1002), then the row delete guarded by
 // the stale_seq its BeginBuild captured.
@@ -1178,7 +1327,7 @@ func TestRebuildAll_MultiPlan_AllNil_DeletesOnceAtTheWalksSequence(t *testing.T)
 		t.Fatalf("X's delete and its row delete must run once each: %v", calls)
 	}
 	if remove[0] < starts[1] {
-		t.Fatalf("X may be deleted only once plan 2 agrees: %v", calls)
+		t.Fatalf("X may be deleted only once plan 2's nil arrives: %v", calls)
 	}
 	if check := slices.Index(calls, "AnyChangedSince:1"); check < remove[0] || rowDelete[0] < check {
 		t.Fatalf("the delete must be followed by the root's drift check, then the row delete: %v", calls)
@@ -1231,24 +1380,28 @@ func TestRebuildAll_MultiPlan_AllNil_DriftHitRebuildsTheRoot(t *testing.T) {
 }
 
 // One plan's listing repeating a nil counts as that plan's one outcome, so it
-// cannot stand in for a later plan's: a later document still disagrees.
+// cannot stand in for a later plan's: X settles on plan 2's document, with
+// v1's document deleted and v2's written, rather than as gone everywhere
+// before plan 2 ran.
 func TestRebuildAll_MultiPlan_RepeatedNilOfOnePlan_CountsOnce(t *testing.T) {
-	st := &rebuildRecordingStore{}
+	st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
 	es := &captureBackend{}
 	err := walkProducts(t, st, es, 0, twoVersionResources(),
 		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X"), nilDoc("X")}},
 		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	assertNothingDeleted(t, st, es, "X")
-	assertFailedOnce(t, st, err, "X")
+	assertRebuildDroppedVersion(t, st, es, "X", 43, 2, 1)
 }
 
 // L2.6 ruling R5: a single-plan walk drops a settled entry, so an id its listing
 // repeats is decided by each sighting while the earlier one is in flight,
 // and afresh once it settled — the later listing is the newer fetch. A
-// document still queued and a nil disagree and fail the id; a nil after the
-// document settled is a fresh sighting, deleted at its own BeginBuild's
-// sequence.
+// document still queued and a nil are one version contradicting itself and
+// fail the id (L2.9 ruling R3); a nil after the document settled is a fresh
+// sighting, deleted at its own BeginBuild's sequence.
 func TestRebuildAll_SinglePlan_DocumentThenNilOfOneID(t *testing.T) {
 	walk := func() *staticExecuter {
 		return &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), nilDoc("X")}}
@@ -1283,24 +1436,30 @@ func TestRebuildAll_SinglePlan_DocumentThenNilOfOneID(t *testing.T) {
 
 // L2.6 ruling R6: a multi-plan walk keeps a settled entry until finish, so an id
 // listed again after it settled is held to the outcome it settled on,
-// whatever the chunk boundaries. Each case flushes per document (chunk size
-// 1), so the id's documents land, and it settles, before the next sighting.
+// whatever the chunk boundaries: its last plan's repeat of that outcome is
+// ignored, and the other outcome of that plan's version fails it (L2.9
+// ruling R3). Each case flushes per document (chunk size 1), so the id's
+// documents land, and it settles, before the next sighting.
 func TestRebuildAll_MultiPlan_SightingAfterSettling(t *testing.T) {
-	t.Run("a repeated document counts once: a later nil still disagrees", func(t *testing.T) {
-		st := &rebuildRecordingStore{}
+	t.Run("a repeated document counts once: the id settles on the later plan's nil", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
 		es := &captureBackend{}
 		err := walkProducts(t, st, es, 1, twoVersionResources(),
 			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X"), productDoc("X")}},
 			&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}})
+		if err != nil {
+			t.Fatal(err)
+		}
 
-		assertNothingDeleted(t, st, es, "X")
-		assertFailedOnce(t, st, err, "X")
+		// Counted twice, plan 1's repeat would settle X before plan 2's nil,
+		// which would then delete nothing.
+		assertRebuildDroppedVersion(t, st, es, "X", 43, 1, 2)
 		if n := st.count("BeginBuild:product/X"); n != 1 {
 			t.Fatalf("X is begun once, got %d: %v", n, st.callsSnapshot())
 		}
 	})
 
-	t.Run("a nil after the id completed fails it", func(t *testing.T) {
+	t.Run("a nil of the version the id completed on fails it", func(t *testing.T) {
 		st := &rebuildRecordingStore{}
 		es := &captureBackend{}
 		err := walkProducts(t, st, es, 1, twoVersionResources(),
@@ -1514,8 +1673,9 @@ func TestRebuildAll_Salvage_SkipsFailedAndSettledIDs(t *testing.T) {
 }
 
 // An id that failed stays failed: later plans' nils and documents are
-// ignored, so it is never deleted, never re-begun, and its mark is never
-// cleared; it is counted and marked once.
+// ignored, so no version of it is deleted — not even the version whose plan
+// returned nil — it is never re-begun, and its mark is never cleared; it is
+// counted and marked once.
 func TestRebuildAll_MultiPlan_FailedIDStaysFailed(t *testing.T) {
 	for name, tc := range map[string]struct {
 		st *rebuildRecordingStore
@@ -1551,13 +1711,39 @@ func TestRebuildAll_MultiPlan_FailedIDStaysFailed(t *testing.T) {
 	}
 }
 
-// assertHandedOff checks the rebuild left id for the sweep: one stale mark
-// and no other write of it — nothing deleted, written, stored or cleared —
-// and no drift check of it.
-func assertHandedOff(t *testing.T, st *rebuildRecordingStore, es *captureBackend, id string) {
+// assertHandedOff checks the rebuild deleted id's documents of versions —
+// each once, at id's Build Sequence seq — replaced their edge sets with empty
+// ones in one write at seq, and left the rest of id to the sweep: one stale
+// mark, its row kept, nothing else of it deleted, written or cleared, and no
+// drift check of it.
+func assertHandedOff(t *testing.T, st *rebuildRecordingStore, es *captureBackend, id string, seq int64, versions ...int) {
 	t.Helper()
-	assertNothingDeleted(t, st, es, id)
+	var deleted, want []string
+	for _, d := range es.deletesAt() {
+		if strings.Contains(d, "/"+id+"@") {
+			deleted = append(deleted, d)
+		}
+	}
+	emptied := make([]EdgeSet, len(versions))
+	for i, v := range versions {
+		want = append(want, fmt.Sprintf("%s/%s@%d", IndexName("product", v), id, seq))
+		emptied[i] = versionSet(v)
+	}
+	slices.Sort(deleted)
+	slices.Sort(want)
+	if !slices.Equal(deleted, want) {
+		t.Fatalf("the selected versions' documents of %s must be deleted once each, at %d: got %v want %v", id, seq, deleted, want)
+	}
+	assertReplaces(t, st, product(id), seq, emptied)
 	calls := st.callsSnapshot()
+	for _, p := range []string{"RemoveResource:product/" + id + ":", "DeleteResourceIfSeq:product/" + id + ":"} {
+		if countPrefix(calls, p) != 0 {
+			t.Fatalf("%s's edges and row must stay for the sweep's build to decide: %v", id, calls)
+		}
+	}
+	if _, ok := st.rowMetadata(product(id)); !ok {
+		t.Fatalf("%s's row must stay", id)
+	}
 	if countPrefix(calls, "MarkStale:product/"+id) != 1 || countPrefix(calls, "MarkStaleFailed:product/"+id) != 0 {
 		t.Fatalf("%s must be marked stale exactly once: %v", id, calls)
 	}
@@ -1569,9 +1755,6 @@ func assertHandedOff(t *testing.T, st *rebuildRecordingStore, es *captureBackend
 			t.Fatalf("no document of %s may be written: %+v", id, it)
 		}
 	}
-	if got := st.replacedFor(product(id)); len(got) != 0 {
-		t.Fatalf("no edge set of %s may be stored: %+v", id, got)
-	}
 	for _, batch := range st.checksSnapshot() {
 		for _, c := range batch {
 			if c.Resource == product(id) {
@@ -1581,20 +1764,24 @@ func assertHandedOff(t *testing.T, st *rebuildRecordingStore, es *captureBackend
 	}
 }
 
-// L2.7: a rebuild that selects versions runs only their plans, while the
-// sweep's build runs every plan. An id every selected plan finds gone is
-// handed to the sweep — marked stale once, nothing of it deleted, its row
-// included — and is not a failure. v1, which the rebuild doesn't run, still
-// has X.
-func TestRebuild_VersionSelected_AllSelectedPlansNil_LeavesTheIDForTheSweep(t *testing.T) {
-	for name, sel := range map[string]ResourceSelector{
-		"walk":   {ResourceType: "product", Versions: []int{2}},
-		"by ids": {ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"X"}},
+// ADR 0013: a rebuild that selects versions runs only their plans, while the
+// sweep's build runs every plan, and only a build running every plan may
+// remove the row. An id every selected plan finds gone loses the selected
+// versions' documents and edge sets, keeps its row, and is handed to the
+// sweep — marked stale once — whose build decides the row. It is not a
+// failure. v1, which the rebuild doesn't run, still has X.
+func TestRebuild_VersionSelected_AllSelectedPlansNil_DeletesTheirVersions_LeavesTheRowForTheSweep(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sel ResourceSelector
+		seq int64
+	}{
+		"walk":   {ResourceSelector{ResourceType: "product", Versions: []int{2}}, 43},                             // 1 begins at 42, X at 43
+		"by ids": {ResourceSelector{ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"X"}}, 42}, // X begins at 42
 	} {
 		t.Run(name, func(t *testing.T) {
-			st := &rebuildRecordingStore{}
+			st := &rebuildRecordingStore{buildIdx: 41}
 			es := &captureBackend{}
-			err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+			err := rebuildSelected(t, st, es, 0, twoVersionResources(), tc.sel,
 				&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
 				&staticExecuter{
 					docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")},
@@ -1603,7 +1790,7 @@ func TestRebuild_VersionSelected_AllSelectedPlansNil_LeavesTheIDForTheSweep(t *t
 			if err != nil {
 				t.Fatalf("an id left for the sweep is not a failure, got %v", err)
 			}
-			assertHandedOff(t, st, es, "X")
+			assertHandedOff(t, st, es, "X", tc.seq, 2)
 		})
 	}
 }
@@ -1611,7 +1798,7 @@ func TestRebuild_VersionSelected_AllSelectedPlansNil_LeavesTheIDForTheSweep(t *t
 // A rebuild that runs every plan with an executer — no Versions, or a
 // selector naming every such version — still deletes what all of them find
 // gone: every version's document and its edges at X's Build Sequence, and
-// its row.
+// its row (ADR 0013).
 func TestRebuild_EveryActivePlanRuns_AllNil_DeletesTheID(t *testing.T) {
 	gone := func() *staticExecuter { return &staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}} }
 	for name, sel := range map[string]ResourceSelector{
@@ -1629,6 +1816,9 @@ func TestRebuild_EveryActivePlanRuns_AllNil_DeletesTheID(t *testing.T) {
 			assertDeletedAt(t, st, es, "X", 42)
 			if calls := st.callsSnapshot(); countPrefix(calls, "DeleteResourceIfSeq:product/X:42") != 1 || countPrefix(calls, "MarkStale:product/X") != 0 {
 				t.Fatalf("X's row must be removed, and X not marked: %v", calls)
+			}
+			if got := st.replacedFor(product("X")); len(got) != 0 {
+				t.Fatalf("every plan nil removes X's edges wholesale, emptying no set one by one: %+v", got)
 			}
 		})
 	}
@@ -1660,12 +1850,14 @@ func TestRebuild_EveryActivePlanRuns_AllNil_DeletesTheID(t *testing.T) {
 	}
 }
 
-// A multi-plan walk that selects versions holds an id its selected plans all
-// found gone to that outcome, as it holds a deleted one: a repeat of the nil
-// is ignored, and a document after it fails the id. Plans that disagree fail
-// the id as in any walk. The walk selects versions 2 and 3 of three; v1,
-// which it doesn't run, has X.
-func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testing.T) {
+// A multi-plan walk that selects versions hands an id to the sweep only when
+// every selected plan returns nil, and holds it to that outcome, as it holds
+// a deleted one: a repeat of the nil is ignored, and a document of the same
+// version after it fails the id (ruling R3). When one selected plan returns a
+// document, the id settles as in any walk: the nil versions' documents are
+// deleted, the row stays, nothing is handed off. The walk selects versions 2
+// and 3 of three; v1, which it doesn't run, has X.
+func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyWhenEverySelectedPlanIsNil(t *testing.T) {
 	walk := func(t *testing.T, st *rebuildRecordingStore, es *captureBackend, v2, v3 []projection.BuildDoc) error {
 		t.Helper()
 		return rebuildSelected(t, st, es, 0, threeVersionResources(), ResourceSelector{ResourceType: "product", Versions: []int{2, 3}},
@@ -1675,13 +1867,13 @@ func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testin
 	}
 
 	t.Run("both nil, v3 repeats its nil: left for the sweep once", func(t *testing.T) {
-		st := &rebuildRecordingStore{}
+		st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
 		es := &captureBackend{}
 		err := walk(t, st, es, []projection.BuildDoc{nilDoc("X")}, []projection.BuildDoc{nilDoc("X"), nilDoc("X")})
 		if err != nil {
 			t.Fatalf("an id left for the sweep is not a failure, got %v", err)
 		}
-		assertHandedOff(t, st, es, "X")
+		assertHandedOff(t, st, es, "X", 43, 2, 3)
 		if n := st.count("BeginBuild:product/X"); n != 1 {
 			t.Fatalf("X is begun once, got %d: %v", n, st.callsSnapshot())
 		}
@@ -1694,14 +1886,16 @@ func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testin
 		if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
 			t.Fatalf("the walk must report one failed resource, got %v", err)
 		}
-		assertNothingDeleted(t, st, es, "X")
 		calls := st.callsSnapshot()
 		if countPrefix(calls, "MarkStale:product/X") == 0 || countPrefix(calls, "ClearStale:product/X:") != 0 {
 			t.Fatalf("X must stay marked, never cleared: %v", calls)
 		}
+		if countPrefix(calls, "DeleteResourceIfSeq:product/X:") != 0 {
+			t.Fatalf("X's row must stay: %v", calls)
+		}
 		for _, it := range es.allBulkItems() {
 			if it.ID == "X" {
-				t.Fatalf("a document after the agreed nil must not be written: %+v", it)
+				t.Fatalf("a document contradicting v3's nil must not be written: %+v", it)
 			}
 		}
 		if countPrefix(calls, "ClearStale:product/1:") != 1 {
@@ -1709,12 +1903,14 @@ func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testin
 		}
 	})
 
-	t.Run("v2 nil, v3 document: fails once", func(t *testing.T) {
-		st := &rebuildRecordingStore{}
+	t.Run("v2 nil, v3 document: v2 deleted, X settles", func(t *testing.T) {
+		st := &rebuildRecordingStore{buildIdx: 41} // 1 begins at 42, X at 43
 		es := &captureBackend{}
 		err := walk(t, st, es, []projection.BuildDoc{nilDoc("X")}, []projection.BuildDoc{productDoc("X")})
-		assertNothingDeleted(t, st, es, "X")
-		assertFailedOnce(t, st, err, "X")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRebuildDroppedVersion(t, st, es, "X", 43, 3, 2)
 	})
 
 	t.Run("first listed by v3, without data: partial, fails once", func(t *testing.T) {
@@ -1727,14 +1923,15 @@ func TestRebuildAll_VersionsSelected_MultiPlan_HandsOffOnlyAnAgreedNil(t *testin
 }
 
 // The hand-off's mark is X's only recovery: when it fails, X fails — fail
-// retries the mark — and the rebuild reports it.
+// retries the mark — and the rebuild reports it. v2's document and edge set,
+// deleted before the mark, stay deleted, and the row stays.
 func TestRebuild_VersionSelected_FailedHandOffMark_FailsTheID(t *testing.T) {
 	for name, sel := range map[string]ResourceSelector{
 		"walk":   {ResourceType: "product", Versions: []int{2}},
 		"by ids": {ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"X"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			st := &rebuildRecordingStore{markErrs: map[string]int{"product/X": 1}}
+			st := &rebuildRecordingStore{buildIdx: 41, markErrs: map[string]int{"product/X": 1}} // X begins at 42
 			es := &captureBackend{}
 			err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
 				&staticExecuter{docs: []projection.BuildDoc{productDoc("X")}},
@@ -1742,13 +1939,58 @@ func TestRebuild_VersionSelected_FailedHandOffMark_FailsTheID(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "failed 1 resource(s)") {
 				t.Fatalf("the rebuild must report one failed resource, got %v", err)
 			}
-			assertNothingDeleted(t, st, es, "X")
+			if got := es.deletesAt(); !slices.Equal(got, []string{"product_search_v2/X@42"}) {
+				t.Fatalf("only v2's document of X is deleted, at 42, got %v", got)
+			}
+			assertReplaces(t, st, product("X"), 42, []EdgeSet{versionSet(2)})
 			calls := st.callsSnapshot()
+			if countPrefix(calls, "RemoveResource:product/X:") != 0 || countPrefix(calls, "DeleteResourceIfSeq:product/X:") != 0 {
+				t.Fatalf("X's edges and row must stay: %v", calls)
+			}
 			failed, marked := callIndexes(calls, "MarkStaleFailed:product/X"), callIndexes(calls, "MarkStale:product/X")
 			if len(failed) != 1 || len(marked) != 1 || marked[0] < failed[0] {
 				t.Fatalf("the failed mark must fail X, which marks it once more: %v", calls)
 			}
 		})
+	}
+}
+
+// Ruling R4: a per-version delete, or the emptied edge set's write, that
+// fails fails the id, counted and marked once, its mark never cleared and its
+// row kept, in a targeted rebuild and in a walk alike.
+func TestRebuild_NilVersionDropFails_FailsTheID(t *testing.T) {
+	for _, sel := range []ResourceSelector{
+		{ResourceType: "product"},
+		{ResourceType: "product", ResourceIDs: []string{"1", "X"}},
+	} {
+		for name, setup := range map[string]func(st *rebuildRecordingStore, es *captureBackend){
+			"delete fails": func(_ *rebuildRecordingStore, es *captureBackend) {
+				es.deleteErrs = map[string]error{"product_search_v2/X": errors.New("es down")}
+			},
+			"edge write fails": func(st *rebuildRecordingStore, _ *captureBackend) {
+				st.replaceHook = func(c edgeReplace) error {
+					if c.resource == product("X") && slices.ContainsFunc(c.sets, func(s EdgeSet) bool { return s.SchemaVersion == 2 }) {
+						return errors.New("db down")
+					}
+					return nil
+				}
+			},
+		} {
+			t.Run(fmt.Sprintf("%s, ids %v", name, sel.ResourceIDs), func(t *testing.T) {
+				st := &rebuildRecordingStore{}
+				es := &captureBackend{}
+				setup(st, es)
+				err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}, byID: map[string][]projection.BuildDoc{"X": {productDoc("X")}}},
+					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}, byID: map[string][]projection.BuildDoc{"X": {nilDoc("X")}}})
+
+				assertFailedOnce(t, st, err, "X")
+				calls := st.callsSnapshot()
+				if countPrefix(calls, "RemoveResource:product/X:") != 0 || countPrefix(calls, "DeleteResourceIfSeq:product/X:") != 0 {
+					t.Fatalf("X's edges and row must stay: %v", calls)
+				}
+			})
+		}
 	}
 }
 

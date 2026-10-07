@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/theleeeo/laika/model"
@@ -12,7 +13,7 @@ import (
 
 // plansForRebuild resolves the plans a rebuild executes. An empty Versions
 // selects every plan; otherwise only the selected versions' plans run.
-// runsEveryActivePlan tells whether they decide existence.
+// runsEveryActivePlan tells whether they may remove a resource's row.
 func (idx *Indexer) plansForRebuild(params RebuildArgs) ([]projection.Plan, error) {
 	all := idx.plans[params.ResourceType]
 	if len(all) == 0 {
@@ -42,8 +43,8 @@ func (idx *Indexer) plansForRebuild(params RebuildArgs) ([]projection.Plan, erro
 // runsEveryActivePlan reports whether plans — a subset of resourceType's
 // plans, as plansForRebuild selects them — include every one of its plans
 // that has an Executer. The sweep's build runs exactly those
-// (executeAllPlans), so only then may a rebuild delete what its plans all
-// find gone (rebuildFlusher.mayDelete).
+// (executeAllPlans), so only then may a rebuild remove the row of a resource
+// its plans all find gone (rebuildFlusher.mayDelete).
 func (idx *Indexer) runsEveryActivePlan(resourceType string, plans []projection.Plan) bool {
 	return countActive(plans) == countActive(idx.plans[resourceType])
 }
@@ -90,31 +91,42 @@ type pendingResource struct {
 	staleSeq   int64
 	drift      driftBase
 	// partial marks a resource a multi-plan walk first sighted after its
-	// first active plan: the earlier plans' listings omitted it, so its
-	// outcomes are not every plan's and decide nothing. When its last
-	// expected outcome arrives it is failed — marked for the sweep, whose
-	// build runs every plan — never deleted or completed. What its documents
+	// first active plan: the earlier plans' listings omitted it, and an
+	// omission is not a nil, so its outcomes are not every plan's and decide
+	// nothing. When its last expected outcome arrives it is failed — marked
+	// for the sweep, whose build runs every plan — never deleted or
+	// completed, and its plans' nils are not applied. What its documents
 	// wrote stays written, their edge sets stored.
 	partial bool
 	// remaining counts the plans whose outcome for the resource is still
 	// outstanding: a plan's document counts once it flushed successfully, a
 	// plan's nil (the source listed the resource without data) as the walk
 	// meets it — each plan once, however often its listing repeats the
-	// resource. The resource settles when it hits 0: on documents it
-	// completes — every expected document and its version's edge set
-	// stored, stale mark cleared — and on nils it is deleted (gone), or left
-	// marked for the sweep when the rebuild may not delete (mayDelete),
-	// unless it is partial, which fails instead.
+	// resource. The resource settles when it hits 0, on every plan's outcome
+	// (ADR 0013): with a document it completes — every expected document and
+	// its version's edge set stored, the nils applied (dropNils), stale mark
+	// cleared, row kept — and on nils alone it is deleted, row included
+	// (removeGone), or, when the rebuild may not remove the row (mayDelete),
+	// its versions' documents are deleted and it is left marked for the
+	// sweep (leaveGone). A partial resource fails instead.
 	remaining int
-	// lastCounted is the Schema Version of the plan whose outcome counted
-	// last (0: none). Plans arrive in order, so an outcome of that version is
-	// a repeat and counts no further.
+	// lastCounted is the Schema Version of the plan whose document counted
+	// last (0: none). Documents count in the order they were queued, which is
+	// plan order, so a document of that version is a repeat and counts no
+	// further.
 	lastCounted int
-	// sawDoc records a document of the resource queued for a flush, sawNil a
-	// plan's nil. Only unanimity decides existence, as in the live build: a
-	// document and a nil fail the resource.
-	sawDoc bool
-	sawNil bool
+	// lastDoc is the Schema Version of the last document of the resource
+	// queued for a flush (0: none; versions start at 1). Whether the
+	// resource saw a document (sawDoc) decides whether it keeps its row when
+	// it settles. A nil of that version contradicts it (ruling R3).
+	lastDoc int
+	// nils are the versions whose plans returned nil for the resource, in
+	// plan order; a repeated nil of one is not added again, and a document of
+	// one contradicts it (ruling R3). They are applied only when the resource
+	// settles (dropNils, removeGone), so a queued document and a delete of
+	// one resource never meet, and a resource that fails or never receives
+	// every outcome deletes nothing.
+	nils []int
 	// settled is how the resource settled, kept by a multi-plan walk until
 	// finish (keepSettled); a single-plan walk drops a settled entry.
 	settled settlement
@@ -124,9 +136,13 @@ type pendingResource struct {
 	failed bool
 }
 
-// settlement is how a resource settled: unsettled, completed on documents, or
-// deleted on nils — which a rebuild that may not delete settles by leaving the
-// resource marked for the sweep (rebuildFlusher.leaveGone).
+// sawDoc reports whether a plan returned a document of the resource.
+func (p *pendingResource) sawDoc() bool { return p.lastDoc != 0 }
+
+// settlement is how a resource settled: unsettled, completed on a document,
+// or deleted on nils alone — which a rebuild that may not remove the row
+// settles by deleting its versions' documents and leaving the resource
+// marked for the sweep (rebuildFlusher.leaveGone).
 type settlement int
 
 const (
@@ -168,15 +184,20 @@ type pendingItem struct {
 // chunks. Each flush stores, per resource, the edge sets of the versions whose
 // documents landed in it, at the resource's Build Sequence. The rest of a
 // resource's bookkeeping — the ADR 0002 drift check on the Change Sequence,
-// the seq-guarded stale clear — waits until every document of that resource
-// has flushed. A resource whose document is rejected is durably marked stale
-// instead of cleared, so the sweep recovers it, and the rebuild reports the
-// failure instead of success. A plan walk counts a plan's nil as that plan's
-// outcome too (gone): a resource every expected plan found gone is deleted —
-// or, when the rebuild runs fewer than every plan with an Executer, left
-// marked for the sweep (mayDelete) — unless it is partial (pendingResource.partial), which fails
-// instead, and one whose plans disagree fails. Its marks carry no metadata:
-// the rebuild's Metadata is the walk's fetch context, never a resource's own.
+// the seq-guarded stale clear — waits until every plan's outcome for that
+// resource has arrived and its documents have flushed. A resource whose
+// document is rejected is durably marked stale instead of cleared, so the
+// sweep recovers it, and the rebuild reports the failure instead of success.
+// A plan's nil is that plan's outcome too (gone), and its own version's
+// answer (ADR 0013): when the resource settles with a document, each nil
+// deletes its version's document and empties its version's edge set at the
+// resource's Build Sequence (dropNils), and the row stays; a resource every
+// expected plan found gone is deleted, row included — or, when the rebuild
+// runs fewer than every plan with an Executer (mayDelete), has those
+// versions' documents deleted and is left marked for the sweep. A partial
+// resource (pendingResource.partial), and one whose version contradicts
+// itself (ruling R3), fails instead. Its marks carry no metadata: the
+// rebuild's Metadata is the walk's fetch context, never a resource's own.
 type rebuildFlusher struct {
 	idx          *Indexer
 	resourceType string
@@ -194,19 +215,22 @@ type rebuildFlusher struct {
 	markFailed bool
 	// keepSettled keeps a settled resource's entry until finish, recording
 	// how it settled. A multi-plan walk sets it: a later sighting of an id
-	// that settled is held to that outcome — a repeat of it is ignored, the
-	// other outcome fails the id — rather than begun afresh, so the result
-	// never depends on where the chunks end. A single-plan walk drops a
-	// settled entry, keeping its state to O(chunk): a later sighting there
-	// is the newer fetch and decides the id afresh.
+	// that settled — its last plan's listing repeating it — is held to that
+	// plan's outcome — a repeat of it is ignored, the other outcome fails the
+	// id (ruling R3) — rather than begun afresh, so the result never depends
+	// on where the chunks end. A single-plan walk drops a settled entry,
+	// keeping its state to O(chunk): a later sighting there is the newer
+	// fetch and decides the id afresh.
 	keepSettled bool
-	// mayDelete lets the rebuild delete a resource every plan it runs found
-	// gone. It is set when those plans are every plan of the type that has an
-	// Executer (Indexer.runsEveryActivePlan) — the plans the sweep's build
-	// runs. A rebuild that selected fewer versions decides existence on a
-	// subset of the plans, and one version's nil must never delete another
-	// version's document: it leaves such a resource marked for the sweep
-	// instead (leaveGone), whose build runs every plan.
+	// mayDelete lets the rebuild remove the row of a resource every plan it
+	// runs found gone (removeGone). It is set when those plans are every plan
+	// of the type that has an Executer (Indexer.runsEveryActivePlan) — the
+	// plans the sweep's build runs. It guards only the row: each plan's nil
+	// deletes its own version's document either way. A rebuild that selected
+	// fewer versions has not asked the others, whose documents keep the row,
+	// so it deletes its versions' documents of such a resource and leaves it
+	// marked for the sweep (leaveGone), whose build runs every plan and
+	// decides the row.
 	mayDelete bool
 	// afterFlush, when set, runs after every successful flush of a non-empty
 	// chunk. rebuildAll checkpoints the walk cursor here: right after a flush,
@@ -262,22 +286,25 @@ func (f *rebuildFlusher) occ(id string) (occVersion, staleSeq int64, ok bool) {
 
 // add queues one plan document of Schema Version version, with its plan's
 // report reported. Flushes when the chunk bound is reached. A document of a
-// failed or completed resource is dropped; one of a resource a plan found
-// gone — deleted, or awaiting the later plans' outcomes — fails it unwritten,
-// so no version is written without the others.
+// failed resource is dropped, and so is a repeat of the document a resource
+// completed on. A document of a version whose plan returned nil for the
+// resource contradicts that nil and fails the resource unwritten (ruling R3);
+// another version's nil does not stop it.
 func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, relations []model.Resource, reported map[string]string) error {
 	p := f.state[item.ID]
-	if p == nil || p.failed || p.settled == completed {
+	if p == nil || p.failed {
 		return nil
 	}
-	if p.sawNil {
-		slog.Warn("plans disagree on existence; leaving resource stale for the sweep",
-			slog.String("type", f.resourceType), slog.String("id", item.ID),
-			slog.Int("version_with_data", version), slog.Int("version_without_data", p.lastCounted))
-		f.fail(ctx, item.ID)
+	if slices.Contains(p.nils, version) {
+		f.contradicts(ctx, item.ID, version)
 		return nil
 	}
-	p.sawDoc = true
+	// Only the last plan's listing can sight a settled resource again, and
+	// its document, unless it contradicts that plan's nil, is a repeat.
+	if p.settled != unsettled {
+		return nil
+	}
+	p.lastDoc = version
 	f.pending = append(f.pending, pendingItem{BulkItem: item, version: version, relations: relations, reported: reported})
 	if len(f.pending) >= f.chunkSize {
 		return f.flush(ctx)
@@ -285,74 +312,146 @@ func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, re
 	return nil
 }
 
-// discard forgets the resource without bookkeeping — queued documents are
-// dropped. Used when rebuildByIDs finds a resource gone and deletes it or
-// leaves it for the sweep. A failed resource is never dropped: its entry
-// keeps it failed until finish.
-func (f *rebuildFlusher) discard(id string) {
-	if p := f.state[id]; p != nil && p.failed {
-		return
-	}
-	f.dropPending(id)
-	delete(f.state, id)
-}
-
 // gone counts a plan's nil — the source listed the resource but returned no
-// data — as plan version's outcome for the resource id. A failed or deleted
-// resource (one left for the sweep included) ignores it, and a repeated nil
-// of one plan's listing counts once. A resource with a document — queued,
-// flushed, or completed in a multi-plan walk (keepSettled) — fails: its
+// data — as plan version's outcome for the resource id. It is that version's
+// answer alone (ADR 0013), recorded and applied when the resource settles. A
+// failed resource ignores it, and so does one that settled, unless it
+// contradicts the document the resource completed on; a repeated nil of one
+// plan's listing counts once. A nil of a version whose document the resource
+// already has — queued, flushed, or completed in a multi-plan walk
+// (keepSettled) — contradicts it and fails the resource (ruling R3): its
 // queued documents are dropped, what already flushed stays written, and the
-// sweep's build, which runs every plan, resolves it. When the last expected
-// plan's nil settles the resource, every plan the walk runs found it gone:
-// it is deleted (removeGone) if the walk runs every plan with an Executer
-// (mayDelete), and otherwise left marked for the sweep (leaveGone) — unless
-// it is partial, and the plans that omitted it were never asked: then it
-// fails.
+// sweep's build, which runs every plan, resolves it.
+//
+// When the last expected plan's nil settles the resource, it fails if it is
+// partial, and the plans that omitted it were never asked. Otherwise, with a
+// document — every one of which has flushed, or remaining would not have
+// reached 0 — it completes here (completeOnNil); and on nils alone it is
+// deleted (removeGone) if the rebuild runs every plan with an Executer
+// (mayDelete), and otherwise has its versions' documents deleted and is left
+// marked for the sweep (leaveGone).
 func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 	p := f.state[id]
-	if p == nil || p.failed || p.settled == deleted {
+	if p == nil || p.failed {
 		return
 	}
-	if p.sawDoc {
-		slog.Warn("plans disagree on existence; leaving resource stale for the sweep",
-			slog.String("type", f.resourceType), slog.String("id", id), slog.Int("version_without_data", version))
-		f.fail(ctx, id)
+	if p.lastDoc == version {
+		f.contradicts(ctx, id, version)
 		return
 	}
-	if p.lastCounted == version {
+	if p.settled != unsettled || slices.Contains(p.nils, version) {
 		return
 	}
-	p.sawNil, p.lastCounted = true, version
+	p.nils = append(p.nils, version)
 	p.remaining--
 	if p.remaining > 0 {
 		return
 	}
-	if p.partial {
+	switch {
+	case p.partial:
 		f.failPartial(ctx, id)
+	case p.sawDoc():
+		f.completeOnNil(ctx, id, p)
+	case !f.mayDelete:
+		f.leaveGone(ctx, id, p)
+	default:
+		f.removeGone(ctx, id, p)
+	}
+}
+
+// contradicts fails a resource one version's plan listed both with and
+// without data in one walk (ruling R3): applying both would queue a bulk
+// write and a delete of one document at one Build Sequence.
+func (f *rebuildFlusher) contradicts(ctx context.Context, id string, version int) {
+	slog.Warn("a schema version's plan listed the resource both with and without data; leaving it stale for the sweep",
+		slog.String("type", f.resourceType), slog.String("id", id), slog.Int("version", version))
+	f.fail(ctx, id)
+}
+
+// dropNils applies the nils of a resource that settles (pendingResource.nils):
+// each such version's document is deleted at the resource's Build Sequence —
+// a newer write's rejection is an OCC loss, which Delete does not report —
+// and then their edge sets are replaced with empty ones in one write at the
+// same sequence, which keeps each set's stamp, so an older build's edges
+// cannot return. Other versions' documents and edge sets, and the row, are
+// left alone. A failed delete or write fails the resource, leaving the mark
+// for the sweep; the caller checks p.failed.
+func (f *rebuildFlusher) dropNils(ctx context.Context, id string, p *pendingResource) {
+	if len(p.nils) == 0 {
 		return
 	}
-	if !f.mayDelete {
-		f.leaveGone(ctx, id)
+	sets := make([]EdgeSet, len(p.nils))
+	for i, v := range p.nils {
+		index := IndexName(f.resourceType, v)
+		if err := f.idx.es.Delete(ctx, index, id, p.occVersion); err != nil {
+			slog.Warn("deleting the document of a version whose plan returned no data failed; failing the resource",
+				slog.String("type", f.resourceType), slog.String("id", id), slog.String("index", index), slog.String("error", err.Error()))
+			f.fail(ctx, id)
+			return
+		}
+		sets[i] = EdgeSet{SchemaVersion: v}
+	}
+	if err := f.idx.st.ReplaceEdges(ctx, f.root(id), p.occVersion, sets, nil, nil); err != nil {
+		slog.Warn("emptying the edge sets of the versions whose plans returned no data failed; failing the resource",
+			slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
+		f.fail(ctx, id)
+	}
+}
+
+// completeOnNil completes a resource whose last expected outcome is a nil
+// arriving after its documents flushed — only flush completes one whose last
+// outcome is a document. It applies the nils (dropNils), checks the root
+// against its start when it is a plan walk's root, as removeGone does after
+// its delete (driftBase.checkRoot) — the children were checked when the
+// documents flushed — and clears the mark. A failed step fails the resource.
+func (f *rebuildFlusher) completeOnNil(ctx context.Context, id string, p *pendingResource) {
+	f.dropNils(ctx, id, p)
+	if p.failed {
 		return
 	}
-	f.removeGone(ctx, id, p)
+	if p.drift.checkRoot {
+		f.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: f.root(id), Start: p.drift.start}}})
+		if p.failed {
+			return
+		}
+	}
+	f.complete(ctx, id, p)
+}
+
+// complete settles a resource every expected outcome of which arrived, its
+// documents flushed and its nils applied: its stale mark is cleared, guarded
+// by the stale_seq its BeginBuild captured, and its row stays.
+func (f *rebuildFlusher) complete(ctx context.Context, id string, p *pendingResource) {
+	// Seq-guarded: a notification that landed mid-rebuild — or a drift
+	// re-mark — moved stale_seq and turns this into a no-op.
+	if err := f.idx.st.ClearStale(ctx, f.root(id), p.staleSeq); err != nil {
+		slog.Warn("clear stale failed; sweep may rebuild redundantly",
+			slog.String("id", id), slog.String("error", err.Error()))
+	}
+	f.settle(id, completed)
 }
 
 // leaveGone hands the sweep a resource every plan of a rebuild that may not
-// delete (mayDelete) found gone: those plans are a subset of the type's, so
-// it marks the resource stale, once, on a context detached from the
-// rebuild's cancellation (markStale), and deletes nothing of it, its row
-// included. The sweep's build runs every plan and deletes only if they all
-// agree. The resource gets no drift check: nothing of it was written or
-// deleted, and the mark already brings the sweep. It is not a failure, and it
-// settles as a deleted resource does (settle): a multi-plan walk holds it to
-// that outcome, a single-plan walk drops it — its checkpoint may step over
-// it, durably marked. A failed mark fails it (fail retries the mark and
-// counts it), so the rebuild reports it.
-func (f *rebuildFlusher) leaveGone(ctx context.Context, id string) {
-	slog.Info("every plan the rebuild runs found the resource gone; it runs fewer than every plan with an executer, so the resource is left marked for the sweep, whose build runs them all",
+// remove the row (mayDelete) found gone: those plans are a subset of the
+// type's, and the versions they did not run may still have the resource, so
+// only a build running every plan may remove the row (ADR 0013). It deletes
+// its plans' versions' documents and empties their edge sets (dropNils),
+// keeps the row, and marks the resource stale, once, on a context detached
+// from the rebuild's cancellation (markStale): the sweep's build runs every
+// plan and decides the row. The resource gets no drift check: the mark,
+// taken after the deletes, already brings the sweep's build, at a higher
+// Build Sequence. It is not a failure, and it settles as a deleted resource
+// does (settle): a multi-plan walk holds it to that outcome, a single-plan
+// walk drops it — its checkpoint may step over it, durably marked. A failed
+// delete or write fails it, and so does a failed mark (fail retries the mark
+// and counts it), so the rebuild reports it.
+func (f *rebuildFlusher) leaveGone(ctx context.Context, id string, p *pendingResource) {
+	slog.Info("every plan the rebuild runs found the resource gone; it runs fewer than every plan with an executer, so it deletes their versions' documents and leaves the row marked for the sweep, whose build runs them all",
 		slog.String("type", f.resourceType), slog.String("id", id))
+	f.dropNils(ctx, id, p)
+	if p.failed {
+		return
+	}
 	if err := f.markStale(ctx, id); err != nil {
 		f.fail(ctx, id)
 		return
@@ -363,23 +462,26 @@ func (f *rebuildFlusher) leaveGone(ctx context.Context, id string) {
 // removeGone deletes a resource every expected plan found gone, in a rebuild
 // that runs every plan with an Executer (mayDelete): every
 // version's document and its edges at the Build Sequence the walk began it
-// at (handleDelete), then the drift check of the root, then its row
-// (removeRow). The page that listed it may have been fetched before that
-// Build Sequence was taken: a recreate built and settled in between wrote
-// below it, and the delete removed it. So the root is checked against its
-// own start — that of the walk that began it, which precedes every fetch of
-// it — as a root the walk settles checks itself (driftBase.checkRoot); a hit
-// or a failed check re-marks and re-builds it, at worst redundantly. The
-// re-mark moves stale_seq, so the guarded row delete keeps the row; a root
-// whose re-mark failed was failed and keeps it too. A failed step fails the
-// resource.
+// at (handleDelete), then, for a plan walk's root, the drift check of the
+// root, then its row (removeRow). The page that listed it may have been
+// fetched before that Build Sequence was taken: a recreate built and settled
+// in between wrote below it, and the delete removed it. So the root is
+// checked against its own start — that of the walk that began it, which
+// precedes every fetch of it — as a root the walk settles checks itself
+// (driftBase.checkRoot); a hit or a failed check re-marks and re-builds it,
+// at worst redundantly. A root begun before its own fetch (rebuildByIDs) is
+// not checked. The re-mark moves stale_seq, so the guarded row delete keeps
+// the row; a root whose re-mark failed was failed and keeps it too. A failed
+// step fails the resource.
 func (f *rebuildFlusher) removeGone(ctx context.Context, id string, p *pendingResource) {
 	if err := f.idx.handleDelete(ctx, RebuildPayload{ResourceType: f.resourceType, ResourceID: id}, p.occVersion); err != nil {
 		slog.Warn("delete missing resource", slog.String("type", f.resourceType), slog.String("id", id), slog.String("error", err.Error()))
 		f.fail(ctx, id)
 		return
 	}
-	f.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: f.root(id), Start: p.drift.start}}})
+	if p.drift.checkRoot {
+		f.checkDrift(ctx, map[string][]ChangeCheck{id: {{Resource: f.root(id), Start: p.drift.start}}})
+	}
 	if !p.failed {
 		f.removeRow(ctx, id, p.staleSeq)
 	}
@@ -580,7 +682,8 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 	// Per-document settlement of the resources still standing: drift checks
 	// — the root once per chunk, its children per document — and the count
 	// of plans whose outcome is still expected, which a plan's repeated
-	// document doesn't lower again.
+	// document doesn't lower again. A plan's nil was counted when the walk
+	// met it.
 	driftCheck := make(map[string][]ChangeCheck)
 	rootChecked := make(map[string]bool)
 	for _, id := range order {
@@ -603,11 +706,26 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 		}
 	}
 
+	// Apply the nils of every resource this flush settles (dropNils) — those
+	// whose every expected outcome has arrived — before the drift check, so
+	// the check follows their deletes. A partial resource applies none: it
+	// fails below. One whose delete or write failed was failed and is not
+	// checked.
+	for _, id := range order {
+		p := f.state[id]
+		if p == nil || p.failed || p.remaining > 0 || p.partial {
+			continue
+		}
+		if f.dropNils(ctx, id, p); p.failed {
+			delete(driftCheck, id)
+		}
+	}
+
 	f.checkDrift(ctx, driftCheck)
 
-	// Complete resources whose every expected document has flushed — a
-	// partial one fails instead. A root whose drift re-mark failed was
-	// failed by checkDrift and is skipped.
+	// Complete resources whose every expected outcome has arrived and every
+	// document flushed — a partial one fails instead. A root whose drift
+	// re-mark failed was failed by checkDrift and is skipped.
 	for _, it := range chunk {
 		p := f.state[it.ID]
 		if p == nil || p.failed || p.settled != unsettled || p.remaining > 0 {
@@ -617,13 +735,7 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 			f.failPartial(ctx, it.ID)
 			continue
 		}
-		// Seq-guarded: a notification that landed mid-rebuild — or the drift
-		// re-mark above — moved stale_seq and turns this into a no-op.
-		if err := f.idx.st.ClearStale(ctx, f.root(it.ID), p.staleSeq); err != nil {
-			slog.Warn("clear stale failed; sweep may rebuild redundantly",
-				slog.String("id", it.ID), slog.String("error", err.Error()))
-		}
-		f.settle(it.ID, completed)
+		f.complete(ctx, it.ID, p)
 	}
 
 	if f.afterFlush != nil {
@@ -681,10 +793,10 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 
 // finish flushes the remainder and settles resources that never received
 // every expected plan's outcome: an earlier plan's document or nil began
-// them, and a later plan's walk never listed them. Their Build Sequence was
-// bumped and only some of their versions' documents and edge sets were
-// refreshed, or none after an earlier plan's nil — they must converge via the
-// sweep, so they are marked stale. Failed resources were marked when they
+// them, and a later plan's walk never listed them — an omission, which is
+// not a nil. Their Build Sequence was bumped and only some of their versions'
+// documents and edge sets were refreshed, and none of their nils applied —
+// they must converge via the sweep, so they are marked stale. Failed resources were marked when they
 // failed, and settled ones (keepSettled) need no mark.
 func (f *rebuildFlusher) finish(ctx context.Context) error {
 	if err := f.flush(ctx); err != nil {

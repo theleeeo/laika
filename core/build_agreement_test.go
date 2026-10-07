@@ -416,32 +416,25 @@ func TestBuild_ParentsCollectedFromEveryPlan(t *testing.T) {
 	}
 }
 
-func TestRebuildByIDs_PlansDisagreeOnExistence_LeavesStale(t *testing.T) {
-	st := &rebuildRecordingStore{}
+// ADR 0013: a targeted rebuild applies each plan's outcome to its own
+// version. v1 returns X's document and v2 nil: v1's document is written,
+// v2's deleted and v2's edge set emptied at X's Build Sequence, and X
+// settles with its row kept.
+func TestRebuildByIDs_OneVersionNil_DeletesOnlyThatVersion_AndSettles(t *testing.T) {
+	st := &rebuildRecordingStore{buildIdx: 41} // X begins at 42
 	es := &captureBackend{}
 	plans := map[string][]projection.Plan{"product": {
-		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("1")}}},
-		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{nilDoc("1")}}},
+		{Version: 1, Executer: &staticExecuter{docs: []projection.BuildDoc{productDoc("X")}}},
+		{Version: 2, Executer: &staticExecuter{docs: []projection.BuildDoc{nilDoc("X")}}},
 	}}
 	idx := newRebuildIndexer(st, es, plans, 0)
 
 	err := idx.RebuildNow(context.Background(), []ResourceSelector{
-		{ResourceType: "product", ResourceIDs: []string{"1"}},
+		{ResourceType: "product", ResourceIDs: []string{"X"}},
 	})
-	if err == nil {
-		t.Fatal("a rebuild that could not settle a resource must report failure")
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if ds := es.deletesSnapshot(); len(ds) != 0 {
-		t.Fatalf("plans disagreeing on existence must not delete any version's document, deleted %v", ds)
-	}
-	if items := es.allBulkItems(); len(items) != 0 {
-		t.Fatalf("no version's document may be written for an unsettled resource, wrote %v", items)
-	}
-	if st.has("ClearStale:product/1") {
-		t.Fatal("the resource must stay stale for the sweep")
-	}
-	if !st.has("MarkStale:product/1") {
-		t.Fatal("the failed resource must be durably re-marked stale")
-	}
+	assertRebuildDroppedVersion(t, st, es, "X", 42, 1, 2)
 }
