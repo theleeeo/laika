@@ -503,7 +503,9 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	// afterFlush hook checkpoints it: right after a flush, everything before
 	// that boundary is durably written and settled, or failed and durably
 	// marked stale. Mid-page flushes checkpoint the previous boundary —
-	// conservative, never ahead of what was flushed. Once a mark of the walk
+	// conservative, never ahead of what was flushed. A paced walk flushes at
+	// each page boundary before it waits (walkPacer.beforePage), so it
+	// checkpoints each boundary it waits at. Once a mark of the walk
 	// has failed (rebuildFlusher.markFailed) it checkpoints nothing more: a
 	// resource may have no mark, and a retry must resume before it.
 	checkpointing := resumable && resume.checkpoint != nil
@@ -516,7 +518,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 		}
 	}
 
-	pacer := &walkPacer{idx: idx, pacing: params.Pacing}
+	pacer := &walkPacer{idx: idx, pacing: params.Pacing, flush: fl.flush}
 
 	for planIdx, plan := range plans {
 		if plan.Executer == nil {
@@ -539,7 +541,8 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 
 		// A paced walk waits before the plan's first page — before Execute,
 		// which may fetch it at once — and so before the walk start, which
-		// it would only widen.
+		// it would only widen. It flushes what an earlier plan left pending
+		// first (walkPacer.beforePage).
 		if err := pacer.beforePage(ctx); err != nil {
 			fl.salvage(ctx)
 			return err
@@ -641,11 +644,12 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 				completed = &RebuildCursor{PlanVersion: plan.Version, PageToken: tok}
 			}
 
-			// A page with a next is followed by one: a paced walk waits
-			// before taking it — the plan's pipeline may already have fetched
-			// up to its stage depth ahead. The final page (nil token) waits
-			// for nothing — another plan's first page waits before its
-			// Execute.
+			// A page with a next is followed by one: a paced walk flushes
+			// the page and waits before taking the next — the plan's pipeline
+			// may already have fetched up to its stage depth ahead. The
+			// flush checkpoints this page's boundary (afterFlush). The final
+			// page (nil token) waits for nothing — another plan's first page
+			// waits before its Execute.
 			if page.NextPageToken != nil {
 				if err := pacer.beforePage(ctx); err != nil {
 					fl.salvage(ctx)

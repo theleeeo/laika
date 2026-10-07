@@ -34,7 +34,9 @@ type ResourceSelector struct {
 // pool is pressured; after a page it waits out the rest of PageInterval,
 // measured from the page's start. It paces the walk taking pages, not the
 // plan's fetches: the plan's pipeline may already have fetched up to its
-// stage depth ahead (about a page per stage) while the walk waits.
+// stage depth ahead (about a page per stage) while the walk waits. The walk
+// flushes what it has pending before each wait, so no resource it began
+// waits unwritten.
 type WalkPacing struct {
 	// PageSize is passed to the walk's plans as
 	// projection.BuildRequest.PageSize.
@@ -128,7 +130,9 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 // asked for pages of PageSize, and before the walk takes each page it waits
 // out the rest of the previous page's PageInterval and while the build pool
 // is pressured; the plan's pipeline may already have fetched up to its stage
-// depth ahead. A targeted rebuild ignores it.
+// depth ahead. Before each wait it flushes its pending chunk, so it writes,
+// and a single-plan walk checkpoints, at every page boundary it waits at,
+// whatever RebuildChunkSize is. A targeted rebuild ignores it.
 //
 // Resuming also requires the plan's Executer to honour
 // projection.BuildRequest.PageToken: one that ignores it restarts from the head
@@ -198,10 +202,14 @@ func (idx *Indexer) validateSelectors(selectors []ResourceSelector) error {
 }
 
 // walkPacer paces an all-of-type rebuild walk by its selector's WalkPacing;
-// a nil pacing paces nothing.
+// a nil pacing paces nothing, and an unpaced walk flushes only at its chunk
+// size.
 type walkPacer struct {
 	idx    *Indexer
 	pacing *WalkPacing
+	// flush writes the walk's pending chunk (rebuildFlusher.flush); a paced
+	// walk runs it before every wait.
+	flush func(context.Context) error
 	// pageStart is when the walk asked for its last page; zero before the
 	// first.
 	pageStart time.Time
@@ -218,7 +226,13 @@ func (w *walkPacer) pageSize() int {
 
 // beforePage runs before the walk takes a page: before a plan's Execute,
 // which may fetch its first page at once, and after a page that has a next.
-// It waits out the rest of the previous page's PageInterval, measured from
+// It first flushes the walk's pending chunk, so no id the walk has begun —
+// its Build Sequence taken — waits unwritten across the pacing: a notified
+// delete of it that outlasted Elasticsearch's index.gc_deletes before the
+// walk's write at the older Build Sequence would bring the deleted document
+// back (seams S16). The flush checkpoints a single-plan walk at the page
+// boundary just consumed, as any flush does; a flush error is returned for
+// the walk to abort on. It then waits out the rest of the previous page's PageInterval, measured from
 // that page's start, then waits while the build pool is pressured, then
 // starts the new page's clock. Called only when another page follows, it
 // never waits after the walk's last page. It holds back the walk taking
@@ -230,6 +244,9 @@ func (w *walkPacer) pageSize() int {
 func (w *walkPacer) beforePage(ctx context.Context) error {
 	if w.pacing == nil {
 		return nil
+	}
+	if err := w.flush(ctx); err != nil {
+		return err
 	}
 	if !w.pageStart.IsZero() {
 		if err := w.idx.waitPageInterval(ctx, w.pacing.PageInterval-time.Since(w.pageStart)); err != nil {
