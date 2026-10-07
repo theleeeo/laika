@@ -10,13 +10,15 @@
 >   registration of the resource itself was accepted since the claim
 >   (`change_seq` not above the owner token). Such a registration reset the
 >   backoff, and its change does not wait out the failure: the row is released
->   without one. A Parent mark or `MarkStale` landing meanwhile does not spare
+>   without one and left for the sweep at its mark's turn, as nothing tries it
+>   at once. A Parent mark or `MarkStale` landing meanwhile does not spare
 >   it the backoff, so a busy child can't keep a stuck Parent at the front. A
 >   row whose `change_seq` is above its `stale_seq` is backed off whatever its
 >   token: only a mark racing the row's creation leaves that state, its
 >   `stale_seq` drawn below the creator's `change_seq` (seams S14 in
->   laika-dev's `docs/seams.md`), and every later token would otherwise read
->   as a registration since the claim.
+>   laika-dev's `docs/seams.md`), and every token a sweep takes at the lowered
+>   `stale_seq` would otherwise read as a registration since the claim. A
+>   later mark draws above `change_seq` and ends that state.
 
 > **Note (2026-10-06, decided for runbook step L2.8):** the sweep **backs off**
 > a resource whose build keeps failing. Today it takes the oldest stale rows
