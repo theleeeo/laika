@@ -190,10 +190,12 @@ func (vc VersionConfig) Validate(resourceName string, version int) error {
 		}
 	}
 
-	// Relations and nested blocks each name a distinct top-level document
-	// key, so none may claim a reserved one: the root field key namespace
-	// ("fields"), the search surfaces, or ResourceIDField. Block names must
-	// not collide with any relation or other block name either.
+	// Relations and nested blocks each name a top-level document key or
+	// filter-path prefix (a reference relation stores no key, but its filters
+	// are still "<relation>.<field>"), so none may claim a reserved one: the
+	// root field key namespace ("fields"), the search surfaces, or
+	// ResourceIDField. Block names must not collide with any relation or
+	// other block name either.
 	reserved := map[string]bool{"fields": true, "search_primary": true, "search_secondary": true, ResourceIDField: true}
 	seen := maps.Clone(reserved)
 	for _, r := range vc.Relations {

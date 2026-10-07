@@ -19,6 +19,9 @@ var ErrVersionConflict = errors.New("version conflict")
 // SearchBackend is the interface that wraps the document-level operations
 // needed by the Indexer. es.Client implements this interface.
 type SearchBackend interface {
+	// Upsert writes doc, a map[string]any (projection.BuildDoc.Doc), as
+	// docID. The backend adds resource.ResourceIDField = docID to what it
+	// sends, without writing into doc; BulkUpsert does the same per item.
 	Upsert(ctx context.Context, index, docID string, doc any, version int64) error
 	// BulkUpsert writes the items and reports per-item rejections. The error
 	// covers request-level failures (transport, timeout, non-2xx response),
