@@ -146,8 +146,9 @@ func TestDiffMapping_UnwrapsGeneratedMappingAndIgnoresAnalyzers(t *testing.T) {
 	// Running index as ES would report it: object container without a type,
 	// search surfaces carry only their type (analyzer/subfield keys omitted).
 	actual := mappingsDoc(map[string]any{
-		"fields": esObject(map[string]any{"name": leaf("keyword")}),
-		"search_primary": leaf("text"),
+		"fields":                 esObject(map[string]any{"name": leaf("keyword")}),
+		resource.ResourceIDField: leaf("keyword"),
+		"search_primary":         leaf("text"),
 		"search_secondary": nested(map[string]any{
 			"text":  leaf("text"),
 			"scope": leaf("keyword"),

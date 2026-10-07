@@ -11,7 +11,9 @@ import (
 	"encoding/json/v2"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
+	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -333,4 +335,109 @@ func TestDelete_RejectsNonPositiveVersion(t *testing.T) {
 	if *last != nil {
 		t.Fatal("no request may be sent for an invalid version")
 	}
+}
+
+// bodyClient builds a Client whose transport answers every request with HTTP
+// 200 and the given body, and records each request body it served.
+func bodyClient(t *testing.T, responseBody string) (*Client, *[]string) {
+	t.Helper()
+	var bodies []string
+	rt := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		b, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		bodies = append(bodies, string(b))
+		headers := make(http.Header)
+		headers.Set("X-Elastic-Product", "Elasticsearch")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(responseBody)),
+			Header:     headers,
+		}, nil
+	})
+	esClient, err := esv8.NewClient(esv8.Config{
+		Addresses: []string{"http://example.invalid"},
+		Transport: rt,
+	})
+	if err != nil {
+		t.Fatalf("new es client: %v", err)
+	}
+	return New(esClient, false), &bodies
+}
+
+// Every search sorts on resource_id last, so every written document carries
+// it, equal to its document id — and the caller's map, which a plan may share
+// across ids and workers, is never written into.
+func TestUpsert_SetsResourceIDOnACopy(t *testing.T) {
+	c, bodies := bodyClient(t, `{"result":"created"}`)
+
+	doc := map[string]any{"fields": map[string]any{"title": "t"}}
+	require.NoError(t, c.Upsert(context.Background(), "idx", "42", doc, 7))
+
+	require.Len(t, *bodies, 1)
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte((*bodies)[0]), &sent))
+	require.Equal(t, "42", sent[resource.ResourceIDField])
+	require.Equal(t, map[string]any{"title": "t"}, sent["fields"])
+	require.NotContains(t, doc, resource.ResourceIDField, "the caller's map must not be written into")
+}
+
+// A resource_id already in the document is overwritten with the document id:
+// the id the build writes under is the one every search sorts on.
+func TestUpsert_ResourceIDOverwritesDocKey(t *testing.T) {
+	c, bodies := bodyClient(t, `{"result":"created"}`)
+
+	doc := map[string]any{resource.ResourceIDField: "stale"}
+	require.NoError(t, c.Upsert(context.Background(), "idx", "42", doc, 7))
+
+	var sent map[string]any
+	require.NoError(t, json.Unmarshal([]byte((*bodies)[0]), &sent))
+	require.Equal(t, "42", sent[resource.ResourceIDField])
+	require.Equal(t, "stale", doc[resource.ResourceIDField])
+}
+
+func TestUpsert_NonMapDocIsAnError(t *testing.T) {
+	c, bodies := bodyClient(t, `{"result":"created"}`)
+
+	err := c.Upsert(context.Background(), "idx", "42", struct{ Title string }{"t"}, 7)
+	require.Error(t, err)
+	require.Empty(t, *bodies, "no request is sent for a document that cannot carry resource_id")
+}
+
+func TestBulkUpsert_SetsResourceIDPerItemOnCopies(t *testing.T) {
+	c, bodies := bodyClient(t, `{"errors":false}`)
+
+	// One map shared by two items, as a plan's fixture may return it for
+	// several ids: each item's document carries its own id.
+	shared := map[string]any{"fields": map[string]any{"title": "t"}}
+	_, err := c.BulkUpsert(context.Background(), []core.BulkItem{
+		{Index: "idx", ID: "1", Doc: shared, Version: 3},
+		{Index: "idx", ID: "2", Doc: shared, Version: 3},
+	})
+	require.NoError(t, err)
+
+	require.Len(t, *bodies, 1)
+	lines := strings.Split(strings.TrimSpace((*bodies)[0]), "\n")
+	require.Len(t, lines, 4, "two meta lines and two document lines")
+	for i, wantID := range []string{"1", "2"} {
+		var sent map[string]any
+		require.NoError(t, json.Unmarshal([]byte(lines[2*i+1]), &sent))
+		require.Equal(t, wantID, sent[resource.ResourceIDField], "item %d", i)
+		require.Equal(t, map[string]any{"title": "t"}, sent["fields"], "item %d", i)
+	}
+	require.NotContains(t, shared, resource.ResourceIDField, "the caller's map must not be written into")
+}
+
+// A document that is not a map is a programming error for the whole call,
+// like an invalid version: nothing is sent.
+func TestBulkUpsert_NonMapDocFailsTheCall(t *testing.T) {
+	c, bodies := bodyClient(t, `{"errors":false}`)
+
+	_, err := c.BulkUpsert(context.Background(), []core.BulkItem{
+		{Index: "idx", ID: "1", Doc: map[string]any{"fields": map[string]any{}}, Version: 3},
+		{Index: "idx", ID: "2", Doc: "not a map", Version: 3},
+	})
+	require.Error(t, err)
+	require.Empty(t, *bodies, "no request is sent when any item cannot carry resource_id")
 }

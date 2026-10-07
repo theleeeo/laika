@@ -2,6 +2,7 @@ package resource
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -189,11 +190,16 @@ func (vc VersionConfig) Validate(resourceName string, version int) error {
 		}
 	}
 
-	// Nested blocks: valid in isolation, and their names must not collide with
-	// a root field key namespace ("fields") or any relation/other block name —
-	// each is a distinct top-level document key.
-	seen := map[string]bool{"fields": true, "search_primary": true, "search_secondary": true}
+	// Relations and nested blocks each name a distinct top-level document
+	// key, so none may claim a reserved one: the root field key namespace
+	// ("fields"), the search surfaces, or ResourceIDField. Block names must
+	// not collide with any relation or other block name either.
+	reserved := map[string]bool{"fields": true, "search_primary": true, "search_secondary": true, ResourceIDField: true}
+	seen := maps.Clone(reserved)
 	for _, r := range vc.Relations {
+		if reserved[r.Resource] {
+			return fmt.Errorf("version %d: relation name %q collides with a reserved top-level key", version, r.Resource)
+		}
 		seen[r.Resource] = true
 	}
 	// Block names share the top-level document namespace with relations and

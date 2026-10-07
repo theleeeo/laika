@@ -87,6 +87,10 @@ func GenerateMapping(vc *resource.VersionConfig) map[string]any {
 			"type":       "object",
 			"properties": fieldsProps,
 		},
+		// resource_id — the document id, set on every write (Client.Upsert,
+		// Client.BulkUpsert); every search sorts on it last, since ES 8
+		// refuses a sort on _id by default.
+		resource.ResourceIDField: map[string]any{"type": "keyword"},
 		// Standardized searchable surfaces, named by tier. Every index carries
 		// both so a federated query is a uniform match with comparable scores;
 		// the indexer populates them at Build time.

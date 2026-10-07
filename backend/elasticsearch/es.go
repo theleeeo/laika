@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"time"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
 
 type Client struct {
@@ -95,6 +97,24 @@ func Dial(addrs []string, username, password string) (*Client, error) {
 	return New(es, false), nil
 }
 
+// withResourceID returns a shallow copy of doc with resource.ResourceIDField
+// set to docID, overwriting any value doc has for it. It never writes into
+// doc: plans and test fixtures share one map across ids and workers. A doc
+// that is not a map[string]any cannot carry the field and is an error.
+func withResourceID(doc any, index, docID string) (map[string]any, error) {
+	m, ok := doc.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("document %s/%s is a %T, want map[string]any", index, docID, doc)
+	}
+	out := make(map[string]any, len(m)+1)
+	maps.Copy(out, m)
+	out[resource.ResourceIDField] = docID
+	return out, nil
+}
+
+// Upsert writes doc as docID at the build's external version. The document is
+// sent with a root resource_id equal to docID, which every search sorts on
+// last; doc itself is left as it is.
 func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, version int64) error {
 	now := time.Now()
 
@@ -102,7 +122,12 @@ func (c *Client) Upsert(ctx context.Context, indexAlias, docID string, doc any, 
 		return fmt.Errorf("invalid external version %d for %s/%s", version, indexAlias, docID)
 	}
 
-	body, err := json.Marshal(doc)
+	sent, err := withResourceID(doc, indexAlias, docID)
+	if err != nil {
+		return err
+	}
+
+	body, err := json.Marshal(sent)
 	if err != nil {
 		return err
 	}
@@ -178,6 +203,9 @@ func (c *Client) Delete(ctx context.Context, indexAlias, docID string, version i
 	return nil
 }
 
+// BulkUpsert writes items in one _bulk request, each at its external version
+// and, like Upsert, with a root resource_id equal to its id. An invalid
+// version or a non-map document fails the whole call before anything is sent.
 func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) ([]core.BulkFailure, error) {
 	if len(items) == 0 {
 		return nil, nil
@@ -190,6 +218,10 @@ func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) ([]core.
 		if it.Version <= 0 {
 			return nil, fmt.Errorf("invalid external version %d for %s/%s", it.Version, it.Index, it.ID)
 		}
+		doc, err := withResourceID(it.Doc, it.Index, it.ID)
+		if err != nil {
+			return nil, err
+		}
 
 		meta := map[string]any{"index": map[string]any{
 			"_index":       it.Index,
@@ -201,7 +233,7 @@ func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) ([]core.
 			return nil, fmt.Errorf("marshal index meta: %w", err)
 		}
 
-		if err := json.MarshalEncode(enc, it.Doc); err != nil {
+		if err := json.MarshalEncode(enc, doc); err != nil {
 			return nil, fmt.Errorf("marshal doc: %w", err)
 		}
 	}

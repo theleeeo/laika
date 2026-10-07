@@ -196,3 +196,31 @@ func TestGenerateMapping_ScopedNestedBlock(t *testing.T) {
 	require.Equal(t, "keyword", bp["fiber_operator_id"].(map[string]any)["type"])
 	require.Equal(t, "keyword", bp["custom_fields"].(map[string]any)["type"])
 }
+
+// Every search sorts on resource_id last, so every index a config generates
+// must map it as a root keyword, whatever else the version declares.
+func TestGenerateMapping_RootResourceIDKeyword(t *testing.T) {
+	configs := map[string]*resource.VersionConfig{
+		"empty":       {},
+		"root fields": {Fields: []resource.FieldConfig{{Name: "title"}, {Name: "body", Type: "text"}}},
+		"relations": {
+			Fields: []resource.FieldConfig{{Name: "b_id"}},
+			Relations: []resource.RelationConfig{
+				{Resource: "owner", Cardinality: "one", Fields: []resource.FieldConfig{{Name: "email"}}},
+				{Resource: "tags", Fields: []resource.FieldConfig{{Name: "label"}}},
+				{Resource: "b", Strategy: resource.StrategyReference, Join: resource.JoinConfig{Local: "b_id", Foreign: "id"}, Fields: []resource.FieldConfig{{Name: "name"}}},
+			},
+		},
+		"nested block": {NestedBlocks: []resource.NestedBlockConfig{{
+			Name: "operator_data", ScopeKey: "fiber_operator_id", Fields: []resource.FieldConfig{{Name: "custom_fields"}},
+		}}},
+	}
+	for name, vc := range configs {
+		t.Run(name, func(t *testing.T) {
+			props := GenerateMapping(vc)["mappings"].(map[string]any)["properties"].(map[string]any)
+			field, ok := props[resource.ResourceIDField].(map[string]any)
+			require.True(t, ok, "root %q missing from mapping properties", resource.ResourceIDField)
+			require.Equal(t, map[string]any{"type": "keyword"}, field)
+		})
+	}
+}

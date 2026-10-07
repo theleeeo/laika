@@ -204,3 +204,38 @@ func TestValidate_EmptyVersions_Error(t *testing.T) {
 func TestValidate_EmptyConfigsAllowed(t *testing.T) {
 	require.NoError(t, Configs{}.Validate())
 }
+
+// Nested blocks and relations each take a top-level document key, so neither
+// may claim a reserved one: the root field namespace, the search surfaces, or
+// resource_id, which the backend sets to the document id on every write.
+func TestValidate_ReservedTopLevelNames(t *testing.T) {
+	reserved := []string{"fields", "search_primary", "search_secondary", ResourceIDField}
+
+	for _, name := range reserved {
+		t.Run("nested block "+name, func(t *testing.T) {
+			cfgs := Configs{{Resource: "a", Versions: []VersionConfig{{
+				Version: 1, Fields: []FieldConfig{{Name: "x"}},
+				NestedBlocks: []NestedBlockConfig{{
+					Name: name, ScopeKey: "s", Fields: []FieldConfig{{Name: "y"}},
+				}},
+			}}}}
+			require.ErrorContains(t, cfgs.Validate(), "nested block name \""+name+"\"")
+		})
+
+		t.Run("relation "+name, func(t *testing.T) {
+			// The target resource exists and has the related field, so the
+			// reserved name is the only thing wrong with the relation.
+			cfgs := Configs{
+				{Resource: "a", Versions: []VersionConfig{{
+					Version:   1,
+					Fields:    []FieldConfig{{Name: "x"}},
+					Relations: []RelationConfig{rel(name, JoinConfig{Local: "x", Foreign: "id"}, "y")},
+				}}},
+				{Resource: name, Versions: []VersionConfig{{
+					Version: 1, Fields: []FieldConfig{{Name: "id"}, {Name: "y"}},
+				}}},
+			}
+			require.ErrorContains(t, cfgs.Validate(), "relation name \""+name+"\"")
+		})
+	}
+}
