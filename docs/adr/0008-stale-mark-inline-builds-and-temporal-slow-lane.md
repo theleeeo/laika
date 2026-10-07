@@ -1,5 +1,23 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-07, runbook step L2.8):** the backoff as built
+> (`Store.ReleaseFailed`) refines the note below in two ways.
+> - A failure reached once the build's or delete's context has ended was
+>   caused by a cancellation or shutdown, not by the resource: its row is
+>   released without a backoff, as the ids a cancelled build left unreached
+>   are.
+> - A failed owned build or delete backs its row off only when no
+>   registration of the resource itself was accepted since the claim
+>   (`change_seq` not above the owner token). Such a registration reset the
+>   backoff, and its change does not wait out the failure: the row is released
+>   without one. A Parent mark or `MarkStale` landing meanwhile does not spare
+>   it the backoff, so a busy child can't keep a stuck Parent at the front. A
+>   row whose `change_seq` is above its `stale_seq` is backed off whatever its
+>   token: only a mark racing the row's creation leaves that state, its
+>   `stale_seq` drawn below the creator's `change_seq` (seams S14 in
+>   laika-dev's `docs/seams.md`), and every later token would otherwise read
+>   as a registration since the claim.
+
 > **Note (2026-10-06, decided for runbook step L2.8):** the sweep **backs off**
 > a resource whose build keeps failing. Today it takes the oldest stale rows
 > first and a failed build keeps its `stale_since`, so a resource that never
