@@ -25,12 +25,13 @@ import (
 // statistics and cross-Type comparability rests on the standardized search
 // fields rather than DFS. The merged ranking orders by score with a
 // deterministic (index, id) tie-break — the total order every leg also sorts
-// by in ES — so page boundaries are stable. Counts (spec D12) are each leg's
-// hits.total, keyed by the group's alias (core resolves aliases as well as
-// concrete index names) — under ES's default track_total_hits cap, the same
-// looseness the single query's total has: federated totals are tallies for a
-// UI, not exact bookkeeping. A missing index empties its own leg only, where
-// the single query's 404 empties the whole response.
+// by in ES (_index, then resource_id, which every write sets to the id) — so
+// page boundaries are stable. Counts (spec D12) are each leg's hits.total,
+// keyed by the group's alias (core resolves aliases as well as concrete index
+// names) — under ES's default track_total_hits cap, the same looseness the
+// single query's total has: federated totals are tallies for a UI, not exact
+// bookkeeping. A missing index empties its own leg only, where the single
+// query's 404 empties the whole response.
 func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchParams) (core.FederatedSearchResult, error) {
 	// Every leg must over-fetch the full merged window from 0, because the
 	// merge cannot know in advance how the top of the combined ranking

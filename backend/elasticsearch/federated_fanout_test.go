@@ -5,6 +5,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"strings"
@@ -149,10 +150,13 @@ func TestFederatedFanout_LegShapePerType(t *testing.T) {
 		}
 
 		// No _index pinning and no cross-Type groups: that is the point. The
-		// only _index a leg names is its sort's tiebreaker.
-		raw, _ := json.Marshal(body["query"])
+		// only _index a leg names is its sort's tiebreaker, which
+		// TestFederatedFanout_LegSortMatchesMerge asserts exactly.
+		rest := maps.Clone(body)
+		delete(rest, "sort")
+		raw, _ := json.Marshal(rest)
 		if strings.Contains(string(raw), "_index") {
-			t.Errorf("leg %d query pins _index: %s", i, raw)
+			t.Errorf("leg %d body pins _index outside its sort: %s", i, raw)
 		}
 	}
 }
