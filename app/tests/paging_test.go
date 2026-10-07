@@ -40,6 +40,11 @@ func (t *TestSuite) seedPaged() {
 	for _, id := range append(slices.Clone(pagedIDs), pagedOutsider) {
 		t.buildA(id, core.ChangeCreated)
 	}
+
+	// All seven are indexed, so the filter's six is a real narrowing.
+	all, err := t.idx.Search(t.T().Context(), core.SearchRequest{Resource: "a"})
+	t.Require().NoError(err)
+	t.Require().EqualValues(len(pagedIDs)+1, all.Total, "seeded documents of a")
 }
 
 // buildA registers a change to resource a/id with no source version (always
@@ -58,7 +63,10 @@ func (t *TestSuite) pageAcrossRebuild(search func(page int32) []string) [][]stri
 	t.T().Helper()
 	first := search(0)
 	t.Require().NotEmpty(first, "page 1 is empty")
+	fetches := t.fakeProvider.FetchCount("a", first[0])
 	t.buildA(first[0], core.ChangeUpdated)
+	t.Require().Equalf(fetches+1, t.fakeProvider.FetchCount("a", first[0]),
+		"the rebuild of a/%s between page 1 and page 2 must fetch it once", first[0])
 	return [][]string{first, search(1), search(2)}
 }
 
@@ -110,11 +118,9 @@ func (t *TestSuite) Test_Paging_FederatedSearch_StableAcrossRebuild() {
 		elasticsearch.FederatedSingleDFS, // the default
 	} {
 		t.Run(string(mode), func() {
-			idx, err := core.New(core.Config{
-				Resources: DefaultResourceConfig,
-				ES:        elasticsearch.New(t.esClient, true, elasticsearch.WithFederatedExecution(mode)),
+			idx := t.newIndexer(DefaultResourceConfig, core.Config{
+				ES: elasticsearch.New(t.esClient, true, elasticsearch.WithFederatedExecution(mode)),
 			})
-			t.Require().NoErrorf(err, "mode %s", mode)
 
 			pages := t.pageAcrossRebuild(func(page int32) []string {
 				resp, err := idx.FederatedSearch(t.T().Context(), core.FederatedSearchRequest{
