@@ -325,8 +325,10 @@ func (f *rebuildFlusher) add(ctx context.Context, item BulkItem, version int, re
 //
 // When the last expected plan's nil settles the resource, it fails if it is
 // partial, and the plans that omitted it were never asked. Otherwise, with a
-// document — every one of which has flushed, or remaining would not have
-// reached 0 — it completes here (completeOnNil); and on nils alone it is
+// document — each plan's first has flushed, or remaining would not have
+// reached 0 — it completes here (completeOnNil), unless a repeat of a
+// document is still queued: then the flush that writes it completes the
+// resource (ruling R6); and on nils alone it is
 // deleted (removeGone) if the rebuild runs every plan with an Executer
 // (mayDelete), and otherwise has its versions' documents deleted and is left
 // marked for the sweep (leaveGone).
@@ -351,12 +353,22 @@ func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 	case p.partial:
 		f.failPartial(ctx, id)
 	case p.sawDoc():
-		f.completeOnNil(ctx, id, p)
+		// A repeat of a document still queued is settled by the flush that
+		// writes it, which stores its edge set and checks its children
+		// before the mark is cleared (ruling R6).
+		if !f.queued(id) {
+			f.completeOnNil(ctx, id, p)
+		}
 	case !f.mayDelete:
 		f.leaveGone(ctx, id, p)
 	default:
 		f.removeGone(ctx, id, p)
 	}
+}
+
+// queued reports whether a document of the resource awaits a flush.
+func (f *rebuildFlusher) queued(id string) bool {
+	return slices.ContainsFunc(f.pending, func(it pendingItem) bool { return it.ID == id })
 }
 
 // contradicts fails a resource one version's plan listed both with and
@@ -399,8 +411,8 @@ func (f *rebuildFlusher) dropNils(ctx context.Context, id string, p *pendingReso
 }
 
 // completeOnNil completes a resource whose last expected outcome is a nil
-// arriving after its documents flushed — only flush completes one whose last
-// outcome is a document. It applies the nils (dropNils), checks the root
+// arriving after its documents flushed, none of them still queued — flush
+// completes every other. It applies the nils (dropNils), checks the root
 // against its start when it is a plan walk's root, as removeGone does after
 // its delete (driftBase.checkRoot) — the children were checked when the
 // documents flushed — and clears the mark. A failed step fails the resource.
@@ -796,8 +808,9 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 // them, and a later plan's walk never listed them — an omission, which is
 // not a nil. Their Build Sequence was bumped and only some of their versions'
 // documents and edge sets were refreshed, and none of their nils applied —
-// they must converge via the sweep, so they are marked stale. Failed resources were marked when they
-// failed, and settled ones (keepSettled) need no mark.
+// they must converge via the sweep, so they are marked stale. Failed
+// resources were marked when they failed, and settled ones (keepSettled)
+// need no mark.
 func (f *rebuildFlusher) finish(ctx context.Context) error {
 	if err := f.flush(ctx); err != nil {
 		return err

@@ -1955,32 +1955,44 @@ func TestRebuild_VersionSelected_FailedHandOffMark_FailsTheID(t *testing.T) {
 	}
 }
 
+// dropFailures are the two ways applying a nil version can fail (ruling R4):
+// the delete of X's v2 document, or the write of X's emptied v2 edge set.
+func dropFailures() map[string]func(st *rebuildRecordingStore, es *captureBackend) {
+	return map[string]func(st *rebuildRecordingStore, es *captureBackend){
+		"delete fails": func(_ *rebuildRecordingStore, es *captureBackend) {
+			es.deleteErrs = map[string]error{"product_search_v2/X": errors.New("es down")}
+		},
+		"edge write fails": func(st *rebuildRecordingStore, _ *captureBackend) {
+			st.replaceHook = func(c edgeReplace) error {
+				if c.resource == product("X") && slices.ContainsFunc(c.sets, func(s EdgeSet) bool { return s.SchemaVersion == 2 }) {
+					return errors.New("db down")
+				}
+				return nil
+			}
+		},
+	}
+}
+
 // Ruling R4: a per-version delete, or the emptied edge set's write, that
 // fails fails the id, counted and marked once, its mark never cleared and its
-// row kept, in a targeted rebuild and in a walk alike.
+// row kept — whether the id settles in a flush (a targeted rebuild, a walk
+// whose document of X is still queued) or on the nil arriving after X's
+// document flushed (completeOnNil, chunk size 1).
 func TestRebuild_NilVersionDropFails_FailsTheID(t *testing.T) {
-	for _, sel := range []ResourceSelector{
-		{ResourceType: "product"},
-		{ResourceType: "product", ResourceIDs: []string{"1", "X"}},
+	for path, tc := range map[string]struct {
+		sel   ResourceSelector
+		chunk int
+	}{
+		"by ids, settled in a flush":      {ResourceSelector{ResourceType: "product", ResourceIDs: []string{"1", "X"}}, 0},
+		"walk, settled in a flush":        {ResourceSelector{ResourceType: "product"}, 0},
+		"walk, settled by the nil (gone)": {ResourceSelector{ResourceType: "product"}, 1},
 	} {
-		for name, setup := range map[string]func(st *rebuildRecordingStore, es *captureBackend){
-			"delete fails": func(_ *rebuildRecordingStore, es *captureBackend) {
-				es.deleteErrs = map[string]error{"product_search_v2/X": errors.New("es down")}
-			},
-			"edge write fails": func(st *rebuildRecordingStore, _ *captureBackend) {
-				st.replaceHook = func(c edgeReplace) error {
-					if c.resource == product("X") && slices.ContainsFunc(c.sets, func(s EdgeSet) bool { return s.SchemaVersion == 2 }) {
-						return errors.New("db down")
-					}
-					return nil
-				}
-			},
-		} {
-			t.Run(fmt.Sprintf("%s, ids %v", name, sel.ResourceIDs), func(t *testing.T) {
+		for name, setup := range dropFailures() {
+			t.Run(path+": "+name, func(t *testing.T) {
 				st := &rebuildRecordingStore{}
 				es := &captureBackend{}
 				setup(st, es)
-				err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+				err := rebuildSelected(t, st, es, tc.chunk, twoVersionResources(), tc.sel,
 					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}, byID: map[string][]projection.BuildDoc{"X": {productDoc("X")}}},
 					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}, byID: map[string][]projection.BuildDoc{"X": {nilDoc("X")}}})
 
@@ -1991,6 +2003,73 @@ func TestRebuild_NilVersionDropFails_FailsTheID(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Ruling R4 on the hand-off: when a version-selected rebuild whose selected
+// plan returns nil for X fails to delete v2's document or to write its
+// emptied edge set, X fails, counted once, and keeps its row. The hand-off's
+// own mark is not taken — leaveGone stops at the failure — so X's one mark is
+// the one the failure gives it.
+func TestRebuild_VersionSelected_DropFails_FailsTheID(t *testing.T) {
+	for path, sel := range map[string]ResourceSelector{
+		"walk":   {ResourceType: "product", Versions: []int{2}},
+		"by ids": {ResourceType: "product", Versions: []int{2}, ResourceIDs: []string{"1", "X"}},
+	} {
+		for name, setup := range dropFailures() {
+			t.Run(path+": "+name, func(t *testing.T) {
+				st := &rebuildRecordingStore{}
+				es := &captureBackend{}
+				setup(st, es)
+				err := rebuildSelected(t, st, es, 0, twoVersionResources(), sel,
+					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}},
+					&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), nilDoc("X")}, byID: map[string][]projection.BuildDoc{"X": {nilDoc("X")}}})
+
+				assertFailedOnce(t, st, err, "X")
+				calls := st.callsSnapshot()
+				if countPrefix(calls, "RemoveResource:product/X:") != 0 || countPrefix(calls, "DeleteResourceIfSeq:product/X:") != 0 {
+					t.Fatalf("X's edges and row must stay: %v", calls)
+				}
+			})
+		}
+	}
+}
+
+// Ruling R6: a nil that brings an id's outcomes to every plan's while a
+// repeat of its document is still queued does not settle it then: the flush
+// that writes the repeat settles it, storing the repeat's edge set and
+// drift-checking its children before the mark is cleared. Chunk size 2: v1's
+// X(a) and Y flush together, v1's repeat X(b) is queued when v2's nil of X
+// arrives, and v2's Y flushes it.
+func TestRebuildAll_MultiPlan_NilWhileARepeatIsQueued_SettlesInTheFlush(t *testing.T) {
+	st := &rebuildRecordingStore{buildIdx: 41} // X begins at 42, Y at 43
+	es := &captureBackend{}
+	err := walkProducts(t, st, es, 2, twoVersionResources(),
+		&staticExecuter{docs: []projection.BuildDoc{productDocWith("X", "a"), productDocWith("Y"), productDocWith("X", "b")}},
+		&staticExecuter{docs: []projection.BuildDoc{nilDoc("X"), productDocWith("Y")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertReplaces(t, st, product("X"), 42,
+		[]EdgeSet{versionSet(1, "a")}, []EdgeSet{versionSet(1, "b")}, []EdgeSet{versionSet(2)})
+	if got := es.deletesAt(); !slices.Equal(got, []string{"product_search_v2/X@42"}) {
+		t.Fatalf("only v2's document of X is deleted, at 42, got %v", got)
+	}
+	checked := false
+	for _, batch := range st.checksSnapshot() {
+		checked = checked || slices.Contains(batch, ChangeCheck{Resource: product("b"), Start: 1001})
+	}
+	if !checked {
+		t.Fatalf("the repeat's child b must be drift-checked from the walk start: %v", st.checksSnapshot())
+	}
+	calls := st.callsSnapshot()
+	clears, writes := callIndexes(calls, "ClearStale:product/X:42"), callIndexes(calls, "ReplaceEdges:product/X:42")
+	if len(clears) != 1 || clears[0] < writes[len(writes)-1] {
+		t.Fatalf("X's mark must be cleared once, after its last edge write: %v", calls)
+	}
+	if countPrefix(calls, "MarkStale:product/X") != 0 {
+		t.Fatalf("X settles and is not marked: %v", calls)
 	}
 }
 
