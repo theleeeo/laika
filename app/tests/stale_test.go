@@ -147,3 +147,99 @@ func (t *TestSuite) Test_SweepStale_FinishesTombstone() {
 	t.Require().Equal(0, t.resourceRowCount("a", "1"), "sweep must finish the tombstone and hard-delete the row")
 	t.Require().False(t.docExists("a", "1"), "sweep must remove the document")
 }
+
+// sweepBackoff reads the resource's backoff columns; nil means never failed.
+func (t *TestSuite) sweepBackoff(resourceType, id string) (attempts *int, after *time.Time) {
+	err := t.pool.QueryRow(t.T().Context(),
+		`SELECT sweep_attempts, sweep_after FROM resources WHERE type=$1 AND id=$2`, resourceType, id).Scan(&attempts, &after)
+	t.Require().NoError(err)
+	return attempts, after
+}
+
+// pgNow reads Postgres's clock, the one sweep_after is stamped with.
+func (t *TestSuite) pgNow() time.Time {
+	var now time.Time
+	t.Require().NoError(t.pool.QueryRow(t.T().Context(), `SELECT now()`).Scan(&now))
+	return now
+}
+
+// Test_SweepStale_BacksOffAFailingResource: a/1, whose fetch always fails,
+// was stale before a/2, and the sweep serves one resource a pass. The first
+// pass takes a/1 and its failed build backs it off, so the next pass serves
+// a/2 instead of a/1 again. Each further failure of a/1 backs it off by
+// SweepBackoff doubled per attempt, up to SweepBackoffMax. Its backoff is
+// read against Postgres's clock: the failure's now() falls between the
+// clock read before the pass and the one after it, so sweep_after minus the
+// first is at least the backoff and minus the second at most.
+func (t *TestSuite) Test_SweepStale_BacksOffAFailingResource() {
+	t.setResourceConfig(DefaultResourceConfig)
+	ctx := t.T().Context()
+	const base, maxBackoff = 10 * time.Millisecond, 40 * time.Millisecond
+	x := t.newIndexer(DefaultResourceConfig, core.Config{SweepBackoff: base, SweepBackoffMax: maxBackoff})
+
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "failing"})
+	t.fakeProvider.SetError("a", "1", errors.New("provider down"))
+	t.fakeProvider.SetResource("a", "2", map[string]any{"id": "2", "field1": "healthy"})
+
+	// Both are marked by a claim whose owner crashed; a/1 is the older mark.
+	_, err := t.st.MarkStale(ctx, []model.Resource{{Type: "a", Id: "1"}, {Type: "a", Id: "2"}}, time.Minute)
+	t.Require().NoError(err)
+	_, err = t.pool.Exec(ctx, `UPDATE resources SET owner_since = now() - interval '1 hour',
+		stale_since = CASE id WHEN '1' THEN now() - interval '2 minutes' ELSE now() - interval '1 minute' END
+		WHERE type='a' AND id IN ('1','2')`)
+	t.Require().NoError(err)
+
+	// failPass runs one pass, which must be a failed build of a/1, and checks
+	// the backoff it left.
+	failPass := func(attempt int, backoff time.Duration) time.Time {
+		before := t.pgNow()
+		n, err := x.SweepStale(ctx, 0, 1)
+		t.Require().NoError(err)
+		t.Require().Equalf(1, n, "pass of attempt %d serves one resource", attempt)
+		after := t.pgNow()
+
+		attempts, sweepAfter := t.sweepBackoff("a", "1")
+		t.Require().NotNilf(attempts, "attempt %d must count", attempt)
+		t.Require().Equalf(attempt, *attempts, "a/1's failures in a row")
+		t.Require().NotNil(sweepAfter)
+		t.Require().GreaterOrEqualf(sweepAfter.Sub(before), backoff, "attempt %d backs a/1 off by at least %s", attempt, backoff)
+		t.Require().LessOrEqualf(sweepAfter.Sub(after), backoff, "attempt %d backs a/1 off by at most %s", attempt, backoff)
+		t.Require().NotNil(t.staleSince("a", "1"), "a failed build leaves a/1 stale")
+		t.Require().False(t.docExists("a", "1"))
+		return *sweepAfter
+	}
+
+	// Pass 1: a/1, the older mark, fails.
+	after1 := failPass(1, base)
+	t.Require().Equal(1, t.fakeProvider.FetchCount("a", "1"))
+	t.Require().NotNil(t.staleSince("a", "2"), "pass 1 served a/1 only")
+	t.Require().False(t.docExists("a", "2"))
+
+	// Pass 2: a/1 is backed off — skipped while its sweep_after is ahead, and
+	// behind a/2's mark after — so the pass serves a/2.
+	n, err := x.SweepStale(ctx, 0, 1)
+	t.Require().NoError(err)
+	t.Require().Equal(1, n)
+	t.Require().Equal(1, t.fakeProvider.FetchCount("a", "1"), "pass 2 must not retry a/1")
+	t.Require().Nil(t.staleSince("a", "2"), "pass 2 serves a/2 though a/1 was stale first")
+	t.Require().True(t.docExists("a", "2"))
+	attempts, _ := t.sweepBackoff("a", "2")
+	t.Require().Nil(attempts, "a/2 never failed")
+
+	// Further passes: a/1 alone is left. Each is let past its backoff (its
+	// sweep_after backdated, rather than waited out), fails again, and is
+	// backed off for twice as long as the one before, up to the cap; its
+	// sweep_after moves later each time.
+	prev := after1
+	for _, step := range []struct {
+		attempt int
+		backoff time.Duration
+	}{{2, 2 * base}, {3, 4 * base}, {4, maxBackoff}, {5, maxBackoff}} {
+		_, err := t.pool.Exec(ctx, `UPDATE resources SET sweep_after = now() - interval '1 millisecond' WHERE type='a' AND id='1'`)
+		t.Require().NoError(err)
+		next := failPass(step.attempt, step.backoff)
+		t.Require().Truef(next.After(prev), "attempt %d's sweep_after is later than the one before", step.attempt)
+		prev = next
+	}
+	t.Require().Equal(5, t.fakeProvider.FetchCount("a", "1"))
+}
