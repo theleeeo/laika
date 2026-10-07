@@ -20,6 +20,8 @@ type mockProvider struct {
 	lastFetchResourceMetadata map[string]string
 	lastFetchRelatedMetadata  map[string]string
 	lastListMetadata          map[string]string
+	// listPageSizes records the PageSize of every ListResources call.
+	listPageSizes []int32
 	// lastFetchRelatedKey records the key passed to the most recent
 	// FetchRelated call, for asserting the foreign field name is sent.
 	lastFetchRelatedKey source.ResourceKey
@@ -93,6 +95,7 @@ func (m *mockProvider) FetchRelated(ctx context.Context, params source.FetchRela
 func (m *mockProvider) ListResources(ctx context.Context, params source.ListResourcesParams) (source.ListResourcesResult, error) {
 	m.recordCtx("ListResources", ctx)
 	m.lastListMetadata = copyMetadata(params.Metadata)
+	m.listPageSizes = append(m.listPageSizes, params.PageSize)
 	all, ok := m.listed[params.ResourceType]
 	if !ok {
 		return source.ListResourcesResult{}, nil
@@ -379,6 +382,45 @@ func TestBuildPlanForVersion_FetchAll_StartsAtRequestPageToken(t *testing.T) {
 
 	require.Equal(t, []string{"3", "4"}, ids,
 		"a walk started from a page token must skip everything before it")
+}
+
+func TestBuildPlanForVersion_FetchAll_PageSize(t *testing.T) {
+	listed := []source.ListedResource{
+		{ID: "1", Data: map[string]any{"id": "1", "title": "A"}},
+		{ID: "2", Data: map[string]any{"id": "2", "title": "B"}},
+		{ID: "3", Data: map[string]any{"id": "3", "title": "C"}},
+	}
+	vc := &resource.VersionConfig{Fields: []resource.FieldConfig{{Name: "title"}}}
+
+	for _, tc := range []struct {
+		name     string
+		pageSize int
+		want     []int32
+	}{
+		{name: "request page size", pageSize: 2, want: []int32{2, 2}},
+		{name: "zero keeps the plan's 100", pageSize: 0, want: []int32{100}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prov := newMockProvider()
+			prov.listed["product"] = listed
+			plan := buildPlanForVersion(prov, "product", vc, nil)
+
+			var ids []string
+			for r := range plan.Execute(context.Background(), projection.BuildRequest{
+				ResourceType: "product",
+				PageSize:     tc.pageSize,
+			}) {
+				require.NoError(t, r.Err)
+				for _, d := range r.Items {
+					ids = append(ids, d.Root.Id)
+				}
+			}
+
+			require.Equal(t, []string{"1", "2", "3"}, ids)
+			require.Equal(t, tc.want, prov.listPageSizes,
+				"each listing call asks for the request's page size, or 100 when it has none")
+		})
+	}
 }
 
 func TestBuildPlanForVersion_FetchAll_Empty(t *testing.T) {

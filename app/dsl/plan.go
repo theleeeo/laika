@@ -235,6 +235,10 @@ func fetchSingleResource(
 	}, nil
 }
 
+// defaultListPageSize is an all-of-type walk's listing page size when its
+// request names none (projection.BuildRequest.PageSize 0).
+const defaultListPageSize = 100
+
 // fetchAllResources lists resources of a type with pagination and returns a
 // page of BuildDocs. The NextPageToken from the provider is passed through so
 // that the RootPlan's pagination loop keeps calling until exhausted.
@@ -252,10 +256,17 @@ func fetchAllResources(
 		pageToken = params.NextPageToken.(string)
 	}
 
+	// A paced walk sets the request's page size so its rate budget counts
+	// the pages it asked for; otherwise the plan lists 100 at a time.
+	pageSize := int32(defaultListPageSize)
+	if params.Request.PageSize > 0 {
+		pageSize = int32(params.Request.PageSize)
+	}
+
 	resp, err := provider.ListResources(ctx, source.ListResourcesParams{
 		ResourceType: params.Request.ResourceType,
 		PageToken:    pageToken,
-		PageSize:     100,
+		PageSize:     pageSize,
 		Metadata:     params.Request.Metadata,
 	})
 	if err != nil {
