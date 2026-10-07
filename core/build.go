@@ -179,6 +179,8 @@ type versionedDoc struct {
 
 // executeAllPlans runs every active plan for one resource and splits the
 // outcomes into built documents and the versions whose plan returned no data.
+// Each outcome is its own version's answer (ADR 0013): a document is that
+// version's to write, a nil that version's to delete.
 func executeAllPlans(ctx context.Context, plans []projection.Plan, req projection.BuildRequest) (docs []versionedDoc, missing []int, err error) {
 	for _, plan := range plans {
 		if plan.Executer == nil {
@@ -210,18 +212,21 @@ func firstReport(docs []versionedDoc) map[string]string {
 }
 
 // buildOne builds one resource at the Build Sequence occVersion, its plans
-// fetching with metadata. gone reports that every plan returned nil and the
-// resource's documents and edge sets were deleted instead; the caller removes
-// its row.
+// fetching with metadata. A plan's nil is its own version's answer
+// (ADR 0013): buildOne writes the document of each version whose plan
+// returned one, and deletes the document and empties the edge set of each
+// version whose plan returned nil, all at occVersion, keeping the row. gone
+// reports that every plan returned nil and the resource's documents and edge
+// sets were deleted instead; the caller removes its row.
 func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) (gone bool, err error) {
 	if occVersion <= 0 {
 		return false, fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
 	}
 
-	// Execute every version's plan before deciding anything: existence is a
-	// property of the resource, not of one Schema Version, so one plan's nil
-	// must never delete what another plan just wrote — and relations and
-	// Parents are collected from every plan, not just the last.
+	// Execute every version's plan before writing anything: whether the row
+	// stays depends on every plan's outcome, and the drift check and the
+	// Parents (ADR 0006) are unioned over every plan's document, not taken
+	// from the last.
 	docs, missing, err := executeAllPlans(ctx, plans, projection.BuildRequest{
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
@@ -231,7 +236,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 		return false, err
 	}
 
-	// Every plan agrees the resource is gone at source — delete everywhere.
+	// Every plan finds the resource gone at source — delete everywhere.
 	if len(docs) == 0 && len(missing) > 0 {
 		if err := idx.handleDelete(ctx, RebuildPayload{
 			ResourceType: resourceType,
@@ -240,12 +245,6 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 			return false, err
 		}
 		return true, nil
-	}
-	// Plans disagree on existence: a transient source inconsistency or a
-	// broken plan. Fail the build without writing — the stale mark survives
-	// and the retry converges on the source's real state.
-	if len(missing) > 0 {
-		return false, fmt.Errorf("plans for %s/%s disagree on existence: version(s) %v returned no data; leaving stale for retry", resourceType, resourceID, missing)
 	}
 
 	var allRelations []model.Resource
@@ -275,33 +274,52 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 				slog.String("type", resourceType), slog.String("id", resourceID), slog.String("index", indexName))
 		}
 	}
+	// The versions whose plans returned nil while others returned a document
+	// (ADR 0013): each such version's document goes, at this build's Build
+	// Sequence, while the row stays for the versions with one. A delete a
+	// newer document rejects is an OCC loss, which SearchBackend.Delete
+	// reports as nil; any error fails the build before its edges are
+	// replaced, leaving the mark, as a failed write does.
+	for _, v := range missing {
+		indexName := IndexName(resourceType, v)
+		if err := idx.es.Delete(ctx, indexName, resourceID, occVersion); err != nil {
+			return false, fmt.Errorf("delete %s/%s from %s, whose plan returned no data: %w", resourceType, resourceID, indexName, err)
+		}
+	}
 
 	// Store each version's edges at this build's Build Sequence — also for a
-	// version whose write lost above: the Store keeps, per version, the set
-	// of the highest Build Sequence, as Elasticsearch keeps the document
-	// (ADR 0002). This build ran every configured plan, so it declares their
+	// version whose write or delete lost above: the Store keeps, per version,
+	// the set of the highest Build Sequence, as Elasticsearch keeps the
+	// document (ADR 0002). A version whose plan returned nil gets an empty
+	// set, which replaces its stored children; only declaring it would leave
+	// them. This build ran every configured plan, so it declares their
 	// versions, and the sets of versions the config no longer has are
 	// dropped.
-	sets := make([]EdgeSet, len(docs))
-	for i, vd := range docs {
-		sets[i] = EdgeSet{SchemaVersion: vd.version, Children: vd.doc.Relations}
+	sets := make([]EdgeSet, 0, len(docs)+len(missing))
+	for _, vd := range docs {
+		sets = append(sets, EdgeSet{SchemaVersion: vd.version, Children: vd.doc.Relations})
+	}
+	for _, v := range missing {
+		sets = append(sets, EdgeSet{SchemaVersion: v})
 	}
 	declared := make([]int, len(plans))
 	for i, p := range plans {
 		declared[i] = p.Version
 	}
-	// The same write stores the plans' report — the first non-empty one, in
-	// plan order — as the row's metadata if the row has none, before the
-	// drift check and the cascade: a later owned build of the resource that
-	// no registration gave metadata fetches as it.
+	// The same write stores the plans' report — the first non-empty one of
+	// the versions with a document, in plan order — as the row's metadata if
+	// the row has none, before the drift check and the cascade: a later owned
+	// build of the resource that no registration gave metadata fetches as
+	// it.
 	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs)); err != nil {
 		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
 	}
 
 	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
 	// Parents the Plans derived from the Child's own data, unioned across
-	// every Schema Version's plan. The mark carries none of this build's
-	// metadata: a Parent's build runs with the Parent's own.
+	// every Schema Version's plan that returned a document. The mark carries
+	// none of this build's metadata: a Parent's build runs with the Parent's
+	// own.
 	if err := idx.scheduleBuild(ctx, parents); err != nil {
 		return false, err
 	}
