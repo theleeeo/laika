@@ -83,6 +83,12 @@ type Config struct {
 	// configure, and negative values.
 	ReverseSweeps map[string]ReverseSweepConfig
 
+	// ForwardWalks enables the scheduled forward Rebuild walk per resource
+	// type: each entry's type is walked from its source on its own schedule
+	// (EnsureForwardWalkSchedules), once per metadata map, paced by its
+	// config. A type without an entry is walked only by an explicit rebuild.
+	ForwardWalks map[string]ForwardWalkConfig
+
 	// SearchMiddlewares wrap the search path. They run outermost-first in
 	// registration order: []{A, B} executes A → B → the Indexer's own
 	// validate/normalize/backend call. A middleware may authorize the request,

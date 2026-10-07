@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.temporal.io/sdk/client"
 )
@@ -21,6 +22,42 @@ type ResourceSelector struct {
 	// resource's row: the owned re-builds the walk's drift re-marks claim
 	// fetch with their rows' own metadata.
 	Metadata map[string]string
+	// Pacing, when set, paces an all-of-type walk: the forward walk's
+	// scheduled runs set it from their ForwardWalkConfig. Nil walks unpaced,
+	// as an explicit rebuild does.
+	Pacing *WalkPacing
+}
+
+// WalkPacing paces an all-of-type rebuild walk as ReverseSweepConfig paces
+// the reverse sweep. Before each page the walk waits while the build pool is
+// pressured; after a page it waits out the rest of PageInterval, measured
+// from the page's start.
+type WalkPacing struct {
+	// PageSize is passed to the walk's plans as
+	// projection.BuildRequest.PageSize.
+	PageSize int
+	// PageInterval is a page's rate budget.
+	PageInterval time.Duration
+}
+
+// RebuildMarkedFailuresErrorType is the type of the non-retryable Temporal
+// application error RunRebuild returns for a RebuildMarkedFailuresError; its
+// details are the count of failed resources.
+const RebuildMarkedFailuresErrorType = "RebuildMarkedFailures"
+
+// RebuildMarkedFailuresError is a rebuild's error when it failed resources
+// and every one of them is durably marked stale for the sweep: no mark the
+// rebuild made failed. Retrying the rebuild would add nothing the sweep
+// doesn't, so RunRebuild returns it as non-retryable. A rebuild that aborted,
+// or one of whose marks failed, returns another error.
+type RebuildMarkedFailuresError struct {
+	ResourceType string
+	// Count is the number of resources the rebuild failed.
+	Count int
+}
+
+func (e *RebuildMarkedFailuresError) Error() string {
+	return fmt.Sprintf("rebuild of %s failed %d resource(s); they are marked stale for sweep recovery", e.ResourceType, e.Count)
 }
 
 // RebuildCursor marks a settled position in a rebuild walk: the plan with

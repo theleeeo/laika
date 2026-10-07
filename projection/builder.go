@@ -18,6 +18,11 @@ type BuildRequest struct {
 	// the beginning. Ignored for single-resource builds. Set by core when
 	// resuming a rebuild walk from a RebuildCursor.
 	PageToken string
+
+	// PageSize asks an all-of-type walk's listing for pages of this many
+	// resources; 0 leaves the size to the plan. A plan that ignores it is
+	// correct, but a paced walk's rate budget then counts its own pages.
+	PageSize int
 }
 
 // BuildDoc is the intermediate document flowing through the aggregation plan.
