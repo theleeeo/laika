@@ -349,7 +349,7 @@ func (f *rebuildFlusher) gone(ctx context.Context, id string, version int) {
 // settles as a deleted resource does (settle): a multi-plan walk holds it to
 // that outcome, a single-plan walk drops it — its checkpoint may step over
 // it, durably marked. A failed mark fails it (fail retries the mark and
-// counts it), so the rebuild reports what has no mark.
+// counts it), so the rebuild reports it.
 func (f *rebuildFlusher) leaveGone(ctx context.Context, id string) {
 	slog.Info("every plan the rebuild runs found the resource gone; it runs fewer than every plan with an executer, so the resource is left marked for the sweep, whose build runs them all",
 		slog.String("type", f.resourceType), slog.String("id", id))
@@ -402,8 +402,10 @@ func (f *rebuildFlusher) settle(id string, how settlement) {
 }
 
 // fail records a resource the rebuild could not serve: its queued documents
-// are dropped and it is durably marked stale so the sweep recovers it — on a
-// context detached from the rebuild's cancellation (markStale). It counts
+// are dropped and it is marked stale so the sweep recovers it — on a context
+// detached from the rebuild's cancellation (markStale). A failed mark is
+// recorded in markFailed: the resource may have no mark, so the rebuild stays
+// retryable and a walk checkpoints nothing more. It counts
 // and marks a resource once, however often it fails: the failed entry stays
 // until finish. A resource that was never begun (e.g. a failed BeginBuild)
 // gets a failed entry too, so a later plan walk cannot re-begin it and

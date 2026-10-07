@@ -523,8 +523,7 @@ func TestRunRebuild_FailedMarkStaysRetryable(t *testing.T) {
 	err := runRebuildFailingBegins(t, map[string]int{"product/2": 1})
 	require.Error(t, err)
 	var appErr *temporal.ApplicationError
-	if errors.As(err, &appErr) {
-		require.False(t, appErr.NonRetryable(), "want a retryable error, got %v", err)
-		require.NotEqual(t, RebuildMarkedFailuresErrorType, appErr.Type())
-	}
+	require.True(t, errors.As(err, &appErr), "want an application error, got %T: %v", err, err)
+	require.False(t, appErr.NonRetryable(), "want a retryable error, got %v", err)
+	require.NotEqual(t, RebuildMarkedFailuresErrorType, appErr.Type())
 }
