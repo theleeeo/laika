@@ -653,14 +653,18 @@ func (t *TestSuite) setResourceConfig(resources resource.Configs) {
 // own (a smaller RebuildChunkSize, say). It shares the suite's Postgres and
 // Elasticsearch state, and builds its plans from the given resource config the
 // same way SetupSuite does. Only the tuning knobs the caller sets are honoured,
-// plus cfg.ES and cfg.Store: a caller may pass its own search backend or Store
-// (a wrapper over the suite's, say), and a nil one gets the suite's — for the
-// Store, the counting t.store, so its builds count towards
-// resourceRebuildCounter like the suite indexer's. The rest of the wiring is
-// the suite's. The Temporal client is omitted — an indexer built here must not
-// reach the durable slow lane.
+// plus cfg.ES, cfg.Store and cfg.Plans: a caller may pass its own search
+// backend or Store (a wrapper over the suite's, say), and a nil one gets the
+// suite's — for the Store, the counting t.store, so its builds count towards
+// resourceRebuildCounter like the suite indexer's. Plans override the DSL
+// plans: a caller that wraps some of them takes them from
+// dsl.BuildPlansFromConfig over t.fakeProvider and the same resources. The
+// rest of the wiring is the suite's. The Temporal client is omitted — an
+// indexer built here must not reach the durable slow lane.
 func (t *TestSuite) newIndexer(resources resource.Configs, cfg core.Config) *core.Indexer {
-	cfg.Plans = dsl.BuildPlansFromConfig(t.fakeProvider, resources)
+	if cfg.Plans == nil {
+		cfg.Plans = dsl.BuildPlansFromConfig(t.fakeProvider, resources)
+	}
 	cfg.Resources = resources
 	if cfg.ES == nil {
 		cfg.ES = elasticsearch.New(t.esClient, true)
