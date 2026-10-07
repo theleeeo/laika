@@ -119,12 +119,9 @@ func (idx *Indexer) buildTask(args BuildArgs) func(context.Context, []Owned) {
 		if len(args.ResourceIds) == 0 {
 			return
 		}
-		if err := idx.Build(taskCtx, args); err != nil {
-			slog.Warn("inline build failed; resources remain stale for sweep",
-				slog.String("type", args.ResourceType),
-				slog.String("error", err.Error()),
-			)
-		}
+		// An owned build logs its own failures (Build), so its error is not
+		// logged again.
+		_ = idx.Build(taskCtx, args)
 	}
 }
 
@@ -243,11 +240,12 @@ const failedAttemptsErrorLevel = 5
 // so the sweep leaves the row until the backoff has passed, and logs each
 // row it backed off with its attempt count, at Error from the fifth attempt
 // in a row; a row whose ownership was lost meanwhile is neither released nor
-// backed off, and is logged without one. The mark stays either way. A failure reached once ctx has ended
-// — a cancellation or shutdown cut the work short — is not the work's, so
-// it releases through releaseOwners without a backoff. The release runs on a
-// context detached from ctx's cancellation, as releaseOwners' does; a failed
-// one is logged, and the ownership expires with its lease.
+// backed off, and is logged without one. The mark stays either way. A
+// failure reached once ctx has ended — a cancellation or shutdown cut the
+// work short — is not the work's, so it releases through releaseOwners
+// without a backoff. The release runs on a context detached from ctx's
+// cancellation, as releaseOwners' does; a failed one is logged per entry,
+// and each ownership expires with its lease.
 func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned, cause error) {
 	if len(owned) == 0 {
 		return
@@ -264,8 +262,11 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 	defer cancel()
 	backedOff, err := idx.st.ReleaseFailed(rctx, owned, idx.sweepBackoff)
 	if err != nil {
-		slog.Warn("owned "+op+" failed, and releasing its ownership failed; it expires with its lease and the sweep retries it",
-			slog.Int("count", len(owned)), slog.String("error", cause.Error()), slog.String("release_error", err.Error()))
+		for _, o := range owned {
+			slog.Warn("owned "+op+" failed, and releasing its ownership failed; it expires with its lease and the sweep retries it",
+				slog.String("type", o.Type), slog.String("id", o.Id),
+				slog.String("error", cause.Error()), slog.String("release_error", err.Error()))
+		}
 		return
 	}
 	logged := make(map[model.Resource]bool, len(backedOff))

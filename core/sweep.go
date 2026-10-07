@@ -49,14 +49,13 @@ func (idx *Indexer) SweepStale(ctx context.Context, threshold time.Duration, lim
 			idx.deleteOne(ctx, e.Resource, e.StaleSeq, e.Token)
 			continue
 		}
-		if err := idx.Build(ctx, BuildArgs{
+		// An owned build logs its own failures (Build), so its error is not
+		// logged again.
+		_ = idx.Build(ctx, BuildArgs{
 			ResourceType: e.Type,
 			ResourceIds:  []string{e.Id},
 			OwnerTokens:  map[string]int64{e.Id: e.Token},
-		}); err != nil {
-			slog.Warn("sweep build failed; resource remains stale",
-				slog.String("type", e.Type), slog.String("id", e.Id), slog.String("error", err.Error()))
-		}
+		})
 	}
 
 	slog.Info("stale sweep pass complete", slog.Int("swept", len(entries)))

@@ -48,7 +48,10 @@ type RebuildArgs struct {
 // released through releaseFailed, which backs its row off, so the sweep
 // rebuilds it once the backoff has passed, or the next change claims it
 // first. Every owned id left unfinished when ctx ends, and one whose failure
-// the ending caused, is released without a backoff.
+// the ending caused, is released without a backoff. Build logs every failure
+// of an owned id itself; the error it returns — the type unconfigured or
+// without plans, or ctx's end — is for a caller whose ids own nothing, and a
+// caller of an owned build need not log it again.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
@@ -81,7 +84,11 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	var failed int
 	for i, id := range params.ResourceIds {
 		if ctx.Err() != nil {
-			idx.releaseOwners(ctx, params.owned(params.ResourceIds[i:]))
+			if unfinished := params.owned(params.ResourceIds[i:]); len(unfinished) > 0 {
+				logger.Info("build ended by cancellation or shutdown; its unfinished ids are released without a backoff, their marks stay",
+					slog.Int("count", len(unfinished)), slog.String("error", ctx.Err().Error()))
+				idx.releaseOwners(ctx, unfinished)
+			}
 			return ctx.Err()
 		}
 

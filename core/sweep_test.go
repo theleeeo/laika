@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -208,7 +209,8 @@ func newBackoffIndexer(st Store, backoff SweepBackoff) (*Indexer, *recordingExec
 // A sweep build or delete that fails releases its row through ReleaseFailed,
 // with the Indexer's configured backoff, and not through ReleaseOwners: the
 // sweep leaves the row until its backoff has passed instead of serving it
-// again at the head of the next pass. Its mark or tombstone stays.
+// again at the head of the next pass. Its mark or tombstone stays, and the
+// failure is logged once, naming the entry.
 func TestSweepStale_FailedBuildOrDelete_BacksOffThroughReleaseFailed(t *testing.T) {
 	backoff := SweepBackoff{Base: 7 * time.Minute, Max: 3 * time.Hour}
 	cases := map[string]struct {
@@ -246,6 +248,7 @@ func TestSweepStale_FailedBuildOrDelete_BacksOffThroughReleaseFailed(t *testing.
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
 			st := &staleListingStore{entries: []StaleResource{tc.entry}}
 			idx, ex := newBackoffIndexer(st, backoff)
 			tc.fail(st, ex)
@@ -271,6 +274,13 @@ func TestSweepStale_FailedBuildOrDelete_BacksOffThroughReleaseFailed(t *testing.
 			}
 			if r.attempts != 1 {
 				t.Fatalf("the row must be backed off once, attempts %d", r.attempts)
+			}
+			lines := failureLines(t, logs)
+			if len(lines) != 1 {
+				t.Fatalf("the failure must be logged once, got %d lines: %v", len(lines), lines)
+			}
+			if lines[0]["type"] != res.Type || lines[0]["id"] != res.Id {
+				t.Fatalf("the failure's line must name %s/%s: %v", res.Type, res.Id, lines[0])
 			}
 		})
 	}
@@ -329,4 +339,128 @@ func TestSweepStale_FailedBuild_LogsItsAttempts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failureLines is every Warn or Error record logged so far that carries an
+// error: the lines that report a failure.
+func failureLines(t *testing.T, logs *capturedLogs) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, rec := range logs.records(t) {
+		if _, ok := rec["error"]; ok && (rec["level"] == "WARN" || rec["level"] == "ERROR") {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// An owned inline build of a type no longer configured fails for each of its
+// ids, and each is logged once, with its attempt count: the pool task does
+// not log Build's error again.
+func TestBuildTask_UnknownType_LogsEachIDOnce(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	st := &recordingStore{}
+	idx, _ := newBackoffIndexer(st, SweepBackoff{Base: time.Minute, Max: time.Hour})
+	ghost := func(id string) model.Resource { return model.Resource{Type: "ghost", Id: id} }
+	owned, err := st.MarkStale(t.Context(), []model.Resource{ghost("1"), ghost("2")}, time.Minute)
+	if err != nil || len(owned) != 2 {
+		t.Fatalf("claiming: %v %v", owned, err)
+	}
+	args := BuildArgs{ResourceType: "ghost", ResourceIds: []string{"1", "2"}, OwnerTokens: map[string]int64{}}
+	for _, o := range owned {
+		args.OwnerTokens[o.Id] = o.Token
+	}
+
+	idx.buildTask(args)(t.Context(), owned)
+
+	lines := failureLines(t, logs)
+	if len(lines) != 2 {
+		t.Fatalf("each id's failure must be logged once, got %d lines: %v", len(lines), lines)
+	}
+	for _, rec := range lines {
+		if rec["type"] != "ghost" || (rec["id"] != "1" && rec["id"] != "2") || rec["attempts"] == nil {
+			t.Fatalf("each line must name its id and attempts: %v", rec)
+		}
+	}
+}
+
+// A ReleaseFailed that itself fails releases nothing — each ownership expires
+// with its lease — and each owned entry is logged with its type, id, the
+// work's error and the release's.
+func TestReleaseFailed_StoreError_LogsEachEntry(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	st := &recordingStore{releaseFailedErr: errors.New("db gone")}
+	idx, _ := newBackoffIndexer(st, SweepBackoff{Base: time.Minute, Max: time.Hour})
+	ghost := func(id string) model.Resource { return model.Resource{Type: "ghost", Id: id} }
+	owned, err := st.MarkStale(t.Context(), []model.Resource{ghost("1"), ghost("2")}, time.Minute)
+	if err != nil || len(owned) != 2 {
+		t.Fatalf("claiming: %v %v", owned, err)
+	}
+	args := BuildArgs{ResourceType: "ghost", ResourceIds: []string{"1", "2"}, OwnerTokens: map[string]int64{}}
+	for _, o := range owned {
+		args.OwnerTokens[o.Id] = o.Token
+	}
+
+	idx.buildTask(args)(t.Context(), owned)
+
+	if st.count("ReleaseFailedFailed:") != 2 {
+		t.Fatalf("setup: the release must be tried and fail: %v", st.callsSnapshot())
+	}
+	for _, o := range owned {
+		if got := st.owner(o.Resource); got != o.Token {
+			t.Fatalf("a failed release keeps %s's ownership until its lease expires, owner %d", o.Id, got)
+		}
+	}
+	lines := failureLines(t, logs)
+	if len(lines) != 2 {
+		t.Fatalf("each entry must be logged once, got %d lines: %v", len(lines), lines)
+	}
+	ids := map[any]bool{}
+	for _, rec := range lines {
+		ids[rec["id"]] = true
+		e, _ := rec["error"].(string)
+		re, _ := rec["release_error"].(string)
+		if rec["type"] != "ghost" || !strings.Contains(e, "unknown resource") || re != "db gone" {
+			t.Fatalf("each line must name the type, the work's error and the release's: %v", rec)
+		}
+	}
+	if !ids["1"] || !ids["2"] {
+		t.Fatalf("each entry must be named: %v", lines)
+	}
+}
+
+// recordingStore's ReleaseFailed backs a row off as the contract says:
+// min(Base × 2^(n−1), Max) for its nth failure in a row, without the
+// doubling overflowing at a high attempt count.
+func TestRecordingStore_ReleaseFailed_BacksOffByTheContract(t *testing.T) {
+	b := SweepBackoff{Base: time.Hour, Max: 100 * 365 * 24 * time.Hour}
+	for _, before := range append(rangeInts(0, 100), 1000) {
+		st := &recordingStore{}
+		owned, err := st.MarkStale(t.Context(), []model.Resource{product("1")}, time.Minute)
+		if err != nil || len(owned) != 1 {
+			t.Fatalf("claiming: %v %v", owned, err)
+		}
+		st.seedAttempts(product("1"), before)
+		start := time.Now()
+		got, err := st.ReleaseFailed(t.Context(), owned, b)
+		if err != nil || len(got) != 1 || got[0].Attempts != before+1 {
+			t.Fatalf("after %d failures: got %+v %v", before, got, err)
+		}
+		want := b.Max
+		if d := float64(b.Base) * math.Pow(2, float64(before)); d < float64(b.Max) {
+			want = time.Duration(d)
+		}
+		if delay := got[0].After.Sub(start); delay < want || delay > want+time.Second {
+			t.Errorf("after %d failures: backed off %v, want %v", before, delay, want)
+		}
+	}
+}
+
+// rangeInts is lo, lo+1, …, hi.
+func rangeInts(lo, hi int) []int {
+	out := make([]int, 0, hi-lo+1)
+	for i := lo; i <= hi; i++ {
+		out = append(out, i)
+	}
+	return out
 }

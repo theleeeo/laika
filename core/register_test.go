@@ -505,15 +505,24 @@ func (s *recordingStore) ReleaseFailed(ctx context.Context, owned []Owned, backo
 		if row, ok := s.rows[o.Resource]; ok && row.owner == o.Token {
 			row.owner = 0
 			row.attempts++
-			delay := backoff.Max
-			if n := row.attempts - 1; n < 63 && backoff.Base<<n > 0 && backoff.Base<<n < backoff.Max {
-				delay = backoff.Base << n
-			}
-			row.after = time.Now().Add(delay)
+			row.after = time.Now().Add(backoffDelay(backoff, row.attempts))
 			out = append(out, BackedOff{Resource: o.Resource, Attempts: row.attempts, After: row.after})
 		}
 	}
 	return out, nil
+}
+
+// backoffDelay is min(b.Base × 2^(n−1), b.Max): the doubling stops once it
+// would reach the cap, so no attempt count overflows it.
+func backoffDelay(b SweepBackoff, n int) time.Duration {
+	delay := b.Base
+	for i := 1; i < n && delay < b.Max; i++ {
+		if delay > b.Max/2 {
+			return b.Max
+		}
+		delay *= 2
+	}
+	return min(delay, b.Max)
 }
 
 // failedBackoffsSnapshot is every backoff ReleaseFailed was given, in order.
