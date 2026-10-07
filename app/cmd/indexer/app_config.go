@@ -34,6 +34,8 @@ import (
 //	sweep.interval         → SWEEP_INTERVAL
 //	sweep.threshold        → SWEEP_THRESHOLD
 //	sweep.batch_size       → SWEEP_BATCH_SIZE
+//	sweep.backoff          → SWEEP_BACKOFF
+//	sweep.backoff_max      → SWEEP_BACKOFF_MAX
 //	pool.size              → POOL_SIZE
 //	pool.queue_size        → POOL_QUEUE_SIZE
 //	pool.queue_high_water  → POOL_QUEUE_HIGH_WATER
@@ -114,6 +116,12 @@ type sweepConfig struct {
 	// Threshold: only resources stale longer than this are swept.
 	Threshold time.Duration `mapstructure:"threshold"`
 	BatchSize int           `mapstructure:"batch_size"`
+	// Backoff is how long the sweep leaves a resource after its first failed
+	// build or delete in a row, doubling with each further one
+	// (core.Config.SweepBackoff); BackoffMax caps it, so a resource that never
+	// builds is retried at that interval (core.Config.SweepBackoffMax).
+	Backoff    time.Duration `mapstructure:"backoff"`
+	BackoffMax time.Duration `mapstructure:"backoff_max"`
 }
 
 type poolConfig struct {
@@ -163,6 +171,8 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("sweep.interval", "1m")
 	v.SetDefault("sweep.threshold", "5m")
 	v.SetDefault("sweep.batch_size", 500)
+	v.SetDefault("sweep.backoff", "5m")
+	v.SetDefault("sweep.backoff_max", "24h")
 	v.SetDefault("pool.size", 10)
 	v.SetDefault("pool.queue_size", 100)
 	v.SetDefault("pool.queue_high_water", 0)

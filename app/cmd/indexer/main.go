@@ -122,17 +122,19 @@ func main() {
 	}
 
 	idx, err := core.New(core.Config{
-		Plans:          plans,
-		Resources:      resources,
-		ES:             esClientImpl,
-		Store:          st,
-		Temporal:       temporalClient,
-		TaskQueue:      cfg.Temporal.TaskQueue,
-		PoolSize:       cfg.Pool.Size,
-		QueueSize:      cfg.Pool.QueueSize,
-		QueueHighWater: cfg.Pool.QueueHighWater,
-		OwnerLease:     cfg.Pool.OwnerLease,
-		ForwardWalks:   forwardWalks,
+		Plans:           plans,
+		Resources:       resources,
+		ES:              esClientImpl,
+		Store:           st,
+		Temporal:        temporalClient,
+		TaskQueue:       cfg.Temporal.TaskQueue,
+		PoolSize:        cfg.Pool.Size,
+		QueueSize:       cfg.Pool.QueueSize,
+		QueueHighWater:  cfg.Pool.QueueHighWater,
+		OwnerLease:      cfg.Pool.OwnerLease,
+		SweepBackoff:    cfg.Sweep.Backoff,
+		SweepBackoffMax: cfg.Sweep.BackoffMax,
+		ForwardWalks:    forwardWalks,
 	})
 	if err != nil {
 		log.Fatalf("construct indexer: %v", err)

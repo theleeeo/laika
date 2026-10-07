@@ -274,6 +274,60 @@ pool:
 	}
 }
 
+// sweep.backoff and sweep.backoff_max (core.Config.SweepBackoff and
+// SweepBackoffMax) default to 5m and 24h, load from the file, and are
+// overridden by SWEEP_BACKOFF and SWEEP_BACKOFF_MAX, with or without a file.
+func TestLoadAppConfig_SweepBackoff(t *testing.T) {
+	t.Setenv("SWEEP_BACKOFF", "")
+	t.Setenv("SWEEP_BACKOFF_MAX", "")
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.Sweep.Backoff != 5*time.Minute || cfg.Sweep.BackoffMax != 24*time.Hour {
+		t.Errorf("sweep.backoff/backoff_max defaults = %v/%v, want 5m/24h", cfg.Sweep.Backoff, cfg.Sweep.BackoffMax)
+	}
+
+	t.Setenv("SWEEP_BACKOFF", "30s")
+	t.Setenv("SWEEP_BACKOFF_MAX", "2h")
+	cfg, err = loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig with env only: %v", err)
+	}
+	if cfg.Sweep.Backoff != 30*time.Second || cfg.Sweep.BackoffMax != 2*time.Hour {
+		t.Errorf("SWEEP_BACKOFF/SWEEP_BACKOFF_MAX without a file = %v/%v, want 30s/2h", cfg.Sweep.Backoff, cfg.Sweep.BackoffMax)
+	}
+	t.Setenv("SWEEP_BACKOFF", "")
+	t.Setenv("SWEEP_BACKOFF_MAX", "")
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+sweep:
+  backoff: "10m"
+  backoff_max: "6h"
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig from file: %v", err)
+	}
+	if cfg.Sweep.Backoff != 10*time.Minute || cfg.Sweep.BackoffMax != 6*time.Hour {
+		t.Errorf("sweep.backoff/backoff_max from file = %v/%v, want 10m/6h", cfg.Sweep.Backoff, cfg.Sweep.BackoffMax)
+	}
+
+	t.Setenv("SWEEP_BACKOFF", "1m")
+	t.Setenv("SWEEP_BACKOFF_MAX", "12h")
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig with env: %v", err)
+	}
+	if cfg.Sweep.Backoff != time.Minute || cfg.Sweep.BackoffMax != 12*time.Hour {
+		t.Errorf("SWEEP_BACKOFF/SWEEP_BACKOFF_MAX override = %v/%v, want 1m/12h", cfg.Sweep.Backoff, cfg.Sweep.BackoffMax)
+	}
+}
+
 func TestLoadAppConfig_ForwardWalks(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "indexer.yml")
 	content := []byte(`

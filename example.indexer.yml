@@ -16,6 +16,8 @@
 #   sweep.interval      -> SWEEP_INTERVAL
 #   sweep.threshold     -> SWEEP_THRESHOLD
 #   sweep.batch_size    -> SWEEP_BATCH_SIZE
+#   sweep.backoff       -> SWEEP_BACKOFF
+#   sweep.backoff_max   -> SWEEP_BACKOFF_MAX
 #   pool.size           -> POOL_SIZE
 #   pool.queue_size     -> POOL_QUEUE_SIZE
 #   pool.queue_high_water -> POOL_QUEUE_HIGH_WATER
@@ -65,10 +67,17 @@ temporal:
   task_queue: "laika-indexer"
 
 # The sweep rebuilds resources whose stale mark is older than threshold.
+# A resource whose build or delete fails is left for backoff after its first
+# failure in a row, twice as long after each further one, never longer than
+# backoff_max: one that never builds is retried at that interval, and never
+# keeps the sweep from serving the others. A successful build or delete, or a
+# change to the resource itself, resets it.
 sweep:
   interval: "1m"
   threshold: "5m"
   batch_size: 500
+  backoff: "5m"
+  backoff_max: "24h"
 
 # Bounded in-process pool for inline builds. size is the number of persistent
 # workers; queue_size bounds accepted-but-not-yet-running builds — a full
