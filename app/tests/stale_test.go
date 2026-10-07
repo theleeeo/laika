@@ -59,8 +59,10 @@ func (t *TestSuite) Test_InlineBuild_ClearsStaleMark() {
 	t.Require().True(t.docExists("a", "1"), "successful inline build must land the document")
 }
 
-// Failure path: the build fails, the stale mark survives, and a later sweep
-// (once the provider recovers) rebuilds and clears the mark.
+// Failure path: the build fails, the stale mark survives and the row is backed
+// off, and once its backoff has passed (sweep_after backdated past the suite
+// indexer's default) a sweep — the provider having recovered — rebuilds it and
+// clears the mark and the backoff.
 func (t *TestSuite) Test_FailedBuild_StaysStale_SweepRecovers() {
 	t.setResourceConfig(DefaultResourceConfig)
 
@@ -76,8 +78,17 @@ func (t *TestSuite) Test_FailedBuild_StaysStale_SweepRecovers() {
 	t.Require().NotNil(t.staleSince("a", "1"), "failed build must leave the stale mark")
 	t.Require().False(t.docExists("a", "1"), "failed build must not have landed a document")
 
-	// Provider recovers; the sweep must rebuild and clear the mark.
+	attempts, after := t.sweepBackoff("a", "1")
+	t.Require().NotNil(attempts, "the failed inline build must back the row off")
+	t.Require().Equal(1, *attempts)
+	t.Require().NotNil(after)
+
+	// Provider recovers; the sweep must rebuild and clear the mark once the
+	// row's backoff has passed.
 	t.fakeProvider.SetError("a", "1", nil)
+	_, err = t.pool.Exec(t.T().Context(),
+		`UPDATE resources SET sweep_after = now() - interval '1 millisecond' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
 
 	n, err := t.idx.SweepStale(t.T().Context(), 0, 100)
 	t.Require().NoError(err)
@@ -86,6 +97,9 @@ func (t *TestSuite) Test_FailedBuild_StaysStale_SweepRecovers() {
 
 	t.Require().Nil(t.staleSince("a", "1"), "sweep must rebuild and clear the mark")
 	t.Require().True(t.docExists("a", "1"), "sweep must land the document")
+	attempts, after = t.sweepBackoff("a", "1")
+	t.Require().Nil(attempts, "the successful sweep build resets the backoff")
+	t.Require().Nil(after)
 }
 
 // Delete happy path: an inline delete removes the document and hard-deletes the
