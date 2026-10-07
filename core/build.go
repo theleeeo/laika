@@ -642,8 +642,10 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 			}
 
 			// A page with a next is followed by one: a paced walk waits
-			// before taking it. The final page (nil token) waits for
-			// nothing — another plan's first page waits before its Execute.
+			// before taking it — the plan's pipeline may already have fetched
+			// up to its stage depth ahead. The final page (nil token) waits
+			// for nothing — another plan's first page waits before its
+			// Execute.
 			if page.NextPageToken != nil {
 				if err := pacer.beforePage(ctx); err != nil {
 					fl.salvage(ctx)

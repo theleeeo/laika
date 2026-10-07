@@ -10,11 +10,11 @@ import (
 // Test_ForwardWalk_IndexesResourcesCreatedWithoutANotification: a resource
 // its source has but no notification ever named is indexed by the type's
 // forward walk — its row in Postgres, its document in Elasticsearch — across
-// the listing's pages.
+// the listing's pages, each listing asking for the configured page size.
 func (t *TestSuite) Test_ForwardWalk_IndexesResourcesCreatedWithoutANotification() {
 	t.setResourceConfig(DefaultResourceConfig)
 	x := t.newIndexer(DefaultResourceConfig, core.Config{
-		ForwardWalks: map[string]core.ForwardWalkConfig{"a": {PageInterval: time.Millisecond}},
+		ForwardWalks: map[string]core.ForwardWalkConfig{"a": {PageSize: 2, PageInterval: time.Millisecond}},
 	})
 
 	t.fakeProvider.SetPageSize(1)
@@ -31,8 +31,11 @@ func (t *TestSuite) Test_ForwardWalk_IndexesResourcesCreatedWithoutANotification
 		t.Require().Nilf(t.staleSince("a", id), "a/%s must be settled, not left stale", id)
 		t.Require().Truef(t.docExists("a", id), "a/%s must have a document in Elasticsearch", id)
 	}
-	_, lists := t.fakeProvider.CallCounts()
-	t.Require().Equal(3, lists, "one listing per page of one")
+	calls := t.fakeProvider.ListCalls()
+	t.Require().Len(calls, 3, "one listing per page of one")
+	for i, c := range calls {
+		t.Require().EqualValuesf(2, c.PageSize, "listing %d must ask for the configured page size", i)
+	}
 }
 
 // Test_ForwardWalk_WalksOncePerMetadataMap: a run walks the type once per

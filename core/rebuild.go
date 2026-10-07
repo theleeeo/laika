@@ -30,9 +30,11 @@ type ResourceSelector struct {
 }
 
 // WalkPacing paces an all-of-type rebuild walk as ReverseSweepConfig paces
-// the reverse sweep. Before each page the walk waits while the build pool is
-// pressured; after a page it waits out the rest of PageInterval, measured
-// from the page's start.
+// the reverse sweep. Before the walk takes each page it waits while the build
+// pool is pressured; after a page it waits out the rest of PageInterval,
+// measured from the page's start. It paces the walk taking pages, not the
+// plan's fetches: the plan's pipeline may already have fetched up to its
+// stage depth ahead (about a page per stage) while the walk waits.
 type WalkPacing struct {
 	// PageSize is passed to the walk's plans as
 	// projection.BuildRequest.PageSize.
@@ -123,9 +125,10 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 // start and never checkpoint — they restart from scratch, as before (ADR 0011).
 //
 // A selector's Pacing paces an all-of-type walk (walkPacer): its plans are
-// asked for pages of PageSize, and before each page the walk waits out the
-// rest of the previous page's PageInterval and while the build pool is
-// pressured. A targeted rebuild ignores it.
+// asked for pages of PageSize, and before the walk takes each page it waits
+// out the rest of the previous page's PageInterval and while the build pool
+// is pressured; the plan's pipeline may already have fetched up to its stage
+// depth ahead. A targeted rebuild ignores it.
 //
 // Resuming also requires the plan's Executer to honour
 // projection.BuildRequest.PageToken: one that ignores it restarts from the head
@@ -213,13 +216,17 @@ func (w *walkPacer) pageSize() int {
 	return w.pacing.PageSize
 }
 
-// beforePage runs before the walk asks for a page: before a plan's Execute,
+// beforePage runs before the walk takes a page: before a plan's Execute,
 // which may fetch its first page at once, and after a page that has a next.
 // It waits out the rest of the previous page's PageInterval, measured from
 // that page's start, then waits while the build pool is pressured, then
 // starts the new page's clock. Called only when another page follows, it
-// never waits after the walk's last page. A ctx that ends during a wait
-// returns its error.
+// never waits after the walk's last page. It holds back the walk taking
+// pages, not the plan's fetches: within a plan, the pipeline (a goroutine
+// per stage over unbuffered channels) may already have fetched up to its
+// stage depth ahead — listings and relation fetches for about a page per
+// stage — while the walk waits. A ctx that ends during a wait returns its
+// error.
 func (w *walkPacer) beforePage(ctx context.Context) error {
 	if w.pacing == nil {
 		return nil

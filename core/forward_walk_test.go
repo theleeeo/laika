@@ -140,7 +140,8 @@ func newWalkIndexer(ex *walkExecuter, walks map[string]ForwardWalkConfig) (*Inde
 }
 
 // New rejects a ForwardWalks entry for a type Resources doesn't configure,
-// negative values and a page size above an int32's, and applies the defaults to zero values.
+// negative values and a page size above an int32's, and applies the
+// defaults to zero values.
 func TestNew_ForwardWalks(t *testing.T) {
 	newWith := func(walks map[string]ForwardWalkConfig) (*Indexer, error) {
 		return New(Config{Resources: testResources(), ES: &fakeBackend{}, Store: &recordingStore{}, ForwardWalks: walks})
@@ -512,5 +513,122 @@ func TestValidateSelectors_RejectsInvalidPacing(t *testing.T) {
 	}
 	if reqs := ex.requests(); len(reqs) != 0 {
 		t.Fatalf("nothing may be walked, got %+v", reqs)
+	}
+}
+
+// A ctx that ends during a paced walk's page-interval wait ends the walk with
+// ctx's error: the ids it began and hasn't flushed are salvaged — marked
+// stale for the sweep — and no checkpoint steps past them.
+func TestRebuild_PacedWalk_CancelledDuringAPageWaitSalvages(t *testing.T) {
+	ex := &walkExecuter{pages: threePages()}
+	idx, st, _ := newWalkIndexer(ex, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	idx.waitPageInterval = func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}
+
+	var checkpoints []RebuildCursor
+	err := idx.RebuildNowResumable(ctx, ResourceSelector{
+		ResourceType: "product",
+		Pacing:       &WalkPacing{PageSize: 2, PageInterval: time.Hour},
+	}, nil, func(c RebuildCursor) { checkpoints = append(checkpoints, c) })
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want ctx's error, got %v", err)
+	}
+	for _, id := range []string{"1", "2"} {
+		if !st.has("MarkStale:product/" + id) {
+			t.Fatalf("the unflushed %s must be marked stale for the sweep: %v", id, st.callsSnapshot())
+		}
+		if st.has("ClearStale:product/" + id) {
+			t.Fatalf("the unflushed %s must not be settled: %v", id, st.callsSnapshot())
+		}
+	}
+	if st.count("BeginBuild:product/3") != 0 {
+		t.Fatalf("no page may be taken after the cancelled wait: %v", st.callsSnapshot())
+	}
+	if len(checkpoints) != 0 {
+		t.Fatalf("no checkpoint may step past unflushed work, got %+v", checkpoints)
+	}
+}
+
+// A paced walk over several plans paces across them: each plan is asked for
+// the pacing's page size, a later plan's first page waits out the rest of the
+// previous plan's last page interval and while the pool is pressured, and
+// nothing waits after the walk's final page.
+func TestRebuild_PacedMultiPlanWalk_PacesAcrossPlans(t *testing.T) {
+	backoff := signalLogs(t, poolBackoffMsg)
+	pages := func() [][]projection.BuildDoc {
+		return [][]projection.BuildDoc{{productDoc("1"), productDoc("2")}, {productDoc("3"), productDoc("4")}}
+	}
+	v1, v2 := &walkExecuter{pages: pages()}, &walkExecuter{pages: pages()}
+	st := &rebuildRecordingStore{}
+	idx := mustNew(Config{
+		Resources:      twoVersionResources(),
+		Plans:          map[string][]projection.Plan{"product": {{Version: 1, Executer: v1}, {Version: 2, Executer: v2}}},
+		ES:             &captureBackend{},
+		Store:          st,
+		PoolSize:       1,
+		QueueSize:      2,
+		QueueHighWater: 2,
+	})
+	idx.poolBackoff = time.Millisecond
+	waits := &pageWaits{}
+	var release func()
+	idx.waitPageInterval = func(ctx context.Context, d time.Duration) error {
+		// The second wait is the one before v2's first page: pressure the
+		// pool there, so the walk must back off before v2's Execute.
+		if len(waits.snapshot()) == 1 {
+			release = pressurePool(t, idx)
+		}
+		return waits.wait(ctx, d)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- idx.RebuildNowResumable(t.Context(), ResourceSelector{
+			ResourceType: "product",
+			Pacing:       &WalkPacing{PageSize: 2, PageInterval: time.Hour},
+		}, nil, nil)
+	}()
+
+	for range 3 {
+		select {
+		case <-backoff:
+		case err := <-done:
+			t.Fatalf("the walk finished while the pool was pressured: %v", err)
+		}
+	}
+	if got := v1.takenPages(); !slices.Equal(got, []int{0, 1}) {
+		t.Fatalf("v1's pages must all be taken before the back-off, took %v", got)
+	}
+	if reqs := v2.requests(); len(reqs) != 0 {
+		t.Fatalf("v2's first page must wait while the pool is pressured, got requests %+v", reqs)
+	}
+
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	for name, ex := range map[string]*walkExecuter{"v1": v1, "v2": v2} {
+		if reqs := ex.requests(); len(reqs) != 1 || reqs[0].PageSize != 2 {
+			t.Fatalf("%s must be asked for pages of 2, got %+v", name, reqs)
+		}
+	}
+	// After v1's first page, before v2's first page, after v2's first page:
+	// none after either plan's last page but through the next plan's.
+	ds := waits.snapshot()
+	if len(ds) != 3 {
+		t.Fatalf("want 3 page-interval waits, got %v", ds)
+	}
+	for i, d := range ds {
+		if d <= time.Hour-time.Minute || d > time.Hour {
+			t.Fatalf("wait %d: got %v, want the rest of the page's hour", i, d)
+		}
+	}
+	if st.count("ClearStale:product/4") != 1 {
+		t.Fatalf("the walk must settle every resource once: %v", st.callsSnapshot())
 	}
 }

@@ -184,12 +184,13 @@ type kvLogger interface {
 }
 
 // runForwardWalks runs one forward walk run's walks — sels, in order, each
-// through walk — and accumulates its result: every selector is a walk
-// started, a walk whose error marked reports as a marked-failures outcome is
-// done and adds its count to FailedResources, logging it, and any other
-// error is joined into the run's, once every walk has run. It is the
-// accumulation the ForwardWalk workflow and ForwardWalkNow share; each
-// supplies its own walk and its own reading of a marked-failures error.
+// through walk — and accumulates its result. Every selector is a walk
+// started. A walk whose error marked recognises as a marked-failures outcome
+// is done: its count adds to FailedResources and is logged. Any other error
+// is joined into the run's, once every walk has run. Walks are numbered from
+// 1 in the log and in errors. It is the accumulation the ForwardWalk workflow
+// and ForwardWalkNow share; each supplies its own walk and its own reading of
+// a marked-failures error.
 func runForwardWalks(resourceType string, sels []ResourceSelector, logger kvLogger, walk func(ResourceSelector) error, marked func(error) (count int, ok bool)) (ForwardWalkResult, error) {
 	res := ForwardWalkResult{Walks: len(sels)}
 	var errs []error
@@ -200,7 +201,7 @@ func runForwardWalks(resourceType string, sels []ResourceSelector, logger kvLogg
 		}
 		if n, ok := marked(err); ok {
 			res.FailedResources += n
-			logger.Warn(forwardWalkMarkedFailuresMsg, "type", resourceType, "walk", i, "failed", n)
+			logger.Warn(forwardWalkMarkedFailuresMsg, "type", resourceType, "walk", i+1, "walks", len(sels), "failed", n)
 			continue
 		}
 		errs = append(errs, fmt.Errorf("forward walk %d of %d of resource type %q: %w", i+1, len(sels), resourceType, err))

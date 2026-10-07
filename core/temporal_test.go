@@ -566,6 +566,16 @@ func (l *captureLogger) withMsg(msg string) []logRecord {
 	return out
 }
 
+// keyval is the value following key in keyvals, nil if key is absent.
+func keyval(keyvals []any, key string) any {
+	for i := 0; i+1 < len(keyvals); i += 2 {
+		if keyvals[i] == key {
+			return keyvals[i+1]
+		}
+	}
+	return nil
+}
+
 // rebuildCalls records the selectors a stand-in RunRebuild activity got, and
 // answers each with the outcome its metadata's actor names.
 type rebuildCalls struct {
@@ -657,7 +667,8 @@ func TestForwardWalkWorkflow_MarkedFailuresAreADoneWalk(t *testing.T) {
 	require.Len(t, calls.snapshot(), 2)
 	recs := logger.withMsg(forwardWalkMarkedFailuresMsg)
 	require.Len(t, recs, 1, "the walk's marked failures must be logged")
-	require.Contains(t, recs[0].keyvals, 4, "the log must carry the count")
+	require.Equal(t, 4, keyval(recs[0].keyvals, "failed"), "the log must carry the count")
+	require.Equal(t, 1, keyval(recs[0].keyvals, "walk"), "walks are numbered from 1, as in the run's errors")
 }
 
 // A child that fails with any other error fails the run — after the remaining
