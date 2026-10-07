@@ -122,9 +122,10 @@ func (idx *Indexer) RebuildNow(ctx context.Context, selectors []ResourceSelector
 // Cursors apply only to an all-of-type walk with exactly one active plan — a
 // single-version resource, or a version-targeted backfill. A walk over several
 // versions has no settled mid-walk position: a resource first seen by an early
-// plan stays unsettled until the later plans' documents land, and an attempt
-// resuming past it whose remaining listing omits it would leave it with some
-// versions' documents and edge sets refreshed, others not, and no stale mark.
+// plan stays unsettled until every later plan's outcome for it — a document
+// that landed, or a nil — has arrived, and an attempt resuming past it whose
+// remaining listing omits it would leave it with some versions' documents and
+// edge sets refreshed, others not, its nils unapplied, and no stale mark.
 // Such walks, and targeted (by-ID) rebuilds, ignore
 // start and never checkpoint — they restart from scratch, as before (ADR 0011).
 //

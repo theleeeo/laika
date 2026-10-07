@@ -80,9 +80,12 @@ type ResourceReadiness struct {
 //     target cannot be reasoned about and fails outright.
 //  2. target-index: the ReadVersion index must exist (gen-mapping bootstraps).
 //  3. doc-count-parity: for a forward or backward move, the current read
-//     index and the target must agree on doc count within CountTolerance —
-//     ADR 0004 writes every active version in lockstep, so a gap means the
-//     backfill has not finished (or writes are failing on one side).
+//     index and the target must agree on doc count within CountTolerance. A
+//     gap means the backfill has not finished, writes are failing on one
+//     side, or one version's plan legitimately excludes resources the
+//     other's includes: each version decides its own document's existence
+//     (ADR 0013), and the gate can't tell these apart, so such a cutover
+//     needs a CountTolerance that covers the gap.
 //  4. stale-backlog: no resource of the type may have been stale longer than
 //     MaxStaleAge — a caught-up type clears marks within seconds, so an old
 //     mark means an unfinished backfill or unhealthy ingest.

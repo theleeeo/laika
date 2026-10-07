@@ -40,7 +40,11 @@ type RebuildArgs struct {
 // the row's metadata as BeginBuild returns it, and a success finishes it with
 // FinishOwned, submitting the follow-up FinishOwned hands on. An id without
 // one owns nothing: it fetches with params.Metadata and finishes with
-// ClearStale. An id whose plans all returned nil is gone at source: its
+// ClearStale. A plan's nil is its own Schema Version's answer (ADR 0013): an
+// id some of whose plans returned a document and others nil has those
+// documents written and, at its Build Sequence, the nil versions' documents
+// deleted and their edge sets emptied, and finishes as above, keeping its
+// row. An id whose plans all returned nil is gone at source: its
 // documents are deleted, and it finishes with DeleteResourceIfSeq instead,
 // which removes its row — owned or not, tombstone or not — and hands on the
 // follow-up when a change moved the mark. A failed owned id — a type no

@@ -137,8 +137,13 @@ func (idx *Indexer) ReverseSweepNow(ctx context.Context, resourceType string) (R
 // holds at BeginBuild, not the page's — a suspect whose metadata a
 // registration changed since the listing is built with the new one — and one
 // whose every plan returns nil has its documents deleted at its Build
-// Sequence and its row removed, through Build's all-plans-nil path; one that
-// does exist is rebuilt, which is harmless. A suspect with a live owner is
+// Sequence and its row removed, through Build's all-plans-nil path. One that
+// some plans still return is rebuilt, which is harmless, except that each
+// version whose plan returns nil for it — the probing plan's own, when only
+// that version excludes it — loses its document and its edges (ADR 0013). The
+// probe answers for its own plan's version only: an id that version excludes
+// is a suspect at every run, and an id only another version's plan stops
+// returning is never one. A suspect with a live owner is
 // that owner's follow-up, and a build the pool sheds releases its claim and
 // leaves the mark to the StaleSweep. Once the page is marked it is
 // checkpointed at its last listed id; a failed mark ends the run with its

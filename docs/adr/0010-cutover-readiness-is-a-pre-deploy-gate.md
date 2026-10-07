@@ -1,5 +1,16 @@
 # Cutover readiness is a pre-deploy gate, and backfill waits for the rollout
 
+> **Note (2026-10-07, runbook step L2.9):** gate 3's parity assumes lockstep
+> versions, every active version holding the same set of documents. Since
+> [ADR 0013](0013-each-schema-version-decides-its-documents-existence.md) each
+> Schema Version decides its own document's existence, so a version whose
+> plan legitimately excludes resources holds fewer documents than the other,
+> target or current read version alike, and parity fails the move unless the
+> operator raises `-count-tolerance` to cover the gap. The tolerance is one number for the whole run and can't tell that
+> gap from an unfinished backfill. The gate is unchanged: whether it should
+> change is open point Q24 in laika-dev's `docs/open-points.md`, whose default
+> keeps it, and its cost is seams S38 in laika-dev's `docs/seams.md`.
+
 ADR 0009 turned a cutover into a config change: bump `readVersion`, redeploy, and the indexer converges the read alias at startup. What the deleted `cutover` tool never had — and the config change still needs — is a readiness check: nothing stopped an operator from bumping `readVersion` before the target index existed, before the backfill finished, or while the type's ingest was unhealthy. The alias flip is atomic, but flipping to a half-populated index is an instant, silent data-loss event for readers.
 
 The decision: **readiness is checked by a read-only pre-deploy tool, `cutover-check`, and never by startup convergence.**

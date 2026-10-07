@@ -1,5 +1,15 @@
 # The config's readVersion owns the read alias
 
+> **Note (2026-10-07, runbook step L2.9):** the consequence that both alias
+> targets "serve complete data" assumes lockstep versions, every active
+> version's index holding the same resources. Since [ADR
+> 0013](0013-each-schema-version-decides-its-documents-existence.md) each
+> Schema Version decides its own document's existence, so each index is
+> complete for its own version's plan, and two versions whose plans exclude
+> different resources hold different sets. An alias flapping between them
+> mid-rollout briefly shows the resources one plan includes and hides those it
+> excludes. The rest holds: the last instance to start settles the alias.
+
 The read alias in Elasticsearch and `readVersion` in the resource config used to be two sources of truth with different owners. A standalone `cutover` tool flipped the alias, but filter validation, `GetCapabilities`, nested paths, and reference joins all derive from `ReadVersionConfig()` — so after a tool-driven cutover the indexer kept interpreting queries with the old version's schema against the new index until someone also redeployed the config. Worse, `gen-mapping -apply` always re-pointed aliases at its config file's `readVersion`, silently reverting any cutover done behind its back.
 
 The decision: **`readVersion` is the single owner of the alias target; the alias is derived state.**

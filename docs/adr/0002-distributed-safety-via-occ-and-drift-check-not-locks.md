@@ -1,5 +1,34 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-07, runbook step L2.9):** [ADR
+> 0013](./0013-each-schema-version-decides-its-documents-existence.md)
+> supersedes the existence rule of the L2.6 and L2.7 notes below: a plan's
+> nil is its own Schema Version's answer, so plans that disagree no longer
+> fail a build, a by-ids rebuild or a walk's id.
+>
+> - **A build** writes the documents its plans returned and, at its Build
+>   Sequence, deletes the document of each version whose plan returned nil and
+>   replaces that version's edge set with an empty one, keeping the row. A
+>   multi-plan walk does so for an id once it has every plan's outcome. Every
+>   plan nil still deletes everything, the row included, as the L2.6 note says.
+> - **A version-selected rebuild** whose selected plans all return nil for an
+>   id deletes those versions' documents and empties their edge sets, keeps
+>   the row and marks the id for the sweep, whose build runs every plan and
+>   decides the row. That is the alternative the L2.7 note rejected, plus the
+>   mark: versions may now hold different sets of documents by design.
+> - **What still fails an id in a walk:** one version listing it both with
+>   and without data, an earlier plan's listing omitting it, being left
+>   unfinished, and a failed write, delete or edge write.
+>
+> The legs hold. The per-version delete is versioned at the Build Sequence
+> like the L2.1 note's deletes, and a newer write's rejection of it is an OCC
+> loss. The empty set goes through the guarded replace of the L1.5 note, so a
+> newer build's set stays. A nil version's set is emptied while the resource
+> builds, but its document goes with it, so a change to a child only that set
+> named has nothing of it to refresh. A late lower-sequence build can restore
+> one version's deleted document past `index.gc_deletes` while the row stays
+> (seams S16 in laika-dev's `docs/seams.md`).
+
 > **Note (2026-10-07, runbook step L2.5):** the L2.7 note's claim that a
 > single-plan walk's checkpoint can still step over an id whose marks failed
 > is no longer true. The rebuild flusher records a failed mark

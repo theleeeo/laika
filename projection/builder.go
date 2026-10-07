@@ -72,9 +72,11 @@ type Plan struct {
 	// id its root fetch would not find misses a delete. Write it beside the
 	// plan, on the clients its root fetch uses: a by-ids call where the
 	// source has one, a call per id otherwise. An error fails the whole call;
-	// nothing of it is used. Existence belongs to the resource, not to a
-	// Schema Version, so the sweep uses the first of a type's plans that has
-	// a Probe (ADR 0012).
+	// nothing of it is used. The sweep uses the first of a type's plans that
+	// has a Probe (ADR 0012), and it answers for its own Schema Version only,
+	// since each version's plan decides its own document's existence
+	// (ADR 0013): an id its version excludes is a suspect at every run, and
+	// an id only another version's plan stops returning is never one.
 	Probe func(ctx context.Context, ids []string, metadata map[string]string) (present []string, err error)
 }
 

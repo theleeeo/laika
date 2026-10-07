@@ -72,8 +72,9 @@ type against its source on a schedule, as the actor in its own row, and hands ea
 no longer has to the build path, which deletes it.** This changes delete semantics: a resource of
 a swept type deleted at its source without Laika hearing of it is now found and deleted — its documents and
 its row — by the next sweep run of its type, where until now it stayed indexed. The sweep only
-nominates. The delete is an owned build's, decided as every build's existence is, by all of the
-resource's plans finding it gone.
+nominates. The delete is an owned build's, decided as every build's is: each version's document goes when
+that version's plan finds the resource gone, and the row when every plan does
+([ADR 0013](./0013-each-schema-version-decides-its-documents-existence.md)).
 
 ## How it works
 
@@ -89,8 +90,11 @@ resource's plans finding it gone.
   plan's root fetch would find for that actor, and fails where that fetch would fail — as a
   fetch with no actor does in a source that needs one. The embedder writes it beside the plan, on
   the clients its root fetch uses: a by-ids call where the source has one, a call per id otherwise.
-  Existence belongs to the resource, not to a Schema Version, so the sweep uses the first of the
-  type's plans, in the order the embedder gave them, that has a Probe. A type with none is
+  The sweep uses the first of the type's plans, in the order the embedder gave them, that has a
+  Probe. That plan answers for its own Schema Version, which decides its own document's existence
+  (ADR 0013): an id its version excludes is a suspect at every run, a needless build each time, and
+  an id only another version's plan stops returning, without a notification, is never a suspect,
+  so that version's document stays until something else builds the id. A type with none is
   skipped at every run with a warning — nothing is listed, probed or marked — and there is no
   fallback.
 - **Each page is probed once per actor.** A page's ids are grouped by their row's metadata, NULL
@@ -113,7 +117,9 @@ resource's plans finding it gone.
   a recreate registered meanwhile keeps its row (ADR 0008's L2.2 note).
   - A suspect that does exist — a registration changed its row's metadata after the page was
     listed, say — is rebuilt, which is harmless.
-  - Plans that disagree fail the build and leave the mark, as for any build.
+  - A suspect some plans find and others don't keeps its row: the build writes the documents of
+    the versions whose plans return one, deletes those of the others, and clears the mark
+    (ADR 0013).
   - A suspect whose row has a live owner is only marked; that owner's follow-up serves it.
   - A shed or failed build releases its claim and leaves the mark for `StaleSweep`.
 
@@ -187,8 +193,9 @@ resource's plans finding it gone.
   lists it, its probe doesn't return it, and its build deletes it.
 - **A probe's errors cost differently.** One that returns an id its root fetch would not find
   misses that delete, silently and at every run. One that misses an id its root fetch would find
-  costs a needless build of it at every run. Since only a build whose every plan finds the
-  resource gone deletes anything, a probe can't delete a live document by itself.
+  costs a needless build of it at every run. Since a build deletes a version's document only when that
+  version's plan finds the resource gone, and the row only when every plan does, a probe can't
+  delete a live document by itself.
 - **A row with no metadata is probed with none, and built with none** (seams S20). Where the
   source needs an actor, the probe fails as the root fetch would, so that group is a failed probe
   at every run and nothing of it is marked until the row gets its owner. Where the source answers

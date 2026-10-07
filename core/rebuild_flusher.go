@@ -61,8 +61,9 @@ func countActive(plans []projection.Plan) int {
 }
 
 // executePlan runs the plan for a single resource ID and returns its first
-// document. A zero-value result with a nil Doc means the source no longer has
-// the resource.
+// document. A zero-value result with a nil Doc means this plan returned no
+// data for the resource: its own Schema Version's answer that it has no
+// document (ADR 0013), not that the source no longer has it.
 func executePlan(ctx context.Context, plan projection.Plan, req projection.BuildRequest) (projection.BuildDoc, error) {
 	var result projection.BuildDoc
 	for r := range plan.Execute(ctx, req) {
@@ -124,8 +125,9 @@ type pendingResource struct {
 	// plan order; a repeated nil of one is not added again, and a document of
 	// one contradicts it (ruling R3). They are applied only when the resource
 	// settles (dropNils, removeGone), so a queued document and a delete of
-	// one resource never meet, and a resource that fails or never receives
-	// every outcome deletes nothing.
+	// one resource never meet, and a resource that fails before it settles,
+	// or never receives every outcome, deletes nothing; one that fails while
+	// settling, or after, may have applied some, and is marked all the same.
 	nils []int
 	// settled is how the resource settled, kept by a multi-plan walk until
 	// finish (keepSettled); a single-plan walk drops a settled entry.

@@ -2,8 +2,11 @@
 // a readVersion bump in the resource config (ADR 0009). Run it against the
 // live infrastructure with the *proposed* config file before deploying it:
 // exit 0 means every resource's target index exists, its doc count agrees
-// with the current read index (the backfill finished), and the type has no
-// aged stale backlog.
+// with the current read index within -count-tolerance (the backfill
+// finished; where one version's plan legitimately excludes resources the
+// other's includes, the counts differ by design and need a tolerance that
+// covers the gap, ADR 0013),
+// and the type has no aged stale backlog.
 //
 // The deployed indexer converges the alias unconditionally at startup, so
 // this check is the last gate before the change takes effect. Rerunning it

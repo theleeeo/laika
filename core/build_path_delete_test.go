@@ -33,8 +33,8 @@ func newDeletePathIndexer(st *recordingStore, ex *staticExecuter) (*Indexer, *ca
 }
 
 // afterBothWalks checks a two-plan walk took both plans' walk starts and made
-// call only after the second: a multi-plan walk deletes an id once its last
-// plan's nil agrees.
+// call only after the second: a multi-plan walk deletes an id every plan
+// finds gone only once its last plan's nil has arrived.
 func afterBothWalks(t *testing.T, calls []string, call string) {
 	t.Helper()
 	starts, at := callIndexes(calls, "NextChangeSeq"), slices.Index(calls, call)
@@ -126,7 +126,8 @@ func TestBuildPathDelete_ChangeDuringTheBuild_KeepsTheRowForTheFollowUp(t *testi
 // A by-ids rebuild and a rebuild walk own nothing, and BeginBuild inserts a
 // row for an id without one. An id whose plans all return nil has its
 // documents deleted and the row its BeginBuild inserted removed. Each runs
-// every plan: a rebuild that selects versions deletes nothing (L2.7).
+// every plan: a rebuild that selects versions never removes the row, and
+// leaves such an id marked for the sweep (ADR 0013).
 func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 	t.Run("by ids", func(t *testing.T) {
 		st := &recordingStore{buildIdx: 41}
@@ -153,7 +154,8 @@ func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// v1's walk begins 1 at 42 and 2 at 43; v2's nil for 2 agrees.
+		// v1's walk begins 1 at 42 and 2 at 43; v2's nil for 2 is its last
+		// outcome, so 2 settles on nils alone and is deleted.
 		if got := deletesOf(be, "2"); !slices.Equal(got, bothVersionsAt("2", 43)) {
 			t.Fatalf("2's documents must be deleted at its BeginBuild's sequence: got %v", got)
 		}
