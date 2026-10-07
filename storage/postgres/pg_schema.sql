@@ -12,8 +12,12 @@
 -- one. build_idx never goes backwards, so a recreated resource is built above
 -- every Elasticsearch version its old document had. stale_seq can: a mark of
 -- a row created by a transaction uncommitted when the mark started can draw a
--- value below the creator's (seams S14), which costs nothing, since stale_seq
--- and owner tokens are only compared for equality.
+-- value below the creator's (seams S14). The guards compare stale_seq and
+-- owner tokens only for equality, so that costs them nothing. ReleaseFailed
+-- does order change_seq against the owner token, to tell a registration
+-- since the claim; a stale_seq lowered below change_seq would make every
+-- later claim's token look like one, so a row whose change_seq is above its
+-- stale_seq is backed off as if none came (see ReleaseFailed).
 CREATE SEQUENCE IF NOT EXISTS change_sequence AS bigint INCREMENT BY 1 CACHE 1 NO CYCLE;
 
 CREATE TABLE IF NOT EXISTS resources (

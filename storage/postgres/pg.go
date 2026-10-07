@@ -710,11 +710,23 @@ func (s *Store) ReleaseOwners(ctx context.Context, owned []core.Owned) error {
 // A row for which a registration of the resource itself was accepted since
 // the claim is released without a backoff: that registration reset the
 // columns, and its change is not made to wait for this build's failure. It
-// is returned with Attempts 0 and a zero After. Such a row's change_seq is
-// above the owner token: the token is the stale_seq the claim saw, and
-// change_seq is never above stale_seq at a claim. A Parent mark or MarkStale
-// bumps only stale_seq, so a row that got only those since the claim backs
-// off.
+// is returned with Attempts 0 and a zero After. Such a row is one whose
+// change_seq is above the owner token and at most its stale_seq; every
+// other row backs off. The token is the stale_seq the claim saw. A
+// registration accepted since then locked the existing row before drawing,
+// so it set change_seq = stale_seq to a value above the token, and later
+// marks only raise stale_seq. A Parent mark or MarkStale moves stale_seq
+// alone, so a row that got only those since the claim keeps change_seq at
+// most the token, as at a claim of a row whose stale_seq never went down.
+// It can go down (seams S14): a mark that raced the row's creation draws
+// before the creator and writes a stale_seq below the creator's change_seq,
+// and every later claim at that stale_seq takes a token below change_seq
+// with no registration since. change_seq above stale_seq marks that state,
+// and such a row backs off too, so it can't escape the backoff for good.
+// What S14 still costs is one failure released without a backoff where a
+// mark raised stale_seq above such a change_seq while the build ran; the
+// re-claim of its follow-up takes the raised value, and the next failure
+// backs off.
 //
 // The delay is computed in microseconds as double precision with the
 // exponent held at 62 at most: base × 2^62 exceeds every Max a
@@ -730,10 +742,10 @@ func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff c
 		`WITH `+lockedInput+`
 		 UPDATE resources r
 		 SET owner_seq = NULL, owner_since = NULL,
-		     sweep_attempts = CASE WHEN r.change_seq <= x.token
+		     sweep_attempts = CASE WHEN (r.change_seq <= x.token OR r.change_seq > r.stale_seq)
 		         THEN LEAST(COALESCE(r.sweep_attempts, 0), 2147483646) + 1
 		         ELSE r.sweep_attempts END,
-		     sweep_after = CASE WHEN r.change_seq <= x.token
+		     sweep_after = CASE WHEN (r.change_seq <= x.token OR r.change_seq > r.stale_seq)
 		         THEN now() + LEAST(
 		             $4::bigint::double precision * power(2::double precision, LEAST(COALESCE(r.sweep_attempts, 0), 62)),
 		             $5::bigint::double precision
@@ -742,8 +754,8 @@ func (s *Store) ReleaseFailed(ctx context.Context, owned []core.Owned, backoff c
 		 FROM unnest($1::text[], $2::text[], $3::bigint[]) AS x(t, i, token) CROSS JOIN (SELECT count(*) FROM locked) AS l
 		 WHERE r.type = x.t AND r.id = x.i AND x.token <> 0 AND r.owner_seq = x.token
 		 RETURNING r.type, r.id,
-		     CASE WHEN r.change_seq <= x.token THEN r.sweep_attempts ELSE 0 END,
-		     CASE WHEN r.change_seq <= x.token THEN r.sweep_after END`,
+		     CASE WHEN (r.change_seq <= x.token OR r.change_seq > r.stale_seq) THEN r.sweep_attempts ELSE 0 END,
+		     CASE WHEN (r.change_seq <= x.token OR r.change_seq > r.stale_seq) THEN r.sweep_after END`,
 		types, ids, tokens, backoff.Base.Microseconds(), backoff.Max.Microseconds(),
 	)
 	if err != nil {

@@ -239,6 +239,50 @@ func TestReleaseFailed_DoesNotBackOffARowRegisteredSinceTheClaim(t *testing.T) {
 	}
 }
 
+// A mark that raced the row's creation can leave its stale_seq below the
+// creator's change_seq (seams S14), so every claim's token is below
+// change_seq with no registration since. Such a row still backs off; once a
+// registration of the resource itself is accepted after a claim, the row is
+// released without one again.
+func TestReleaseFailed_BacksOffARowWhoseStaleSeqARaceLowered(t *testing.T) {
+	st := NewStore(testPool)
+	res := model.Resource{Type: "bo-s14", Id: "1"}
+	register(t, st, core.Registration{Resource: res, Version: 1})
+	// The race's outcome, in SQL: the mark drew low, the creator high, and
+	// the mark's lower value is the row's stale_seq and, claimed later, its
+	// owner token.
+	var low, high int64
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT nextval('change_sequence'), nextval('change_sequence')`).Scan(&low, &high); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE resources SET change_seq = $3, stale_seq = $4, owner_seq = $4, owner_since = now()
+		 WHERE type=$1 AND id=$2`, res.Type, res.Id, high, low); err != nil {
+		t.Fatal(err)
+	}
+	b := core.SweepBackoff{Base: time.Minute, Max: time.Hour}
+
+	got, before, after := releaseFailed(t, st, testPool, []core.Owned{{Resource: res, Token: low}}, b)
+	if len(got) != 1 || got[0].Attempts != 1 {
+		t.Fatalf("a row whose stale_seq the race lowered, nothing registered since: got %+v, want backed off at attempt 1", got)
+	}
+	requireTurnIn(t, got[0], before, after, time.Minute)
+	requireOwner(t, testPool, res, owner{}, "released")
+
+	// A fresh claim, then the resource's own registration under it.
+	tok := own(t, testPool, res)
+	if re := register(t, st, core.Registration{Resource: res, Version: 2}).Items[0]; !re.Accepted || re.Token != 0 {
+		t.Fatalf("the change under a live owner: %+v, want accepted, unclaimed", re)
+	}
+	got, _, _ = releaseFailed(t, st, testPool, []core.Owned{{Resource: res, Token: tok}}, b)
+	if len(got) != 1 || got[0].Attempts != 0 || !got[0].After.IsZero() {
+		t.Fatalf("registered since the claim: got %+v, want released with Attempts 0 and a zero After", got)
+	}
+	requireNoBackoff(t, testPool, res, "a row registered since the claim is not backed off")
+	requireOwner(t, testPool, res, owner{}, "released")
+}
+
 func TestReleaseFailed_ReleasesOnlyMatchingTokensAndReturnsThoseRows(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
