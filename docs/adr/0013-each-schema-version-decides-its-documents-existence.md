@@ -4,6 +4,40 @@ _Accepted, 2026-10-06. Supersedes the cross-version existence agreement in
 [ADR 0004](0004-multi-schema-version-writes-for-graceful-migrations.md) and the existence rule of
 ADR 0002's L2.6 and L2.7 notes. Built by runbook step L2.9._
 
+> **Note (2026-10-08, open point Q24):** decided, and runbook step L3.10 builds
+> the backfill's part.
+>
+> - **A version excludes a resource only through its per-id answers.** Its
+>   plan's root fetch returns nil for the id, and its `Probe` leaves the id
+>   out. A filter only in the plan's listing excludes nothing. Every live
+>   build fetches one resource by id, so a version whose fetch ignores the
+>   filter indexes an excluded resource the first time it changes, and keeps
+>   one that stops passing the filter. A plan that filters its listing applies
+>   the same filter to its fetch and its probe.
+> - **A backfill asks its version about the rows its listing left out.** A
+>   rebuild of the whole type that selects versions, and so runs fewer than
+>   all of the type's plans, asks each selected version's `Probe` once its
+>   walk has run its listing to the end. It asks a page at a time about the
+>   type's rows that have no stale mark, no edge set of that version, and the
+>   walk's own metadata. For an id the probe leaves out, that version's
+>   document is deleted and its edge set emptied, at a Build Sequence taken
+>   before the probe. The row isn't marked: marking would cost a full build
+>   per id, the other versions keep their documents, and a resource gone from
+>   every version is the reverse sweep's to find (ADR 0012). An id the probe
+>   returns is marked for the sweep's build. The cutover check's coverage gate
+>   relies on this (ADR 0010's Q24 note).
+>
+> Rejected:
+>
+> - Building each such id: one full build, every plan's fetches, per id. That
+>   costs too much at scale, where a source's by-ids call is the unit of work.
+> - Treating a completed listing's omissions as exclusions. Rows the listing
+>   skipped would leave the version silently: through offset page tokens
+>   (ADR 0011), or a listing scoped to one actor.
+>
+> A version-selected rebuild's nil for an id its listing *does* return still
+> marks the id for the sweep (seams S40 in laika-dev's `docs/seams.md`).
+
 A build runs every Schema Version's plan for a resource (ADR 0004). Until now, existence was
 decided only when they all agreed. If every plan returned nil, the build deleted every version's
 document and the resource's row. If the plans disagreed, some returning a document and some nil,

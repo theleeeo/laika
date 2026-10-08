@@ -11,6 +11,43 @@
 > change is open point Q24 in laika-dev's `docs/open-points.md`, whose default
 > keeps it, and its cost is seams S38 in laika-dev's `docs/seams.md`.
 
+> **Note (2026-10-07, open point Q24):** decided: gate 3 changes, and runbook
+> step L3.9 builds it.
+>
+> - **Coverage, a new gate.** Every resource row of the type with no stale
+>   mark, tombstones aside, must carry an edge set of the target's Schema
+>   Version. Every build that runs that version's plan writes one, an empty
+>   set for a nil (ADR 0013), and a backfill asks the version's `Probe` about
+>   the rows its listing left out (ADR 0013's Q24 note, step L3.10). A row
+>   without one hasn't had the version's answer: the backfill hasn't reached
+>   it, or an instance on the old config dropped the set (the ordering
+>   invariant below). Stale rows are left to the stale-backlog gate. No flag
+>   passes coverage.
+> - **Doc-gap replaces parity.** The gap is the target's document count minus
+>   the current read index's, signed, and shrink and growth are both gaps. The
+>   report always shows both counts, the gap, and the type's rows. Any gap
+>   other than 0 fails unless the operator names the type in `-accept-gap`,
+>   saying they have verified the gap themselves.
+> - **The acceptance names a type, not a size.** A gap moves with live
+>   traffic, for instance whenever a resource the target's plan excludes is
+>   created, so an acceptance bound to a number would need renewing on every
+>   run. It never passes any other gate.
+> - **`-count-tolerance` goes.**
+>
+> Rejected:
+>
+> - A tolerance, one for the run or one per type. It can't tell an intended
+>   gap from an unfinished backfill.
+> - An acceptance bound to the exact gap. It churns with live traffic.
+> - Recording, per resource and version in Postgres, whether the version's
+>   plan returned a document, to check the target index's count against.
+>   Leo preferred not to keep a flag per resource. It would have caught a
+>   document Elasticsearch lost after a build that succeeded, which no gate
+>   catches.
+> - Listing the ids that make up a gap. A real gap holds too many to verify by
+>   hand. An id-level comparison is deferral D11 in laika-dev's
+>   `docs/deferrals.md`.
+
 ADR 0009 turned a cutover into a config change: bump `readVersion`, redeploy, and the indexer converges the read alias at startup. What the deleted `cutover` tool never had — and the config change still needs — is a readiness check: nothing stopped an operator from bumping `readVersion` before the target index existed, before the backfill finished, or while the type's ingest was unhealthy. The alias flip is atomic, but flipping to a half-populated index is an instant, silent data-loss event for readers.
 
 The decision: **readiness is checked by a read-only pre-deploy tool, `cutover-check`, and never by startup convergence.**
