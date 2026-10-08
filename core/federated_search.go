@@ -217,7 +217,8 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 // paths resolved) and the Type's scoped nested blocks with the caller's scope.
 // The backend builds a group's filters on a scoped block together with the
 // scope term in that block's one nested clause, as single-resource search
-// does, and every other filter on its own; it scopes each group to its Alias
+// does, and every other filter on its own (filters on other nested fields are
+// unsupported: no nested-path derivation); it scopes each group to its Alias
 // and requires a Document to satisfy exactly one group, so a Document matches
 // only when it belongs to a requested Type and satisfies that Type's filters.
 type IndexFilterGroup struct {
@@ -232,8 +233,9 @@ type IndexFilterGroup struct {
 	// (VersionConfig.ScopedNestedBlocks). The backend enforces each of them,
 	// with the filters targeting it, even when no filter does.
 	ScopedBlocks []resource.NestedBlockConfig
-	// MatchNothing marks a group that can match no document — e.g. a reference
-	// filter resolved to zero children. The query builder emits a clause that
+	// MatchNothing marks a group that can match no document — a reference
+	// filter resolved to zero children, or a Type with a scoped block and an
+	// empty scope. The query builder emits a clause that
 	// never satisfies minimum_should_match, excluding this Type while other
 	// Types in the federation still return.
 	MatchNothing bool
