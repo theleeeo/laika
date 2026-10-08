@@ -442,25 +442,45 @@ func TestBuildIndexFilterGroups_ResolvesReferenceFilter(t *testing.T) {
 }
 
 func TestFederatedSearch_ScopedBlock_InjectsScopeOrMatchNothing(t *testing.T) {
-	idx := &Indexer{resources: resource.Configs{{
-		Resource: "population", ReadVersion: 1,
-		Versions: []resource.VersionConfig{{
-			Version: 1, Fields: []resource.FieldConfig{{Name: "name"}},
-			NestedBlocks: []resource.NestedBlockConfig{{
-				Name: "operator_data", ScopeKey: "fiber_operator_id",
-				Fields: []resource.FieldConfig{{Name: "available_products"}},
+	block := resource.NestedBlockConfig{
+		Name: "operator_data", ScopeKey: "fiber_operator_id",
+		Fields: []resource.FieldConfig{{Name: "visible_service_provider_ids"}},
+	}
+	idx := &Indexer{resources: resource.Configs{
+		{
+			Resource: "population", ReadVersion: 1,
+			Versions: []resource.VersionConfig{{
+				Version: 1, Fields: []resource.FieldConfig{{Name: "name"}},
+				NestedBlocks: []resource.NestedBlockConfig{block},
 			}},
-		}},
-	}}}
+		},
+		{
+			Resource: "product", ReadVersion: 1,
+			Versions: []resource.VersionConfig{{
+				Version: 1, Fields: []resource.FieldConfig{{Name: "name"}},
+			}},
+		},
+	}}
 
-	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"population"}, nil, "op-1")
+	blockFilter := Filter{Field: "operator_data.visible_service_provider_ids", Op: FilterOpEq, Value: "sp-x"}
+	groups, err := idx.buildIndexFilterGroups(context.Background(), []string{"population", "product"},
+		map[string][]Filter{"population": {blockFilter}}, "op-1")
 	require.NoError(t, err)
-	require.Len(t, groups, 1)
+	require.Len(t, groups, 2)
+
+	// The group carries the scope and the read version's scoped blocks; the
+	// backend correlates them with the block's filters, so core appends no
+	// scope filter and leaves the block filter as the middleware gave it.
 	require.False(t, groups[0].MatchNothing)
-	require.Len(t, groups[0].Filters, 1)
-	require.Equal(t, "operator_data.fiber_operator_id", groups[0].Filters[0].Field)
-	require.Equal(t, "operator_data", groups[0].Filters[0].NestedPath)
-	require.Equal(t, "op-1", groups[0].Filters[0].Value)
+	require.Equal(t, "op-1", groups[0].Scope)
+	require.Equal(t, []resource.NestedBlockConfig{block}, groups[0].ScopedBlocks)
+	require.Equal(t, []Filter{blockFilter}, groups[0].Filters)
+
+	// A Type with no scoped block carries the scope and no blocks.
+	require.False(t, groups[1].MatchNothing)
+	require.Equal(t, "op-1", groups[1].Scope)
+	require.Empty(t, groups[1].ScopedBlocks)
+	require.Empty(t, groups[1].Filters)
 
 	empty, err := idx.buildIndexFilterGroups(context.Background(), []string{"population"}, nil, "")
 	require.NoError(t, err)

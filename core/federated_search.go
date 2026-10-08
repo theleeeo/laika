@@ -24,9 +24,11 @@ type FederatedSearchRequest struct {
 	// through. They are core-API-only (never exposed over proto) and exempt
 	// from strict request-time filter validation: the same trust model as
 	// middleware-appended filters on the single-resource path. Reference-
-	// relation paths are resolved via child searches (see
-	// buildIndexFilterGroups); a Type with no entry gets an unfiltered group
-	// (Type membership only). Denial is the middleware's concern: fail the
+	// relation paths are resolved via child searches, and filters on a scoped
+	// nested block are matched together with Scope inside the caller's entry;
+	// other nested fields are unsupported (see buildIndexFilterGroups). A Type
+	// with no entry gets a group with no filters (Type membership, and its
+	// scoped blocks still scoped). Denial is the middleware's concern: fail the
 	// whole search with an error, or drop the Type from Resources to exclude
 	// just it.
 	ResourceFilters map[string][]Filter
@@ -245,19 +247,20 @@ type IndexFilterGroup struct {
 // on the parent, so it cannot be a term on the multi-index query) — and tags
 // the result with the Type's read alias. A reference that matches no children
 // marks the group MatchNothing so that Type is excluded while other Types in
-// the federation still return. A Type with no perType entry gets an unfiltered
-// group (Type membership only).
+// the federation still return. A Type with no perType entry gets a group with
+// no filters (Type membership, its scoped blocks still scoped).
 //
-// After reference resolution, each requested Type's scoped nested block(s)
-// (VersionConfig.ScopedNestedBlocks) get an additional correlated filter on
-// <block>.<ScopeKey> against scope, mirroring the single-resource path's
-// nested visibility check. An empty scope marks the group MatchNothing
-// (fail-closed) rather than silently searching unscoped, since a reference
-// matchedNothing already short-circuited before this point.
+// After reference resolution, each group carries the scope and the Type's
+// scoped nested blocks (VersionConfig.ScopedNestedBlocks), and the backend
+// matches the Type's filters on a scoped block together with the scope term in
+// that block's one nested clause, as on the single-resource path: a filter on
+// the block is about the caller's own entry, and a block no filter targets is
+// still scoped. An empty scope on a Type with a scoped block marks the group
+// MatchNothing (fail-closed) rather than silently searching unscoped.
 //
-// Nested-path derivation (deriveNestedPath) is deliberately not applied here,
-// matching the former collect mode: per-Type filters targeting
-// denormalized-many nested fields are unsupported on the federated path.
+// Nested-path derivation (deriveNestedPath) is not applied here: per-Type
+// filters on other nested fields (denormalized-many relations) are
+// unsupported on the federated path.
 func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []string, perType map[string][]Filter, scope string) ([]IndexFilterGroup, error) {
 	groups := make([]IndexFilterGroup, 0, len(resources))
 	for _, name := range resources {
@@ -277,22 +280,17 @@ func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []stri
 			groups = append(groups, group)
 			continue
 		}
-		group.Filters = resolved
-
-		// Multi-tenant Types enforce the caller scope on their nested block(s).
-		for _, b := range r.ReadVersionConfig().ScopedNestedBlocks() {
-			if scope == "" {
-				group.MatchNothing = true
-				group.Filters = nil
-				break
-			}
-			group.Filters = append(group.Filters, Filter{
-				Field:      b.Name + "." + b.ScopeKey,
-				Op:         FilterOpEq,
-				Value:      scope,
-				NestedPath: b.Name,
-			})
+		// Multi-tenant Types enforce the caller scope on their nested block(s);
+		// without a scope they fail closed.
+		scoped := r.ReadVersionConfig().ScopedNestedBlocks()
+		if len(scoped) > 0 && scope == "" {
+			group.MatchNothing = true
+			groups = append(groups, group)
+			continue
 		}
+		group.Filters = resolved
+		group.Scope = scope
+		group.ScopedBlocks = scoped
 		groups = append(groups, group)
 	}
 	return groups, nil
