@@ -24,9 +24,11 @@ once.
   - A plan may report an error for one id, which fails that id alone.
 - **A batch is one type and one metadata.** A source read is scoped to its caller's actor, so
   ids are grouped by the metadata their rows hold (an owned build) or the caller's (a build that
-  owns nothing). A batch holds at most `Config.BuildBatchSize` ids, 100 by default, the size the
-  services' batch reads accept. An owned batch begins its rows in one Store statement and groups
-  them by the metadata it returns.
+  owns nothing). A batch holds at most its type's batch size: `Config.BuildBatchSize`, 100 by
+  default, overridden per resource type, since sources differ in the batches they serve. A
+  source's own read limit is separate: the aggregator splits a batch into calls the source
+  accepts (Q25). An owned batch begins its rows in one Store statement and groups them by the
+  metadata it returns.
 - **Each id keeps its own build.** Its Build Sequence, drift start, write, edge set, nil deletes
   and finish are its own, as a single build's are (ADR 0002). What is shared is the begin, each
   plan's reads, one bulk write, one mark of the batch's Parents (ADR 0006) and one drift check.
@@ -35,14 +37,15 @@ once.
   the type, the metadata, the count, the first ids and the error, so it can be monitored.
   Splitting a failed batch to find the id that fails it is deferred (laika-dev `docs/deferrals.md`
   D13).
-- **An owned build keeps its ownership while it builds, and writes only what it holds.** It
-  renews its rows' leases while it runs, so a batch of any length holds them. A delete that
-  arrives meanwhile only marks the row, and the owner's follow-up deletes after the write, at a
-  higher Build Sequence. Right before writing an id, the build checks that its last renewal still
-  held it, less than a lease ago; an id it lost isn't written, and its mark stays for the new
-  owner or the sweep. A slow owned batch therefore doesn't restore a deleted document past
-  `index.gc_deletes` (seams S16), short of a stall between that check and the write. A build
-  that owns nothing, a walk or a by-ids rebuild, stays exposed as before (open point Q17).
+- **An owned build keeps its ownership while it builds.** It renews its rows' leases while it
+  runs, so a batch of any length holds them, and no other builder claims them and builds them
+  again meanwhile. A delete that arrives meanwhile only marks the row, and the owner's follow-up
+  deletes after the write, at a higher Build Sequence. A slow owned batch therefore doesn't
+  restore a deleted document past `index.gc_deletes` (seams S16). What stays exposed: a build
+  that owns nothing, a walk or a by-ids rebuild (open point Q17), and an owned build whose
+  renewals fail, or whose process stalls, past its lease while a delete arrives. No check before
+  the write guards that last case: it needs a failure and a delete at once, and Elasticsearch's
+  own ordering covers every write within `gc_deletes` of the delete.
 - **The build pool counts tasks.** A task holds one batch. With batched reads a task's source
   cost is about one read per plan whatever its size, so tasks are the unit of load the pool's
   queue limits, its pressure threshold and `WaitForSlot` measure.
@@ -58,6 +61,9 @@ once.
 - Splitting a failed batch now. A clear log line per failed batch comes first (D13).
 - Counting ids in the pool. A task's cost no longer grows with its ids.
 - Bounding a batch's duration instead of renewing its leases. Nothing bounds a source's latency.
+- Checking, right before each write, that the build still holds the id, and skipping the write
+  if not. It guards only an owned build whose renewals failed or whose process stalled past its
+  lease while a delete arrived, at the cost of a check on every write path.
 - Coalescing concurrent single reads in the harness. It batches one embedder's reads, not
   Laika's builds, and leaves the per-id begin, write and finish.
 
