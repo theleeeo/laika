@@ -441,7 +441,7 @@ func TestBuildIndexFilterGroups_ResolvesReferenceFilter(t *testing.T) {
 	}
 }
 
-func TestFederatedSearch_ScopedBlock_InjectsScopeOrMatchNothing(t *testing.T) {
+func TestFederatedSearch_ScopedBlock_CarriesScopeAndBlocksOrMatchNothing(t *testing.T) {
 	block := resource.NestedBlockConfig{
 		Name: "operator_data", ScopeKey: "fiber_operator_id",
 		Fields: []resource.FieldConfig{{Name: "visible_service_provider_ids"}},
