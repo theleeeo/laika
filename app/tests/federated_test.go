@@ -399,3 +399,133 @@ func (t *TestSuite) Test_FederatedSearch_ExecutionModeParity() {
 		t.Require().Equalf(base.total, got.total, "mode %s total", mode)
 	}
 }
+
+// scopedBlockConfig has the shape of the harness's multi-tenant Types (its
+// population and access point), here as one Type site: a site carries a
+// scoped nested block operator_data, one entry per fiber operator keyed by
+// fiber_operator_id, and each entry lists the service providers that operator
+// lets see the site (visible_service_provider_ids).
+var scopedBlockConfig = func() resource.Configs {
+	cfgs := resource.Configs{
+		{
+			Resource: "site",
+			Versions: []resource.VersionConfig{{
+				Version: 1,
+				Fields:  []resource.FieldConfig{{Name: "name"}},
+				NestedBlocks: []resource.NestedBlockConfig{{
+					Name:     "operator_data",
+					ScopeKey: "fiber_operator_id",
+					Fields:   []resource.FieldConfig{{Name: "visible_service_provider_ids"}},
+				}},
+			}},
+		},
+	}
+	for _, c := range cfgs {
+		c.ApplyDefaults()
+	}
+	return cfgs
+}()
+
+type serviceProviderCtxKey struct{}
+
+// Test_FederatedSearch_ScopedBlockFilterCorrelatesWithScope proves a Type's
+// filter on a scoped nested block is matched inside the entry the caller's
+// scope selects, never across entries, on both search paths. One site's
+// operator_data holds operator op-A's entry listing sp-x and operator op-B's
+// entry listing sp-y. Under scope op-A a visibility filter for sp-y must match
+// nothing — the document lists sp-y, but only in op-B's entry — and one for
+// sp-x must find the site. The federated search gives these answers in every
+// execution mode, and the single-resource Search with the same scope and
+// filter gives the same ones.
+func (t *TestSuite) Test_FederatedSearch_ScopedBlockFilterCorrelatesWithScope() {
+	t.setResourceConfig(scopedBlockConfig)
+
+	t.indexRaw(core.IndexName("site", 1), "site-1", map[string]any{
+		"search_primary": "fiber",
+		"fields":         map[string]any{"name": "north"},
+		"operator_data": []any{
+			map[string]any{"fiber_operator_id": "op-A", "visible_service_provider_ids": []any{"sp-x"}},
+			map[string]any{"fiber_operator_id": "op-B", "visible_service_provider_ids": []any{"sp-y"}},
+		},
+	})
+
+	// Both middlewares scope the caller to operator op-A and filter the block
+	// on the service provider the context carries, as the harness's authz does.
+	visibleTo := func(ctx context.Context) core.Filter {
+		sp, _ := ctx.Value(serviceProviderCtxKey{}).(string)
+		return core.Filter{Field: "operator_data.visible_service_provider_ids", Op: core.FilterOpEq, Value: sp}
+	}
+	federatedMW := func(next core.FederatedSearchHandler) core.FederatedSearchHandler {
+		return func(ctx context.Context, req core.FederatedSearchRequest) (core.FederatedSearchResponse, error) {
+			req.Scope = "op-A"
+			req.ResourceFilters = map[string][]core.Filter{"site": {visibleTo(ctx)}}
+			return next(ctx, req)
+		}
+	}
+	searchMW := func(next core.SearchHandler) core.SearchHandler {
+		return func(ctx context.Context, req core.SearchRequest) (core.SearchResponse, error) {
+			req.Scope = "op-A"
+			req.AddFilter(visibleTo(ctx))
+			return next(ctx, req)
+		}
+	}
+	asServiceProvider := func(sp string) context.Context {
+		return context.WithValue(t.T().Context(), serviceProviderCtxKey{}, sp)
+	}
+
+	for _, mode := range []elasticsearch.FederatedExecution{
+		elasticsearch.FederatedSingleDFS,
+		elasticsearch.FederatedSingle,
+		elasticsearch.FederatedFanout,
+	} {
+		t.Run("federated "+string(mode), func() {
+			idx := t.newIndexer(scopedBlockConfig, core.Config{
+				ES:                         elasticsearch.New(t.esClient, true, elasticsearch.WithFederatedExecution(mode)),
+				FederatedSearchMiddlewares: []core.FederatedSearchMiddleware{federatedMW},
+			})
+			search := func(sp string) core.FederatedSearchResponse {
+				resp, err := idx.FederatedSearch(asServiceProvider(sp), core.FederatedSearchRequest{
+					Query:     "fiber",
+					Resources: []string{"site"},
+				})
+				t.Require().NoError(err)
+				return resp
+			}
+
+			t.Run("sp-y is listed only in op-B's entry", func() {
+				resp := search("sp-y")
+				t.Require().EqualValues(0, resp.Total)
+				t.Require().Empty(resp.Hits)
+				t.Require().Equal([]core.ResourceCount{{Resource: "site", Count: 0}}, resp.Counts)
+			})
+			t.Run("sp-x is listed in op-A's entry", func() {
+				resp := search("sp-x")
+				t.Require().EqualValues(1, resp.Total)
+				t.Require().Len(resp.Hits, 1)
+				t.Require().Equal("site", resp.Hits[0].Resource)
+				t.Require().Equal("site-1", resp.Hits[0].ID)
+				t.Require().Equal([]core.ResourceCount{{Resource: "site", Count: 1}}, resp.Counts)
+			})
+		})
+	}
+
+	t.Run("single-resource", func() {
+		idx := t.newIndexer(scopedBlockConfig, core.Config{
+			SearchMiddlewares: []core.SearchMiddleware{searchMW},
+		})
+		search := func(sp string) core.SearchResponse {
+			resp, err := idx.Search(asServiceProvider(sp), core.SearchRequest{Resource: "site", Query: "fiber"})
+			t.Require().NoError(err)
+			return resp
+		}
+
+		t.Run("sp-y is listed only in op-B's entry", func() {
+			t.Require().Empty(search("sp-y").Hits)
+		})
+		t.Run("sp-x is listed in op-A's entry", func() {
+			resp := search("sp-x")
+			t.Require().Len(resp.Hits, 1)
+			t.Require().Equal("site-1", resp.Hits[0].ID)
+		})
+	})
+}
