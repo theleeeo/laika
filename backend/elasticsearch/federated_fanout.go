@@ -19,7 +19,8 @@ import (
 // reserved as a documented future experiment.
 //
 // Each leg is the shared two-tier text query plus that Type's own resolved
-// filters against just its read alias: no _index pinning, no cross-Type
+// filters, its scoped blocks correlated with the caller's scope as in the
+// single query, against just its read alias: no _index pinning, no cross-Type
 // should-groups. MatchNothing groups are skipped outright. Legs run with the
 // default query_then_fetch, so scores come from each index's local term
 // statistics and cross-Type comparability rests on the standardized search
@@ -145,24 +146,20 @@ func (c *Client) federatedFanout(ctx context.Context, p core.FederatedSearchPara
 }
 
 // buildFanoutLegBody builds one Type's sub-search: the shared two-tier text
-// query plus the global filters and this group's own resolved filters. Every
-// leg fetches the full merged window from 0 — the merge needs each leg's
-// candidates for the requested page. hits.total feeds the per-Type counts
-// (D12) at ES's default track_total_hits accuracy; federated search does not
-// need exact totals. A leg sorts by federatedSort, the merge's own order, so
-// the hits its window cuts off are the ones the merge would rank below it.
+// query plus the global filters and this group's own resolved filters, built
+// with its scoped blocks by buildScopedFilterClauses as the single query
+// builds them. Every leg fetches the full merged window from 0 — the merge
+// needs each leg's candidates for the requested page. hits.total feeds the
+// per-Type counts (D12) at ES's default track_total_hits accuracy; federated
+// search does not need exact totals. A leg sorts by federatedSort, the merge's
+// own order, so the hits its window cuts off are the ones the merge would rank
+// below it.
 func buildFanoutLegBody(p core.FederatedSearchParams, g core.IndexFilterGroup, globalFilters []any, window int) (map[string]any, error) {
-	filter := slices.Clone(globalFilters)
-	for _, f := range g.Filters {
-		if f.Field == "" {
-			continue
-		}
-		clause, err := buildFilterClause(f)
-		if err != nil {
-			return nil, err
-		}
-		filter = append(filter, clause)
+	groupFilters, err := buildScopedFilterClauses(g.Filters, g.ScopedBlocks, g.Scope)
+	if err != nil {
+		return nil, err
 	}
+	filter := append(slices.Clone(globalFilters), groupFilters...)
 
 	boolQ := map[string]any{"filter": filter}
 	if p.Query != "" {

@@ -87,31 +87,11 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query))
 	}
 
-	scoped := vc.ScopedNestedBlocks()
-	blockFilters := make(map[string][]core.Filter)
-	for _, f := range req.Filters {
-		if f.Field == "" {
-			continue
-		}
-		if b := scopedBlockFor(scoped, f.Field); b != nil {
-			blockFilters[b.Name] = append(blockFilters[b.Name], f)
-			continue
-		}
-		filterClause, err := buildFilterClause(f)
-		if err != nil {
-			return core.SearchResponse{}, err
-		}
-		boolQ["filter"] = append(boolQ["filter"].([]any), filterClause)
+	filters, err := buildScopedFilterClauses(req.Filters, vc.ScopedNestedBlocks(), req.Scope)
+	if err != nil {
+		return core.SearchResponse{}, err
 	}
-	// Every scoped block is always enforced (visibility), even with no user
-	// filters on it — this is what makes scoping impossible to forget.
-	for _, b := range scoped {
-		clause, err := buildScopedNestedClause(b, req.Scope, blockFilters[b.Name])
-		if err != nil {
-			return core.SearchResponse{}, err
-		}
-		boolQ["filter"] = append(boolQ["filter"].([]any), clause)
-	}
+	boolQ["filter"] = filters
 
 	body := map[string]any{
 		"query": map[string]any{"bool": boolQ},
@@ -494,33 +474,30 @@ func buildSecondaryClause(query, scope string) any {
 // buildIndexFilterGroups assembles the per-index filter groups of a Federated
 // Search into a single bool query. Each group becomes a should-clause that pins
 // documents to that Type's read alias (a term on the _index metadata field) and
-// applies that Type's harvested visibility filters; minimum_should_match: 1
-// requires a document to satisfy exactly one group, so a Type's filters never
-// constrain another Type's documents. The result is meant to sit in the outer
-// query's filter (non-scoring) context.
+// applies that Type's visibility filters, its scoped blocks each correlated
+// with the caller's scope in one nested clause (buildScopedFilterClauses, as
+// in a fan-out leg); minimum_should_match: 1 requires a document to satisfy
+// exactly one group, so a Type's filters never constrain another Type's
+// documents. The result is meant to sit in the outer query's filter
+// (non-scoring) context.
 func buildIndexFilterGroups(groups []core.IndexFilterGroup) (any, error) {
 	should := make([]any, 0, len(groups))
 	for _, g := range groups {
 		if g.MatchNothing {
-			// A reference filter for this Type resolved to zero children, so no
-			// document of this Type can match. match_none never satisfies
-			// minimum_should_match, excluding the Type while other groups return.
+			// No document of this Type can match (a reference filter resolved
+			// to zero children, or the Type is scoped and the scope is empty).
+			// match_none never satisfies minimum_should_match, excluding the
+			// Type while other groups return.
 			should = append(should, map[string]any{"match_none": map[string]any{}})
 			continue
 		}
-		clauses := []any{
+		filters, err := buildScopedFilterClauses(g.Filters, g.ScopedBlocks, g.Scope)
+		if err != nil {
+			return nil, err
+		}
+		clauses := append([]any{
 			map[string]any{"term": map[string]any{"_index": g.Alias}},
-		}
-		for _, f := range g.Filters {
-			if f.Field == "" {
-				continue
-			}
-			clause, err := buildFilterClause(f)
-			if err != nil {
-				return nil, err
-			}
-			clauses = append(clauses, clause)
-		}
+		}, filters...)
 		should = append(should, map[string]any{
 			"bool": map[string]any{"filter": clauses},
 		})
@@ -539,6 +516,41 @@ var rangeKeys = map[core.FilterOp]string{
 	core.FilterOpGte: "gte",
 	core.FilterOpLt:  "lt",
 	core.FilterOpLte: "lte",
+}
+
+// buildScopedFilterClauses builds the bool-filter clauses for one Type's
+// filters under its scoped nested blocks: every filter on another path is a
+// clause of its own (buildFilterClause), and each scoped block gets exactly one
+// correlated nested clause (buildScopedNestedClause) holding the scope term and
+// every filter targeting that block. Every scoped block is enforced
+// (visibility) even when no filter targets it — this is what makes scoping
+// impossible to forget. Single-resource search and every federated execution
+// mode build their per-Type filters through it, so they correlate alike.
+func buildScopedFilterClauses(filters []core.Filter, scoped []resource.NestedBlockConfig, scope string) ([]any, error) {
+	clauses := []any{}
+	blockFilters := make(map[string][]core.Filter)
+	for _, f := range filters {
+		if f.Field == "" {
+			continue
+		}
+		if b := scopedBlockFor(scoped, f.Field); b != nil {
+			blockFilters[b.Name] = append(blockFilters[b.Name], f)
+			continue
+		}
+		clause, err := buildFilterClause(f)
+		if err != nil {
+			return nil, err
+		}
+		clauses = append(clauses, clause)
+	}
+	for _, b := range scoped {
+		clause, err := buildScopedNestedClause(b, scope, blockFilters[b.Name])
+		if err != nil {
+			return nil, err
+		}
+		clauses = append(clauses, clause)
+	}
+	return clauses, nil
 }
 
 // scopedBlockFor returns the scoped nested block whose name is the head of the

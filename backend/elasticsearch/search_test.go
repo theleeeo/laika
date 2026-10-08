@@ -671,6 +671,103 @@ func TestBuildIndexFilterGroups_ScopesFiltersToIndex(t *testing.T) {
 	assertIndexTerm(should[1], "order_search", 0)
 }
 
+// scopedGroup is a federated group for a Type with vcScopedBlock's scoped
+// operator_data block (keyed fiber_operator_id), the caller's scope op-1, and
+// the given per-Type filters.
+func scopedGroup(filters ...core.Filter) core.IndexFilterGroup {
+	return core.IndexFilterGroup{
+		Resource:     "population",
+		Alias:        "population_search",
+		Filters:      filters,
+		Scope:        "op-1",
+		ScopedBlocks: vcScopedBlock().ScopedNestedBlocks(),
+	}
+}
+
+// federatedGroupClauses returns the filter clauses a federated execution mode
+// builds for the single group g: the single query's should-clause for it (after
+// its _index term) or the fan-out leg's filter (after the global filters).
+var federatedGroupClauses = map[string]func(t *testing.T, g core.IndexFilterGroup) []any{
+	"single-query": func(t *testing.T, g core.IndexFilterGroup) []any {
+		t.Helper()
+		clause, err := buildIndexFilterGroups([]core.IndexFilterGroup{g})
+		require.NoError(t, err)
+		should := clause.(map[string]any)["bool"].(map[string]any)["should"].([]any)
+		require.Len(t, should, 1)
+		filter := should[0].(map[string]any)["bool"].(map[string]any)["filter"].([]any)
+		require.Equal(t, map[string]any{"term": map[string]any{"_index": g.Alias}}, filter[0])
+		return filter[1:]
+	},
+	"fan-out leg": func(t *testing.T, g core.IndexFilterGroup) []any {
+		t.Helper()
+		global := map[string]any{"term": map[string]any{"fields.region": "eu"}}
+		body, err := buildFanoutLegBody(core.FederatedSearchParams{Query: "acme"}, g, []any{global}, 25)
+		require.NoError(t, err)
+		filter := body["query"].(map[string]any)["bool"].(map[string]any)["filter"].([]any)
+		require.Equal(t, global, filter[0])
+		return filter[1:]
+	},
+}
+
+// A Type's filters on a scoped block are matched with the caller's scope term
+// in the block's one nested clause, in every federated execution mode, as on
+// the single-resource path; filters on other paths are built as before.
+func TestFederatedGroup_CorrelatesScopedBlockFiltersWithScope(t *testing.T) {
+	scopeTerm := map[string]any{"term": map[string]any{"operator_data.fiber_operator_id": "op-1"}}
+	spTerm := map[string]any{"term": map[string]any{"operator_data.visible_service_provider_ids": "sp-x"}}
+	statusTerm := map[string]any{"term": map[string]any{"fields.status": "active"}}
+
+	cases := []struct {
+		name     string
+		filters  []core.Filter
+		wantMust []any // the operator_data nested clause's bool.must
+		wantRest []any // the group's clauses outside that nested clause
+	}{
+		{
+			name: "block filter joins the scope term",
+			filters: []core.Filter{
+				{Field: "fields.status", Op: core.FilterOpEq, Value: "active"},
+				{Field: "operator_data.visible_service_provider_ids", Op: core.FilterOpEq, Value: "sp-x"},
+			},
+			wantMust: []any{scopeTerm, spTerm},
+			wantRest: []any{statusTerm},
+		},
+		{
+			name: "negated block filter is a must_not inside the clause",
+			filters: []core.Filter{
+				{Field: "operator_data.visible_service_provider_ids", Op: core.FilterOpNeq, Value: "sp-x"},
+			},
+			wantMust: []any{scopeTerm, map[string]any{"bool": map[string]any{"must_not": []any{spTerm}}}},
+			wantRest: []any{},
+		},
+		{
+			name:     "no block filter still scopes the block",
+			filters:  []core.Filter{{Field: "fields.status", Op: core.FilterOpEq, Value: "active"}},
+			wantMust: []any{scopeTerm},
+			wantRest: []any{statusTerm},
+		},
+	}
+	for mode, clausesOf := range federatedGroupClauses {
+		for _, tc := range cases {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				var nested []map[string]any
+				rest := []any{}
+				for _, c := range clausesOf(t, scopedGroup(tc.filters...)) {
+					if n, ok := c.(map[string]any)["nested"].(map[string]any); ok && n["path"] == "operator_data" {
+						nested = append(nested, n)
+						continue
+					}
+					rest = append(rest, c)
+				}
+				require.Len(t, nested, 1, "exactly one nested operator_data clause")
+				must := nested[0]["query"].(map[string]any)["bool"].(map[string]any)["must"]
+				require.Equal(t, tc.wantMust, must)
+				require.Equal(t, tc.wantRest, rest)
+			})
+		}
+	}
+}
+
 func TestBuildSecondaryClause_CorrelatesScopeWithinEntry(t *testing.T) {
 	clause := buildSecondaryClause("acme", "tenant-1")
 

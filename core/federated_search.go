@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/theleeeo/laika/core/resource"
 )
 
 // FederatedSearchRequest is the core-level federated search request: one query
@@ -210,14 +212,24 @@ func (idx *Indexer) federatedSearchBase(ctx context.Context, req FederatedSearch
 // IndexFilterGroup is one leg of a Federated Search's per-index filter groups:
 // a Resource Type's read alias paired with the visibility Filters a federated
 // middleware supplied for it (FederatedSearchRequest.ResourceFilters, reference
-// paths resolved). The federated query builder scopes
-// each group's Filters to its Alias and combines the groups in a
-// bool.filter.should with minimum_should_match: 1, so a Document matches only
-// when it belongs to a requested Type and satisfies that Type's filters.
+// paths resolved) and the Type's scoped nested blocks with the caller's scope.
+// The backend builds a group's filters on a scoped block together with the
+// scope term in that block's one nested clause, as single-resource search
+// does, and every other filter on its own; it scopes each group to its Alias
+// and requires a Document to satisfy exactly one group, so a Document matches
+// only when it belongs to a requested Type and satisfies that Type's filters.
 type IndexFilterGroup struct {
 	Resource string
 	Alias    string
 	Filters  []Filter
+	// Scope is the caller's tenant value (FederatedSearchRequest.Scope), the
+	// value every entry of a ScopedBlocks block must carry under its ScopeKey
+	// to match.
+	Scope string
+	// ScopedBlocks are the read version's scoped nested blocks
+	// (VersionConfig.ScopedNestedBlocks). The backend enforces each of them,
+	// with the filters targeting it, even when no filter does.
+	ScopedBlocks []resource.NestedBlockConfig
 	// MatchNothing marks a group that can match no document — e.g. a reference
 	// filter resolved to zero children. The query builder emits a clause that
 	// never satisfies minimum_should_match, excluding this Type while other
