@@ -94,6 +94,10 @@ they do any search.
   expire.
 - **The backend** (`backend/elasticsearch`, `scan.go`) decides scan mode from `req.Scan` alone
   and uses the page size it is given.
+  - It refuses a scan on Elasticsearch below 8.11.0 (below). It reads the cluster's version from
+    `GET /` once, lazily on its first scan; a failed lookup is returned and asked again on the
+    next scan. A version below 8.11.0, or one it can't parse, is `ErrScanFault`, before any point
+    in time is opened. Paged and federated search never look the version up.
   - The first page opens a point in time on the pinned index; every page searches with `pit`
     and no index in the path, sends the paged search's query and sort (the caller's, or `_score`
     descending, then `resource_id` ascending), `_source: false`, a `term` on `_index` equal to
@@ -120,7 +124,7 @@ they do any search.
   |---|---|---|
   | `ErrInvalidPageToken` | the token doesn't decode, has no backend cursor, or was issued for another request | a consumer bug: it altered the token or sent it with another request |
   | `ErrCursorExpired` | the scan is older than `ScanMaxAge`, its pinned version or index is no longer the config's, or its point in time or index is gone | restart from page 1 |
-  | `ErrScanFault` (wraps its cause) | a deployment or invariant fault: an alias it can't pin, a middleware that dropped or changed the scan, a hit from another index, a failed shard or timed-out page | report it; a retry may not help |
+  | `ErrScanFault` (wraps its cause) | a deployment or invariant fault: Elasticsearch below 8.11.0, an alias it can't pin, a middleware that dropped or changed the scan, a hit from another index, a failed shard or timed-out page | report it; a retry may not help |
   | `*InvalidArgumentError` | a nonzero `Page`, a `PageToken` without `Scan`, or a filter a paged search would refuse | fix the request |
   | `ErrUnknownResource` | the resource isn't configured (or is empty), checked before anything else | fix the request |
 
@@ -141,6 +145,23 @@ lost. **A consumer exposing scans to untrusted callers must seal the token first
 authenticate it (AEAD) on the way out and open it on the way in, around `Indexer.Search` — so a
 caller can neither read its sort values nor alter it (seams S53 in laika-dev's `docs/seams.md`).
 
+## A scan requires Elasticsearch 8.11.0 or later
+
+On Elasticsearch 8.9.0 through 8.10.4, which bundle Lucene 9.7, a `search_after` page sorted on a
+`date`, `long` or `double` field silently drops documents that lack the sort field whenever the
+page has to reach into the block of missing values, on the first page past the last present value
+or on a page whose cursor is a present document's value. Lucene's points-based skipping judges the
+missing value non-competitive by comparing it with a queue bottom that isn't set yet while the
+queue is filling: apache/lucene#12521, introduced by apache/lucene#12334 (Lucene 9.7.0) and fixed
+by apache/lucene#12520 (Lucene 9.8.0, Elasticsearch 8.11.0). Whether a page loses some or all of
+the block depends on the segment layout. Documents that have the field are never lost. Bisected
+with `app/tests`' scan cases: 8.8.2 passes, 8.9.0 and 8.10.4 fail, 8.11.0 through 8.19.0 pass.
+`keyword`, `integer` and `float` sorts were found unaffected (empirically, not from the source).
+A scan that ends short with no error is the failure the scan exists to rule out, so the backend
+refuses the whole range below 8.11.0 rather than only the affected sorts and versions, and
+`app/tests` runs Elasticsearch 8.19.0. Which version the vxfiber deployment runs is open point Q27
+in laika-dev's `docs/open-points.md`; its default is this refusal (seams S55).
+
 ## Why not the alternatives
 
 - **`from`/`size` deep paging.** Each page is a new search of the live index, so writes between
@@ -160,6 +181,20 @@ caller can neither read its sort values nor alter it (seams S53 in laika-dev's `
 - **Resolving reference filters once,** on page 1, carrying the children's ids in the token. It
   would pin membership through a reference filter, at the cost of a token that grows with the
   child result, up to the 10,000-term ceiling. Deferred (D9).
+- **Working around the Lucene bug on 8.9 and 8.10,** instead of refusing them. Two sort options
+  avoid it on 8.9.0, and both turn off Lucene's sort skipping, so every page reads every
+  matching document's doc values: O(N) per page and O(N²/page size) per scan, about 1.7 times a
+  page's cost at 500,000 documents, growing with N.
+  - `numeric_type: "long"` on a `date` sort gives the same values and order, but only for dates;
+    a `long` or `double` field has no lossless counterpart.
+  - `mode: "median"` on any numeric sort is exact only for single-valued fields; it changes the
+    value a multi-valued field sorts by.
+
+  A two-phase scan would keep the skipping: first the documents that have the sort field (an
+  `exists` filter, so no missing value is ever competitive), then those that lack it
+  (`must_not exists`, sorted by `resource_id`, Elasticsearch's own order inside the missing
+  block), with the phase in the cursor. It is untested. Any of these would be gated on the
+  cluster version, and is for Q27's answer to call for.
 - **Signing or encrypting the token in Laika.** Laika would own a key, its distribution across
   instances and its rotation, to defend a holder the first consumer already trusts. A consumer
   that needs it seals the token around `Indexer.Search` with keys it already manages.
@@ -178,6 +213,8 @@ caller can neither read its sort values nor alter it (seams S53 in laika-dev's `
   `search.max_open_pit_context` (300 per node by default), and a scan ended by an error or
   abandoned by its consumer holds its point in time until the keep-alive lapses, so a caller
   opening many scans can exhaust it for others meanwhile (seams S54).
+- **A deployment that scans runs Elasticsearch 8.11.0 or later.** On an older cluster every scan
+  fails with `ErrScanFault` on its first page; paged and federated search are unaffected.
 - **The page token is a consumer's to protect** (above).
 
 **Implication for contributors:** a stage of the search chain that reads a resource's config
