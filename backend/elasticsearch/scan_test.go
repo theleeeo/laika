@@ -514,7 +514,7 @@ func TestScan_RefusesClusterBefore8_11(t *testing.T) {
 }
 
 func TestScan_ProceedsOn8_11AndLater(t *testing.T) {
-	for _, version := range []string{"8.11.0", "8.11.0-SNAPSHOT", "8.19.0", "9.0.0"} {
+	for _, version := range []string{"8.11.0", "8.11.0-SNAPSHOT", "8.19.0", "9.0.0", "9.0.0-beta1"} {
 		t.Run(version, func(t *testing.T) {
 			st := &scanTransport{t: t,
 				info:   []scanReply{infoReply(version)},
@@ -553,30 +553,55 @@ func TestScan_LooksUpClusterVersionOnce(t *testing.T) {
 	require.Len(t, st.infoCalls(), 1, "the version is looked up once and cached")
 }
 
-func TestScan_FailedVersionLookupIsRetried(t *testing.T) {
-	st := &scanTransport{t: t,
-		info:   []scanReply{{http.StatusInternalServerError, `{"error":"oops"}`}, infoReply("8.19.0")},
-		open:   []scanReply{openReply("pit-1")},
-		search: []scanReply{ok(scanPage("pit-1", 0, 0))},
-		close:  []scanReply{closedReply},
+// Only a version that passes is cached: a failed lookup, a credential
+// without the monitor privilege, and a refused version (a cluster upgraded
+// to 8.11+ must work without a restart) are each asked again on the next scan.
+func TestScan_OnlyAPassingVersionIsCached(t *testing.T) {
+	unauthorized := `{"error":{"root_cause":[{"type":"security_exception","reason":"action [cluster:monitor/main] is unauthorized"}],` +
+		`"type":"security_exception","reason":"action [cluster:monitor/main] is unauthorized"},"status":403}`
+	cases := []struct {
+		name      string
+		first     scanReply
+		scanFault bool
+		mention   string
+	}{
+		{name: "lookup fails", first: scanReply{http.StatusInternalServerError, `{"error":"oops"}`}},
+		{name: "unauthenticated", first: scanReply{http.StatusUnauthorized, `{"error":"unauthenticated","status":401}`}, scanFault: true, mention: "monitor"},
+		{name: "no monitor privilege", first: scanReply{http.StatusForbidden, unauthorized}, scanFault: true, mention: "monitor"},
+		{name: "version below 8.11", first: infoReply("8.10.4"), scanFault: true, mention: "8.10.4"},
+		{name: "version doesn't parse", first: infoReply("banana"), scanFault: true, mention: "banana"},
 	}
-	c := st.client()
-	ctx := context.Background()
-	req := core.SearchRequest{Scan: true, PageSize: 10}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			st := &scanTransport{t: t,
+				info:   []scanReply{tc.first, infoReply("8.19.0")},
+				open:   []scanReply{openReply("pit-1")},
+				search: []scanReply{ok(scanPage("pit-1", 0, 0))},
+				close:  []scanReply{closedReply},
+			}
+			c := st.client()
+			ctx := context.Background()
+			req := core.SearchRequest{Scan: true, PageSize: 10}
 
-	_, err := c.Search(ctx, req, pinnedIndex, vcFlatOnly())
-	require.Error(t, err)
-	require.Empty(t, st.callsTo(http.MethodPost, "/_pit"), "a scan without a known version opens nothing")
-	require.Empty(t, st.searches())
+			_, err := c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+			require.Error(t, err)
+			require.Equal(t, tc.scanFault, errors.Is(err, core.ErrScanFault), "ErrScanFault: %v", err)
+			if tc.mention != "" {
+				require.Contains(t, err.Error(), tc.mention)
+			}
+			require.Empty(t, st.callsTo(http.MethodPost, "/_pit"), "a scan without a passing version opens nothing")
+			require.Empty(t, st.searches())
 
-	_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
-	require.NoError(t, err, "a failed lookup isn't cached")
-	require.Len(t, st.infoCalls(), 2)
-	require.Len(t, st.searches(), 1)
+			_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+			require.NoError(t, err, "the first answer isn't cached")
+			require.Len(t, st.infoCalls(), 2)
+			require.Len(t, st.searches(), 1)
 
-	_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
-	require.NoError(t, err)
-	require.Len(t, st.infoCalls(), 2, "a successful lookup is")
+			_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+			require.NoError(t, err)
+			require.Len(t, st.infoCalls(), 2, "a passing version is cached")
+		})
+	}
 }
 
 func TestSearch_NonScanSearchesNeverLookUpClusterVersion(t *testing.T) {

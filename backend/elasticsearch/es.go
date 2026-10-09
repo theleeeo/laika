@@ -9,7 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	esv8 "github.com/elastic/go-elasticsearch/v8"
@@ -28,12 +28,9 @@ type Client struct {
 	// scanKeepAlive is how long a scan's point in time lives between pages.
 	scanKeepAlive time.Duration
 
-	// clusterVersionMu guards clusterVersion, the cluster's version.number
-	// as the first scan's successful lookup found it, and clusterVersionKnown,
-	// whether one has succeeded.
-	clusterVersionMu    sync.Mutex
-	clusterVersion      string
-	clusterVersionKnown bool
+	// scanVersionOK is set once a scan's lookup found the cluster running
+	// an Elasticsearch a scan supports; until then every scan asks.
+	scanVersionOK atomic.Bool
 }
 
 // FederatedExecution selects how FederatedSearch executes against the cluster.

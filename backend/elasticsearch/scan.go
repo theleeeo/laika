@@ -291,9 +291,16 @@ func (c *Client) closePointInTime(ctx context.Context, id string) error {
 const minScanMajor, minScanMinor = 8, 11
 
 // checkScanSupported returns core.ErrScanFault when the cluster runs an
-// Elasticsearch older than 8.11.0, or one whose version doesn't parse. A
-// failed version lookup is returned as it is.
+// Elasticsearch older than 8.11.0 or one whose version doesn't parse, or when
+// Laika's credentials may not read the version. Another failed lookup is
+// returned as it is. Only a passing version is remembered: anything else is
+// asked again on the next scan, so a cluster upgraded meanwhile, or a
+// credential granted monitor, works without a restart. Concurrent first scans
+// may each ask.
 func (c *Client) checkScanSupported(ctx context.Context) error {
+	if c.scanVersionOK.Load() {
+		return nil
+	}
 	version, err := c.lookupClusterVersion(ctx)
 	if err != nil {
 		return err
@@ -308,20 +315,14 @@ func (c *Client) checkScanSupported(ctx context.Context) error {
 			"(Lucene 9.7, apache/lucene#12521) a search_after page on a date, long or double sort drops documents missing the sort field",
 			core.ErrScanFault, version, minScanMajor, minScanMinor)
 	}
+	c.scanVersionOK.Store(true)
 	return nil
 }
 
-// lookupClusterVersion returns the cluster's version.number from GET /,
-// asked once and cached; a failed lookup isn't cached, so the next scan asks
-// again. Concurrent first scans may each ask; they get the same answer.
+// lookupClusterVersion returns the cluster's version.number from GET /. A 401
+// or 403 is core.ErrScanFault: GET / needs the monitor cluster privilege,
+// which Laika's credentials then lack, a deployment fault.
 func (c *Client) lookupClusterVersion(ctx context.Context) (string, error) {
-	c.clusterVersionMu.Lock()
-	version, known := c.clusterVersion, c.clusterVersionKnown
-	c.clusterVersionMu.Unlock()
-	if known {
-		return version, nil
-	}
-
 	ctx, cancel := context.WithTimeout(ctx, singleSearchTimeout)
 	defer cancel()
 	res, err := c.es.Info(c.es.Info.WithContext(ctx))
@@ -331,6 +332,11 @@ func (c *Client) lookupClusterVersion(ctx context.Context) (string, error) {
 	defer res.Body.Close()
 	if res.IsError() {
 		raw, _ := io.ReadAll(res.Body)
+		if res.StatusCode == http.StatusUnauthorized || res.StatusCode == http.StatusForbidden {
+			return "", fmt.Errorf("%w: look up cluster version: %s %s; a scan reads the cluster version from GET /, "+
+				"so Laika's Elasticsearch credentials need the monitor cluster privilege",
+				core.ErrScanFault, res.Status(), raw)
+		}
 		return "", fmt.Errorf("look up cluster version: %s %s", res.Status(), raw)
 	}
 	var decoded struct {
@@ -341,24 +347,18 @@ func (c *Client) lookupClusterVersion(ctx context.Context) (string, error) {
 	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
 		return "", fmt.Errorf("decode cluster version: %w", err)
 	}
-
-	// Cached even when it doesn't parse: checkScanSupported refuses it, and
-	// asking again wouldn't change the cluster's answer.
-	c.clusterVersionMu.Lock()
-	c.clusterVersion, c.clusterVersionKnown = decoded.Version.Number, true
-	c.clusterVersionMu.Unlock()
 	return decoded.Version.Number, nil
 }
 
-// parseMajorMinor parses the major and minor of a version like "8.19.0" or
-// "8.11.0-SNAPSHOT".
+// parseMajorMinor parses the major and minor of a version like "8.19.0",
+// "8.11.0-SNAPSHOT" or "9.0.0-beta1": Elasticsearch always reports
+// major.minor.patch, so a qualifier never touches the minor.
 func parseMajorMinor(version string) (major, minor int, ok bool) {
 	majorStr, rest, found := strings.Cut(version, ".")
 	if !found {
 		return 0, 0, false
 	}
 	minorStr, _, _ := strings.Cut(rest, ".")
-	minorStr, _, _ = strings.Cut(minorStr, "-")
 	major, err1 := strconv.Atoi(majorStr)
 	minor, err2 := strconv.Atoi(minorStr)
 	if err1 != nil || err2 != nil || major < 0 || minor < 0 {
