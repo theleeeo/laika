@@ -11,12 +11,14 @@ import (
 	"github.com/theleeeo/laika/projection"
 )
 
-// staticExecuter emits a single fixed page of BuildDocs.
+// staticExecuter emits a single fixed page of BuildDocs: docs for an
+// all-of-type walk, and for a by-ids request an answer per asked id (staticAnswer).
 type staticExecuter struct {
 	docs []projection.BuildDoc
-	// byID, when it has an entry for the requested resource, serves that
+	// byID, when it has an entry for an asked id, answers it with that
 	// instead of docs — e.g. to give one resource Parents without making
-	// every cascaded build cascade again.
+	// every cascaded build cascade again. An empty entry leaves the id
+	// unanswered.
 	byID map[string][]projection.BuildDoc
 	// onExecute, when set, runs as Execute is called — before any document
 	// is fetched — so a test can order fetches against store calls.
@@ -28,13 +30,37 @@ func (e *staticExecuter) Execute(ctx context.Context, req projection.BuildReques
 		e.onExecute()
 	}
 	docs := e.docs
-	if d, ok := e.byID[firstID(req)]; ok {
-		docs = d
+	if len(req.ResourceIDs) != 0 {
+		docs = nil
+		for _, id := range req.ResourceIDs {
+			docs = append(docs, e.staticAnswer(id)...)
+		}
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
 	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 	close(ch)
 	return ch
+}
+
+// staticAnswer is e's answer for the asked id: its byID entry if it has one,
+// else docs' items of id, else docs' first item answered for id — a source
+// that serves every id the same data — and nothing when docs is empty.
+func (e *staticExecuter) staticAnswer(id string) []projection.BuildDoc {
+	if d, ok := e.byID[id]; ok {
+		return d
+	}
+	var own []projection.BuildDoc
+	for _, d := range e.docs {
+		if d.Root.Id == id {
+			own = append(own, d)
+		}
+	}
+	if len(own) > 0 || len(e.docs) == 0 {
+		return own
+	}
+	d := e.docs[0]
+	d.Root.Id = id
+	return []projection.BuildDoc{d}
 }
 
 // cancellingStore cancels the rebuild's ctx during the first BeginBuild

@@ -80,7 +80,7 @@ func TestSweepStale_RebuildsMarksAndFinishesTombstones(t *testing.T) {
 	}
 }
 
-// requestExecuter records every BuildRequest and emits one matching doc.
+// requestExecuter records every BuildRequest and emits a doc for each asked id.
 type requestExecuter struct {
 	mu       sync.Mutex
 	requests []projection.BuildRequest
@@ -90,11 +90,15 @@ func (e *requestExecuter) Execute(_ context.Context, req projection.BuildRequest
 	e.mu.Lock()
 	e.requests = append(e.requests, req)
 	e.mu.Unlock()
+	docs := make([]projection.BuildDoc, 0, len(req.ResourceIDs))
+	for _, id := range req.ResourceIDs {
+		docs = append(docs, projection.BuildDoc{
+			Root: model.Resource{Type: req.ResourceType, Id: id},
+			Doc:  map[string]any{"fields": map[string]any{}},
+		})
+	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-		Root: model.Resource{Type: req.ResourceType, Id: firstID(req)},
-		Doc:  map[string]any{"fields": map[string]any{}},
-	}}}
+	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 	close(ch)
 	return ch
 }

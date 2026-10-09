@@ -23,8 +23,8 @@ import (
 
 // walkExecuter serves "product" walks. An all-of-type walk gets its pages
 // over an unbuffered channel, each but the last with a next-page token, so a
-// page is taken only when the walk asks for it; a by-id request gets one
-// document. A walk whose metadata names failActor as its actor fails at its
+// page is taken only when the walk asks for it; a by-ids request gets a
+// document for each asked id. A walk whose metadata names failActor as its actor fails at its
 // first page.
 type walkExecuter struct {
 	pages [][]projection.BuildDoc
@@ -42,8 +42,12 @@ func (e *walkExecuter) Execute(ctx context.Context, req projection.BuildRequest)
 	e.reqs = append(e.reqs, req)
 	e.mu.Unlock()
 	if len(req.ResourceIDs) != 0 {
+		docs := make([]projection.BuildDoc, 0, len(req.ResourceIDs))
+		for _, id := range req.ResourceIDs {
+			docs = append(docs, productDoc(id))
+		}
 		ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{productDoc(firstID(req))}}
+		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 		close(ch)
 		return ch
 	}

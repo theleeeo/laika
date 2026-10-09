@@ -20,7 +20,7 @@ import (
 
 // requestLog wraps an executer and records every request it serves, so a test
 // sees which ids were built with which metadata — the walk's request
-// (ResourceID "") and every single-id build's.
+// (ResourceIDs empty) and every single-id build's.
 type requestLog struct {
 	exec aggregation.Executer[projection.BuildRequest, projection.BuildDoc]
 	mu   sync.Mutex

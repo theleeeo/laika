@@ -978,7 +978,7 @@ type recordingExecuter struct {
 	arrived chan string
 	proceed chan struct{}
 	parkIDs map[string]bool
-	// failIDs fails the Execute of the ids it names.
+	// failIDs fails the Execute of a request asking about an id it names.
 	failIDs map[string]bool
 }
 
@@ -991,17 +991,21 @@ func (e *recordingExecuter) Execute(_ context.Context, req projection.BuildReque
 		<-e.proceed
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-	if e.failIDs[firstID(req)] {
-		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Err: errors.New("plan failed")}
-		close(ch)
-		return ch
+	docs := make([]projection.BuildDoc, 0, len(req.ResourceIDs))
+	for _, id := range req.ResourceIDs {
+		if e.failIDs[id] {
+			ch <- aggregation.ExecutionResult[projection.BuildDoc]{Err: errors.New("plan failed")}
+			close(ch)
+			return ch
+		}
+		docs = append(docs, projection.BuildDoc{
+			Root:      model.Resource{Type: req.ResourceType, Id: id},
+			Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
+			Relations: e.relations[id],
+			Parents:   e.parents[id],
+		})
 	}
-	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-		Root:      model.Resource{Type: req.ResourceType, Id: firstID(req)},
-		Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
-		Relations: e.relations[firstID(req)],
-		Parents:   e.parents[firstID(req)],
-	}}}
+	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 	close(ch)
 	return ch
 }

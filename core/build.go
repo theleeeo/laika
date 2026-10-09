@@ -181,26 +181,47 @@ type versionedDoc struct {
 	doc     projection.BuildDoc
 }
 
-// executeAllPlans runs every active plan for one resource and splits the
-// outcomes into built documents and the versions whose plan returned no data.
-// Each outcome is its own version's answer (ADR 0013): a document is that
-// version's to write, a nil that version's to delete.
-func executeAllPlans(ctx context.Context, plans []projection.Plan, req projection.BuildRequest) (docs []versionedDoc, missing []int, err error) {
+// idOutcome is one asked id's outcome over every active plan: the documents
+// its plans built and the versions whose plan returned nil, or the error of
+// the first plan that failed it, which leaves it no documents and no nils.
+type idOutcome struct {
+	docs    []versionedDoc
+	missing []int
+	err     error
+}
+
+// executeAllPlans runs every active plan for req's ids and gives each asked
+// id its outcome: its built documents and the versions whose plan returned
+// no data, or its error. Each plan's answer is its own version's (ADR 0013):
+// a document is that version's to write, a nil that version's to delete. An
+// id one plan fails is failed whatever the others answer. Every plan runs
+// before the caller writes anything; an error of a plan's call fails every
+// asked id, and executeAllPlans returns it with no outcomes.
+func executeAllPlans(ctx context.Context, plans []projection.Plan, req projection.BuildRequest) (map[string]idOutcome, error) {
+	outcomes := make(map[string]idOutcome, len(req.ResourceIDs))
 	for _, plan := range plans {
 		if plan.Executer == nil {
 			continue
 		}
-		result, err := executePlan(ctx, plan, req)
+		answers, err := executePlan(ctx, plan, req)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		if result.Doc == nil {
-			missing = append(missing, plan.Version)
-			continue
+		for id, answer := range answers {
+			o := outcomes[id]
+			switch {
+			case o.err != nil:
+			case answer.Err != nil:
+				o = idOutcome{err: answer.Err}
+			case answer.Doc == nil:
+				o.missing = append(o.missing, plan.Version)
+			default:
+				o.docs = append(o.docs, versionedDoc{version: plan.Version, doc: answer})
+			}
+			outcomes[id] = o
 		}
-		docs = append(docs, versionedDoc{version: plan.Version, doc: result})
 	}
-	return docs, missing, nil
+	return outcomes, nil
 }
 
 // firstReport is the resource's own metadata as its plans report it: the
@@ -231,7 +252,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// stays depends on every plan's outcome, and the drift check and the
 	// Parents (ADR 0006) are unioned over every plan's document, not taken
 	// from the last.
-	docs, missing, err := executeAllPlans(ctx, plans, projection.BuildRequest{
+	outcomes, err := executeAllPlans(ctx, plans, projection.BuildRequest{
 		ResourceType: resourceType,
 		ResourceIDs:  []string{resourceID},
 		Metadata:     metadata,
@@ -239,6 +260,11 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	if err != nil {
 		return false, err
 	}
+	outcome := outcomes[resourceID]
+	if outcome.err != nil {
+		return false, outcome.err
+	}
+	docs, missing := outcome.docs, outcome.missing
 
 	// Every plan finds the resource gone at source — delete everywhere.
 	if len(docs) == 0 && len(missing) > 0 {
@@ -423,16 +449,20 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		// selected plan runs first, and each plan's outcome is its own
 		// version's — a nil deletes that version's document and empties its
 		// edge set, never another version's.
-		docs, missing, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
+		outcomes, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
 			ResourceIDs:  []string{id},
 			Metadata:     params.Metadata,
 		})
+		if planErr == nil {
+			planErr = outcomes[id].err
+		}
 		if planErr != nil {
 			logger.Warn("plan execution failed", slog.String("id", id), slog.String("error", planErr.Error()))
 			fl.fail(ctx, id)
 			continue
 		}
+		docs, missing := outcomes[id].docs, outcomes[id].missing
 
 		// The nils count first, each its own version's outcome
 		// (rebuildFlusher.gone), so the id settles when its documents flush,

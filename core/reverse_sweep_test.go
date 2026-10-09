@@ -75,12 +75,16 @@ func (e *sweepExecuter) Execute(_ context.Context, req projection.BuildRequest) 
 	e.mu.Lock()
 	e.reqs = append(e.reqs, req)
 	e.mu.Unlock()
-	doc := productDoc(firstID(req))
-	if e.gone[firstID(req)] {
-		doc = nilDoc(firstID(req))
+	docs := make([]projection.BuildDoc, 0, len(req.ResourceIDs))
+	for _, id := range req.ResourceIDs {
+		if e.gone[id] {
+			docs = append(docs, nilDoc(id))
+		} else {
+			docs = append(docs, productDoc(id))
+		}
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{doc}}
+	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: docs}
 	close(ch)
 	return ch
 }

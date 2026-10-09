@@ -60,22 +60,52 @@ func countActive(plans []projection.Plan) int {
 	return n
 }
 
-// executePlan runs the plan for a single resource ID and returns its first
-// document. A zero-value result with a nil Doc means this plan returned no
-// data for the resource: its own Schema Version's answer that it has no
-// document (ADR 0013), not that the source no longer has it.
-func executePlan(ctx context.Context, plan projection.Plan, req projection.BuildRequest) (projection.BuildDoc, error) {
-	var result projection.BuildDoc
+// executePlan asks plan about req's ids and drains its results into one
+// answer per asked id (ADR 0014). A BuildDoc with a nil Doc is this plan's
+// nil for its Root.Id: its own Schema Version's answer that it has no
+// document (ADR 0013), not that the source no longer has it. One with Err
+// fails that id alone. An asked id the plan leaves unanswered gets an answer
+// with Err, so it fails and is never read as a nil. An execution error, or
+// an answer of an id answered before or not asked about, fails the call.
+func executePlan(ctx context.Context, plan projection.Plan, req projection.BuildRequest) (map[string]projection.BuildDoc, error) {
+	// A call that fails before the plan's results are drained stops the
+	// plan rather than leave it blocked on its next send.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	answers := make(map[string]projection.BuildDoc, len(req.ResourceIDs))
+	for _, id := range req.ResourceIDs {
+		answers[id] = projection.BuildDoc{}
+	}
+	answered := make(map[string]bool, len(req.ResourceIDs))
 	for r := range plan.Execute(ctx, req) {
 		if r.Err != nil {
-			return projection.BuildDoc{}, r.Err
+			return nil, r.Err
 		}
-		if len(r.Items) > 0 {
-			result = r.Items[0]
-			break
+		for _, item := range r.Items {
+			id := item.Root.Id
+			if _, asked := answers[id]; !asked {
+				return nil, fmt.Errorf("plan of %s version %d answered %q, which it was not asked about", req.ResourceType, plan.Version, id)
+			}
+			if answered[id] {
+				return nil, fmt.Errorf("plan of %s version %d answered %q twice", req.ResourceType, plan.Version, id)
+			}
+			answered[id] = true
+			if item.Err != nil {
+				// The id's error is all the plan says about it.
+				item = projection.BuildDoc{Root: item.Root, Err: item.Err}
+			}
+			answers[id] = item
 		}
 	}
-	return result, nil
+	for id := range answers {
+		if !answered[id] {
+			answers[id] = projection.BuildDoc{
+				Root: model.Resource{Type: req.ResourceType, Id: id},
+				Err:  fmt.Errorf("plan of %s version %d left %q unanswered", req.ResourceType, plan.Version, id),
+			}
+		}
+	}
+	return answers, nil
 }
 
 // detachedMarkTimeout bounds a stale mark made on a context detached from the
