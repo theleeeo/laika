@@ -23,6 +23,9 @@ type Client struct {
 	withRefresh bool
 
 	federatedExecution FederatedExecution
+
+	// scanKeepAlive is how long a scan's point in time lives between pages.
+	scanKeepAlive time.Duration
 }
 
 // FederatedExecution selects how FederatedSearch executes against the cluster.
@@ -73,8 +76,14 @@ func WithFederatedExecution(mode FederatedExecution) Option {
 	return func(c *Client) { c.federatedExecution = mode }
 }
 
+// WithScanKeepAlive sets how long a scan's point in time lives between pages;
+// each page renews it. The default is one minute.
+func WithScanKeepAlive(d time.Duration) Option {
+	return func(c *Client) { c.scanKeepAlive = d }
+}
+
 func New(client *esv8.Client, withRefresh bool, opts ...Option) *Client {
-	c := &Client{es: client, withRefresh: withRefresh, federatedExecution: FederatedSingleDFS}
+	c := &Client{es: client, withRefresh: withRefresh, federatedExecution: FederatedSingleDFS, scanKeepAlive: time.Minute}
 	for _, o := range opts {
 		o(c)
 	}
