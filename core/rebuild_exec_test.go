@@ -3284,3 +3284,11 @@ func TestRebuildAll_FinishMarkFails_NotRebuildMarkedFailuresError(t *testing.T) 
 		})
 	}
 }
+
+func (s *rebuildRecordingStore) ListUncovered(context.Context, string, int, map[string]string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
+
+func (s *rebuildRecordingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
+	return nil, errors.New("BeginBuilds: not implemented")
+}

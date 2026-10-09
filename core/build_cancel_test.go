@@ -133,3 +133,11 @@ func TestRebuildAll_CancelledContext_AbortsDocLoop(t *testing.T) {
 func (s *cancellingStore) RegisterChanges(context.Context, []Registration, time.Duration) (Registered, error) {
 	panic("RegisterChanges: not implemented")
 }
+
+func (s *cancellingStore) ListUncovered(context.Context, string, int, map[string]string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
+
+func (s *cancellingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
+	return nil, errors.New("BeginBuilds: not implemented")
+}

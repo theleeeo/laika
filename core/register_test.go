@@ -1235,3 +1235,11 @@ func TestRegisterChanges_EmptyBatch_DoesNotCallTheStore(t *testing.T) {
 		t.Fatalf("an empty batch has nothing to commit: %v", calls)
 	}
 }
+
+func (s *recordingStore) ListUncovered(context.Context, string, int, map[string]string, string, int) ([]ListedResource, error) {
+	return nil, nil
+}
+
+func (s *recordingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
+	return nil, errors.New("BeginBuilds: not implemented")
+}

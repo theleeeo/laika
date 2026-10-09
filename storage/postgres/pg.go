@@ -1049,3 +1049,13 @@ func (s *Store) CountMissingEdgeSets(ctx context.Context, resourceType string, s
 	}
 	return rows, missing, nil
 }
+
+// ListUncovered implements core.Store.
+func (s *Store) ListUncovered(ctx context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]core.ListedResource, error) {
+	return nil, errors.New("ListUncovered: not implemented")
+}
+
+// BeginBuilds implements core.Store.
+func (s *Store) BeginBuilds(ctx context.Context, resources []model.Resource) ([]core.BuildBegun, error) {
+	return nil, errors.New("BeginBuilds: not implemented")
+}

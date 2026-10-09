@@ -163,6 +163,24 @@ type Store interface {
 	// the first id. It claims and locks nothing. The reverse sweep enumerates
 	// a type's indexed resources with it (ADR 0012).
 	ListResources(ctx context.Context, resourceType, after string, limit int) ([]ListedResource, error)
+	// ListUncovered returns up to limit rows of resourceType whose id sorts
+	// after after, in id order, each with its metadata, that aren't
+	// tombstones, carry no stale mark, have no edge set of schemaVersion and
+	// hold metadata (nil and empty are equal): the rows a backfill of that
+	// version left without a document decision. An empty after starts at the
+	// first id. It claims and locks nothing. A backfill asks the version's
+	// Probe about them (ADR 0013).
+	ListUncovered(ctx context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]ListedResource, error)
+	// BeginBuilds begins resources in one statement, as BeginBuild begins
+	// one with a token of 0: each row that exists and isn't a tombstone gets
+	// its Build Sequence bumped, its stale_seq captured, a start from the
+	// Change Sequence and its metadata read. It locks the rows in (type, id)
+	// order before its first write, as MarkStale does (ADR 0002). It inserts
+	// no row, so a row deleted since it was listed isn't recreated, and it
+	// leaves ownership (owner_seq, owner_since) alone. It returns one
+	// BuildBegun per resource, in input order; a resource it didn't begin —
+	// gone or a tombstone — gets the zero BuildBegun (BuildIdx 0).
+	BeginBuilds(ctx context.Context, resources []model.Resource) ([]BuildBegun, error)
 }
 
 // ListedResource is one row ListResources returns.
