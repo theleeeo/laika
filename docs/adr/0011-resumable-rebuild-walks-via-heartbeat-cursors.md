@@ -2,6 +2,14 @@
 
 _Accepted, 2026-09-04._
 
+> **Note (2026-10-09, runbook step L3.9):** the page-token bullet's backstop
+> changed. `cutover-check` no longer has a doc-count parity gate
+> ([ADR 0010](./0010-cutover-readiness-is-a-pre-deploy-gate.md)'s Q24 note).
+> A resumed walk that skipped rows is caught by the coverage gate for the
+> resources Laika has a row for: each lacks an edge set of the backfilled
+> version, and no flag passes coverage. A resource Laika has no row for shows
+> only in the doc-gap, which the operator may accept.
+
 > **Note (2026-10-07, runbook step L2.5):** two rules join the ones below,
 > and a scheduled walk runs under them.
 >
@@ -65,7 +73,7 @@ The decision: **a walk checkpoints a `RebuildCursor` into its activity's heartbe
 - **Resumption does not touch wipe-and-replace.** _(Superseded by the L1.5 note above: there is no wipe or merge.)_ A full rebuild still wipes a resource's edges at its first sighting and a version-targeted one still merges ([ADR 0002](./0002-distributed-safety-via-occ-and-drift-check-not-locks.md)), resumed or not: the pages a resume skips hold only settled resources, whose edges were re-added after their own wipe.
 - **Targeted (by-ID) rebuilds neither checkpoint nor resume.** Their input is bounded and restarting is cheap, so an inherited cursor is warned about and ignored. They still heartbeat — a dead worker is still detected and retried.
 - **The plumbing, top to bottom**: `aggregation.ExecutionResult.NextPageToken` (each page carries the token that fetches the next; stages map pages 1:1 and forward it unchanged), `projection.BuildRequest.PageToken` (seeds an all-of-type walk mid-listing), and `core.RebuildNowResumable(sel, start, checkpoint)` — the embedder-visible seam, usable without Temporal.
-- **The page token must name a stable position — that is a precondition on the provider, not something Laika can enforce.** A cursor is redeemed minutes to hours after it was recorded (a heartbeat timeout plus retry backoff), so the token has to mean the same place then as it did when it was written. Keyset or last-ID tokens do; *offset* tokens do not — and offsets are what `vx-provider`'s resolvers and the harness's `nextPageToken` emit today. Upstream deletions between the two attempts shift every later row forward, so the resumed walk starts past resources it never walked: they are never rebuilt, and nothing marks them, so the backfill quietly finishes short. Insertions are harmless in the other direction — some resources are simply walked twice, which a Rebuild is idempotent under. The backstop is the [ADR 0010](./0010-cutover-readiness-is-a-pre-deploy-gate.md) `cutover-check` doc-count parity gate: an incomplete backfill fails it, before a `readVersion` bump can flip the alias onto the short index.
+- **The page token must name a stable position — that is a precondition on the provider, not something Laika can enforce.** A cursor is redeemed minutes to hours after it was recorded (a heartbeat timeout plus retry backoff), so the token has to mean the same place then as it did when it was written. Keyset or last-ID tokens do; *offset* tokens do not — and offsets are what `vx-provider`'s resolvers and the harness's `nextPageToken` emit today. Upstream deletions between the two attempts shift every later row forward, so the resumed walk starts past resources it never walked: they are never rebuilt, and nothing marks them, so the backfill quietly finishes short. Insertions are harmless in the other direction — some resources are simply walked twice, which a Rebuild is idempotent under. The backstop is the [ADR 0010](./0010-cutover-readiness-is-a-pre-deploy-gate.md) `cutover-check` doc-count parity gate: an incomplete backfill fails it, before a `readVersion` bump can flip the alias onto the short index. _(Since L3.9 the coverage gate, and for resources Laika has no row for only the doc-gap: see the note above.)_
 - **An Executer that ignores `PageToken` is safe but not resumable.** `projection.BuildRequest.PageToken` is where a walk re-enters the listing, so honouring it is the contract a plan must meet to be resumable. One that does not — the harness's hand-rolled domain plans today — restarts from the head of the listing on every resume: correct, because a full re-walk settles everything it touches, but the feature is silently forfeited rather than loudly broken. An embedder that wants resumable backfills has to thread the field through its root fetch.
 
 Consequences:

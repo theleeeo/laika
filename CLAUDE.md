@@ -29,7 +29,9 @@ go run ./app/cmd/gen-mapping -config resources.yml
 go run ./app/cmd/diff-mapping -config resources.yml -es-addr http://localhost:9200
 
 # Pre-cutover readiness gates for a readVersion bump (ADR 0010): target index
-# exists, doc-count parity, stale-backlog age. Exits non-zero when not ready.
+# exists, every resource with no stale mark has the target version's edge set,
+# the doc-count gap is 0 or accepted for its type (-accept-gap a,b),
+# stale-backlog age. Exits non-zero when not ready.
 go run ./app/cmd/cutover-check -config resources.yml -es-addr http://localhost:9200 -pg-addr postgres://user:pass@localhost/indexer
 
 # Regenerate protobuf bindings (outputs to app/gen/)

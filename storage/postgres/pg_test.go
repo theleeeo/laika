@@ -442,6 +442,51 @@ func TestCountStale_FiltersByTypeAndCutoff_ReportsOldest(t *testing.T) {
 	}
 }
 
+func TestCountMissingEdgeSets_CountsUnmarkedRowsLackingTheVersionsSet(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := func(id string) model.Resource { return model.Resource{Type: "cme", Id: id} }
+	child := model.Resource{Type: "cme-child", Id: "c"}
+
+	covered, empty, v1Only, bare, stale, tomb := res("covered"), res("empty"), res("v1-only"), res("bare"), res("stale"), res("tomb")
+	other := model.Resource{Type: "cme-other", Id: "bare"}
+	for _, r := range []model.Resource{covered, empty, v1Only, bare, stale, other} {
+		seed(t, r, 1, 0, false)
+	}
+	seed(t, tomb, 1, 0, true)
+	replace(t, st, covered, 10, nil, edgeSet(2, child))
+	replace(t, st, empty, 10, nil, edgeSet(2))
+	replace(t, st, v1Only, 10, nil, edgeSet(1, child))
+	// Another type's set under bare's id must not cover bare.
+	replace(t, st, other, 10, nil, edgeSet(2))
+	if _, err := testPool.Exec(ctx,
+		`UPDATE resources SET stale_since = now() WHERE type=$1 AND id=$2`, stale.Type, stale.Id); err != nil {
+		t.Fatal(err)
+	}
+
+	count := func(resourceType string, version int) (int, int) {
+		t.Helper()
+		rows, missing, err := st.CountMissingEdgeSets(ctx, resourceType, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rows, missing
+	}
+
+	// rows: every row but the tombstone. missing: v1-only and bare; covered
+	// and empty have a v2 set, the stale row is the backlog gate's.
+	if rows, missing := count("cme", 2); rows != 5 || missing != 2 {
+		t.Fatalf("v2: got rows %d missing %d, want 5 and 2 (v1-only, bare)", rows, missing)
+	}
+	// Another version's sets don't count: only v1-only has a v1 set.
+	if rows, missing := count("cme", 1); rows != 5 || missing != 3 {
+		t.Fatalf("v1: got rows %d missing %d, want 5 and 3 (covered, empty, bare)", rows, missing)
+	}
+	if rows, missing := count("cme-none", 2); rows != 0 || missing != 0 {
+		t.Fatalf("type with no rows: got rows %d missing %d, want 0 and 0", rows, missing)
+	}
+}
+
 func TestListResources_PagesLiveRowsOfTheTypeInIdOrderWithTheirMetadata(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)

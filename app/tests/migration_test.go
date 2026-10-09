@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/theleeeo/laika/app/dsl"
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/core/resource"
@@ -182,8 +183,8 @@ func (t *TestSuite) Test_Migration_MultiVersionLifecycle() {
 // Test_Migration_CutoverReadinessGates walks the pre-cutover readiness check
 // through the migration it is meant to gate: a proposed readVersion bump is
 // refused while the target index is missing, refused while the backfill has
-// not reached doc-count parity, refused while a stale backlog lingers, and
-// admitted once all three hold — then reports in-sync after the cutover.
+// not covered the type, refused while a stale backlog lingers, and admitted
+// once all three hold — then reports in-sync after the cutover.
 func (t *TestSuite) Test_Migration_CutoverReadinessGates() {
 	for _, c := range MigrationResourceConfig {
 		c.ApplyDefaults()
@@ -246,13 +247,16 @@ func (t *TestSuite) Test_Migration_CutoverReadinessGates() {
 	// it (readVersion still 1, so the alias stays on v1).
 	t.setResourceConfig(MigrationResourceConfig)
 
-	// v2 exists but holds none of the pre-migration documents: the parity
-	// gate refuses until the backfill has run.
+	// v2 exists but no pre-migration resource has its edge set: coverage
+	// refuses until the backfill has run, and v2 holds none of the documents.
 	r = check()
 	t.Require().False(r.Ready)
-	parity := gate(r, core.CheckDocParity)
-	t.Require().False(parity.OK)
-	t.Require().Contains(parity.Detail, "3", "the operator must see the doc counts")
+	coverage := gate(r, core.CheckCoverage)
+	t.Require().False(coverage.OK)
+	t.Require().Contains(coverage.Detail, `3 of 3 "m" resources`)
+	docGap := gate(r, core.CheckDocGap)
+	t.Require().False(docGap.OK)
+	t.Require().Contains(docGap.Detail, "m_search_v1 holds 3, m_search_v2 holds 0", "the operator must see the doc counts")
 
 	// Backfill v2 (ADR 0004 step 2).
 	t.Require().NoError(t.idx.RebuildNow(ctx, []core.ResourceSelector{
@@ -260,7 +264,7 @@ func (t *TestSuite) Test_Migration_CutoverReadinessGates() {
 	}))
 	t.worker.Drain(ctx)
 
-	// Parity holds now, but an aged stale mark still blocks the cutover.
+	// Coverage and the gap hold now, but an aged stale mark still blocks the cutover.
 	_, err := t.st.MarkStale(ctx, []model.Resource{{Type: "m", Id: "2"}}, 0)
 	t.Require().NoError(err)
 	_, err = t.pool.Exec(ctx,
@@ -285,6 +289,114 @@ func (t *TestSuite) Test_Migration_CutoverReadinessGates() {
 	r = check()
 	t.Require().True(r.Ready, "%+v", r.Checks)
 	t.Require().Equal(core.AliasInSync, r.Move)
+}
+
+// Test_Migration_CutoverAcceptsAVersionsGap: v2's plan returns nil for 2 and
+// 4, so v2 legitimately holds fewer documents than v1 (ADR 0013). Before the
+// backfill, coverage refuses the cutover even with the gap accepted. The
+// backfill marks 2 and 4 for their nils, and the sweep's build, which runs
+// every plan, settles them with an empty v2 set (seams S40). Coverage then
+// passes, the gap of -2 fails until the operator accepts it for "m", and the
+// accepted check is ready.
+func (t *TestSuite) Test_Migration_CutoverAcceptsAVersionsGap() {
+	for _, c := range MigrationResourceConfig {
+		c.ApplyDefaults()
+	}
+	t.Require().NoError(MigrationResourceConfig.Validate())
+
+	ctx := t.T().Context()
+	esBackend := elasticsearch.New(t.esClient, true)
+	ids := []string{"1", "2", "3", "4", "5"}
+	excluded := map[string]bool{"2": true, "4": true}
+
+	// Pre-migration world: only v1 is configured and serving.
+	v1Only := resource.Configs{{
+		Resource:    "m",
+		Versions:    []resource.VersionConfig{MigrationResourceConfig[0].Versions[0]},
+		ReadVersion: 1,
+	}}
+	for _, c := range v1Only {
+		c.ApplyDefaults()
+	}
+	t.Require().NoError(v1Only.Validate())
+	t.setResourceConfig(v1Only)
+	for _, id := range ids {
+		t.fakeProvider.SetResource("m", id, map[string]any{
+			"id": id, "field1": "orig" + id, "field2": "extra" + id,
+		})
+		t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+			ResourceType: "m", ResourceID: id, Kind: core.ChangeCreated,
+		}))
+	}
+	t.worker.Drain(ctx)
+
+	// v2 added, its plan excluding 2 and 4 by id.
+	t.setResourceConfig(MigrationResourceConfig)
+	plans := dsl.BuildPlansFromConfig(t.fakeProvider, MigrationResourceConfig)
+	for i, p := range plans["m"] {
+		if p.Version == 2 {
+			plans["m"][i].Executer = nilForIDs{inner: p.Executer, ids: excluded}
+		}
+	}
+	x := t.newIndexer(MigrationResourceConfig, core.Config{Plans: plans})
+
+	proposed := *MigrationResourceConfig[0]
+	proposed.ReadVersion = 2
+	proposedCfg := resource.Configs{&proposed}
+	t.Require().NoError(proposedCfg.Validate())
+	check := func(opts core.ReadinessOptions) core.ResourceReadiness {
+		results := core.CheckCutoverReadiness(ctx, esBackend, t.st, proposedCfg, opts)
+		t.Require().Len(results, 1)
+		return results[0]
+	}
+	gate := func(r core.ResourceReadiness, name string) core.ReadinessCheck {
+		for _, c := range r.Checks {
+			if c.Name == name {
+				return c
+			}
+		}
+		t.T().Fatalf("readiness has no %q check: %+v", name, r.Checks)
+		return core.ReadinessCheck{}
+	}
+	accepted := core.ReadinessOptions{AcceptGap: map[string]bool{"m": true}}
+
+	// Before the backfill no resource has v2's answer: accepting the gap
+	// doesn't pass coverage.
+	r := check(accepted)
+	t.Require().False(r.Ready)
+	t.Require().False(gate(r, core.CheckCoverage).OK, "an accepted gap must not pass coverage")
+	t.Require().Contains(gate(r, core.CheckCoverage).Detail, `5 of 5 "m" resources`)
+
+	// Backfill v2, then the sweep builds what the backfill marked for its nils.
+	t.Require().NoError(x.RebuildNow(ctx, []core.ResourceSelector{
+		{ResourceType: "m", Versions: []int{2}},
+	}))
+	t.Require().NoError(x.WaitForIdle(ctx))
+	for id := range excluded {
+		t.Require().NotNil(t.staleSince("m", id), "the backfill must mark %s for its nil", id)
+	}
+	swept, err := x.SweepStale(ctx, 0, 100)
+	t.Require().NoError(err)
+	t.Require().Equal(len(excluded), swept)
+	for _, id := range ids {
+		t.Require().Nil(t.staleSince("m", id), "the sweep must settle %s", id)
+		_, ok := t.docFields(core.IndexName("m", 2), id)
+		t.Require().Equal(!excluded[id], ok, "v2 holds %s only if its plan returns it", id)
+	}
+
+	// Covered, but v2 holds 3 documents to v1's 5: the gap fails until accepted.
+	r = check(core.ReadinessOptions{})
+	t.Require().False(r.Ready)
+	coverage := gate(r, core.CheckCoverage)
+	t.Require().True(coverage.OK, coverage.Detail)
+	docGap := gate(r, core.CheckDocGap)
+	t.Require().False(docGap.OK)
+	t.Require().Contains(docGap.Detail, `m_search_v1 holds 5, m_search_v2 holds 3, of 5 "m" resources (gap -2)`)
+	t.Require().Contains(docGap.Detail, "-accept-gap m")
+
+	r = check(accepted)
+	t.Require().True(r.Ready, "%+v", r.Checks)
+	t.Require().Contains(gate(r, core.CheckDocGap).Detail, "(accepted)")
 }
 
 // Test_Migration_ResumedRebuildWalk aborts a version-targeted v2 backfill at

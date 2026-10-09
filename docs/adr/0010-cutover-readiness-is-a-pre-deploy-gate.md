@@ -1,5 +1,15 @@
 # Cutover readiness is a pre-deploy gate, and backfill waits for the rollout
 
+> **Note (2026-10-09, runbook step L3.9):** built as the Q24 note below
+> decides. `CheckCutoverReadiness` runs alias-state, target-index, coverage,
+> doc-gap and stale-backlog; coverage and doc-gap run on a forward or a
+> backward move, as parity did, and are "not applicable" on any other.
+> Coverage counts through `StaleCounter.CountMissingEdgeSets`.
+> `-count-tolerance` and `ReadinessOptions.CountTolerance` are gone;
+> `-accept-gap` takes a comma-separated list of resource names, rejects one
+> the config doesn't have, and fills `ReadinessOptions.AcceptGap`. Gate 3
+> below, doc-count-parity, no longer exists.
+
 > **Note (2026-10-07, runbook step L2.9):** gate 3's parity assumes lockstep
 > versions, every active version holding the same set of documents. Since
 > [ADR 0013](0013-each-schema-version-decides-its-documents-existence.md) each

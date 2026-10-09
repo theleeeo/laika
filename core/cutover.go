@@ -21,12 +21,16 @@ type CutoverBackend interface {
 }
 
 // StaleCounter is the narrow store surface the readiness check needs: the
-// size and age of one resource type's stale backlog. *postgres.Store
-// implements it.
+// size and age of one resource type's stale backlog, and how much of the type
+// a Schema Version has answered for. *postgres.Store implements it.
 type StaleCounter interface {
 	// CountStale returns how many resources of the type have a stale mark
 	// older than before, and the oldest such mark (zero when count is 0).
 	CountStale(ctx context.Context, resourceType string, before time.Time) (count int, oldest time.Time, err error)
+	// CountMissingEdgeSets returns how many resources of the type have a row
+	// that isn't a tombstone, and how many of those with no stale mark lack
+	// an edge set of the Schema Version.
+	CountMissingEdgeSets(ctx context.Context, resourceType string, schemaVersion int) (rows, missing int, err error)
 }
 
 // DefaultMaxStaleAge is the stale-backlog age ReadinessOptions falls back to.
@@ -36,15 +40,17 @@ const DefaultMaxStaleAge = 10 * time.Minute
 const (
 	CheckAliasState   = "alias-state"
 	CheckTargetIndex  = "target-index"
-	CheckDocParity    = "doc-count-parity"
+	CheckCoverage     = "coverage"
+	CheckDocGap       = "doc-gap"
 	CheckStaleBacklog = "stale-backlog"
 )
 
 // ReadinessOptions tunes the cutover readiness gates.
 type ReadinessOptions struct {
-	// CountTolerance is the absolute doc-count difference between the current
-	// read index and the target index that the parity gate tolerates.
-	CountTolerance int64
+	// AcceptGap names the resource types whose document gap the operator
+	// has verified: the doc-gap gate passes them whatever the gap. It passes
+	// no other gate.
+	AcceptGap map[string]bool
 	// MaxStaleAge fails the stale-backlog gate when any resource of the type
 	// has been stale longer than this. Zero means DefaultMaxStaleAge.
 	MaxStaleAge time.Duration
@@ -79,14 +85,19 @@ type ResourceReadiness struct {
 //  1. alias-state: the current alias target must be assessable. A hand-built
 //     target cannot be reasoned about and fails outright.
 //  2. target-index: the ReadVersion index must exist (gen-mapping bootstraps).
-//  3. doc-count-parity: for a forward or backward move, the current read
-//     index and the target must agree on doc count within CountTolerance. A
-//     gap means the backfill has not finished, writes are failing on one
-//     side, or one version's plan legitimately excludes resources the
-//     other's includes: each version decides its own document's existence
-//     (ADR 0013), and the gate can't tell these apart, so such a cutover
-//     needs a CountTolerance that covers the gap.
-//  4. stale-backlog: no resource of the type may have been stale longer than
+//  3. coverage: for a forward or backward move, every resource row of the
+//     type with no stale mark, tombstones aside, must carry an edge set of
+//     the target's Schema Version. Every build that runs the version's plan
+//     writes one, an empty set for a nil (ADR 0013), so a row without one
+//     hasn't had the version's answer: the backfill hasn't reached it. Stale
+//     rows are the stale-backlog gate's. Nothing passes this gate but the
+//     sets.
+//  4. doc-gap: for a forward or backward move, the target's document count
+//     minus the current read index's. Each version decides its own
+//     document's existence (ADR 0013), so a covered target may still hold a
+//     different set of documents; a gap other than 0 fails unless the type
+//     is in AcceptGap, the operator having verified it.
+//  5. stale-backlog: no resource of the type may have been stale longer than
 //     MaxStaleAge — a caught-up type clears marks within seconds, so an old
 //     mark means an unfinished backfill or unhealthy ingest.
 //
@@ -148,27 +159,47 @@ func CheckCutoverReadiness(ctx context.Context, es CutoverBackend, staleness Sta
 		}
 		pass(CheckTargetIndex, "target index %s exists", r.TargetIndex)
 
-		// Parity only compares two distinct, naming-scheme-owned indices: a
-		// forward or backward move. A create has nothing to compare against;
-		// in-sync would compare the index with itself.
+		// Coverage and the gap gate only a move between two distinct,
+		// naming-scheme-owned indices, forward or backward: a create has no
+		// current read index to compare with, and in-sync has already moved.
 		if r.Move == AliasForward || r.Move == AliasBackward {
+			rows, missing, coverageErr := staleness.CountMissingEdgeSets(ctx, cfg.Resource, cfg.ReadVersion)
+			switch {
+			case coverageErr != nil:
+				fail(CheckCoverage, "count %q resources lacking a v%d edge set: %v", cfg.Resource, cfg.ReadVersion, coverageErr)
+			case missing > 0:
+				fail(CheckCoverage, "%d of %d %q resources with no stale mark lack a v%d edge set — has the backfill finished?",
+					missing, rows, cfg.Resource, cfg.ReadVersion)
+			default:
+				pass(CheckCoverage, "every %q resource with no stale mark has a v%d edge set (%d resources)",
+					cfg.Resource, cfg.ReadVersion, rows)
+			}
+
 			currentCount, err := es.CountDocs(ctx, current)
 			if err != nil {
-				fail(CheckDocParity, "count docs in %s: %v", current, err)
+				fail(CheckDocGap, "count docs in %s: %v", current, err)
 			} else if targetCount, err := es.CountDocs(ctx, r.TargetIndex); err != nil {
-				fail(CheckDocParity, "count docs in %s: %v", r.TargetIndex, err)
+				fail(CheckDocGap, "count docs in %s: %v", r.TargetIndex, err)
 			} else {
-				diff := max(currentCount-targetCount, targetCount-currentCount)
-				detail := fmt.Sprintf("%s has %d docs, %s has %d (diff %d, tolerance %d)",
-					current, currentCount, r.TargetIndex, targetCount, diff, opts.CountTolerance)
-				if diff <= opts.CountTolerance {
-					pass(CheckDocParity, "%s", detail)
-				} else {
-					fail(CheckDocParity, "%s — has the backfill rebuild finished?", detail)
+				gap := targetCount - currentCount
+				ofRows := ""
+				if coverageErr == nil {
+					ofRows = fmt.Sprintf(", of %d %q resources", rows, cfg.Resource)
+				}
+				detail := fmt.Sprintf("%s holds %d, %s holds %d%s (gap %+d)",
+					current, currentCount, r.TargetIndex, targetCount, ofRows, gap)
+				switch {
+				case gap == 0:
+					pass(CheckDocGap, "%s", detail)
+				case opts.AcceptGap[cfg.Resource]:
+					pass(CheckDocGap, "%s (accepted)", detail)
+				default:
+					fail(CheckDocGap, "%s — verify it, then rerun with -accept-gap %s", detail, cfg.Resource)
 				}
 			}
 		} else {
-			pass(CheckDocParity, "not applicable: %s", describeMove(r.Move))
+			pass(CheckCoverage, "not applicable: %s", describeMove(r.Move))
+			pass(CheckDocGap, "not applicable: %s", describeMove(r.Move))
 		}
 
 		count, oldest, err := staleness.CountStale(ctx, cfg.Resource, time.Now().Add(-maxStaleAge))

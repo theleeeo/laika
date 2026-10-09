@@ -1028,3 +1028,24 @@ func (s *Store) CountStale(ctx context.Context, resourceType string, before time
 	}
 	return count, *oldest, nil
 }
+
+// CountMissingEdgeSets returns how many resources of the type have a row that
+// isn't a tombstone, and how many of those with no stale mark have no
+// edge_sets row of the Schema Version — an empty set counts as one. This is
+// core.StaleCounter, the cutover readiness check's coverage gate.
+func (s *Store) CountMissingEdgeSets(ctx context.Context, resourceType string, schemaVersion int) (int, int, error) {
+	var rows, missing int
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*),
+		        count(*) FILTER (WHERE r.stale_since IS NULL AND NOT EXISTS (
+		            SELECT 1 FROM edge_sets e
+		            WHERE e.type = r.type AND e.id = r.id AND e.schema_version = $2))
+		 FROM resources r
+		 WHERE r.type = $1 AND NOT r.deleted`,
+		resourceType, schemaVersion,
+	).Scan(&rows, &missing)
+	if err != nil {
+		return 0, 0, err
+	}
+	return rows, missing, nil
+}

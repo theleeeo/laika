@@ -9,21 +9,21 @@ import (
 	"github.com/theleeeo/laika/projection"
 )
 
-// nilForID wraps a plan's Executer and answers nil for one resource: it runs
-// the plan as it is and replaces each item rooted at id with one without a
-// document, the shape of a plan whose source has no data for it.
-type nilForID struct {
+// nilForIDs wraps a plan's Executer and answers nil for some resources: it
+// runs the plan as it is and replaces each item rooted at one of ids with one
+// without a document, the shape of a plan whose source has no data for it.
+type nilForIDs struct {
 	inner aggregation.Executer[projection.BuildRequest, projection.BuildDoc]
-	id    string
+	ids   map[string]bool
 }
 
-func (e nilForID) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+func (e nilForIDs) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
 	out := make(chan aggregation.ExecutionResult[projection.BuildDoc])
 	go func() {
 		defer close(out)
 		for r := range e.inner.Execute(ctx, req) {
 			for i, item := range r.Items {
-				if item.Root.Id == e.id {
+				if e.ids[item.Root.Id] {
 					r.Items[i] = projection.BuildDoc{Root: item.Root}
 				}
 			}
@@ -61,7 +61,7 @@ func (t *TestSuite) Test_Existence_NilVersionDeletesOnlyItsOwnDocument() {
 	plans := dsl.BuildPlansFromConfig(t.fakeProvider, EdgesVersionedConfig)
 	for i, p := range plans["p"] {
 		if p.Version == 2 {
-			plans["p"][i].Executer = nilForID{inner: p.Executer, id: "X"}
+			plans["p"][i].Executer = nilForIDs{inner: p.Executer, ids: map[string]bool{"X": true}}
 		}
 	}
 	x := t.newIndexer(EdgesVersionedConfig, core.Config{Plans: plans})

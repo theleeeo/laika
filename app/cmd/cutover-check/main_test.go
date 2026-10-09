@@ -6,7 +6,23 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/core"
+	"github.com/theleeeo/laika/core/resource"
 )
+
+func TestParseAcceptGap(t *testing.T) {
+	resources := resource.Configs{{Resource: "a"}, {Resource: "b"}, {Resource: "c"}}
+
+	got, err := parseAcceptGap("a,c", resources)
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"a": true, "c": true}, got)
+
+	got, err = parseAcceptGap("", resources)
+	require.NoError(t, err)
+	require.Empty(t, got, "no flag accepts no gap")
+
+	_, err = parseAcceptGap("a,x", resources)
+	require.ErrorContains(t, err, `"x"`, "a name the config doesn't have must be rejected")
+}
 
 func TestRenderReport_AllReady(t *testing.T) {
 	var sb strings.Builder
@@ -51,7 +67,7 @@ func TestRenderReport_FailedCheckMakesNotReady(t *testing.T) {
 			Move:         core.AliasForward,
 			Ready:        false,
 			Checks: []core.ReadinessCheck{
-				{Name: core.CheckDocParity, OK: false, Detail: "n_search_v1 has 10 docs, n_search_v2 has 4"},
+				{Name: core.CheckDocGap, OK: false, Detail: "n_search_v1 holds 10, n_search_v2 holds 4 (gap -6)"},
 			},
 		},
 	})
@@ -59,7 +75,7 @@ func TestRenderReport_FailedCheckMakesNotReady(t *testing.T) {
 	require.False(t, ready)
 	out := sb.String()
 	require.Contains(t, out, "NOT READY")
-	require.Contains(t, out, "n_search_v1 has 10 docs, n_search_v2 has 4")
+	require.Contains(t, out, "n_search_v1 holds 10, n_search_v2 holds 4 (gap -6)")
 	// The verdict must be visually distinct per check.
 	require.Contains(t, out, "FAIL")
 }

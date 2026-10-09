@@ -1,12 +1,12 @@
 // Command cutover-check runs the read-only readiness gates for a cutover —
 // a readVersion bump in the resource config (ADR 0009). Run it against the
 // live infrastructure with the *proposed* config file before deploying it:
-// exit 0 means every resource's target index exists, its doc count agrees
-// with the current read index within -count-tolerance (the backfill
-// finished; where one version's plan legitimately excludes resources the
-// other's includes, the counts differ by design and need a tolerance that
-// covers the gap, ADR 0013),
-// and the type has no aged stale backlog.
+// exit 0 means every resource's target index exists, every resource of the
+// type with no stale mark has an edge set of the target version (the
+// backfill finished), the target holds as many documents as the current
+// read index or the type is named in -accept-gap (each version decides its
+// own document's existence, ADR 0013, so the operator verifies a gap and
+// accepts it), and the type has no aged stale backlog.
 //
 // The deployed indexer converges the alias unconditionally at startup, so
 // this check is the last gate before the change takes effect. Rerunning it
@@ -21,6 +21,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/theleeeo/laika/app/config"
@@ -37,7 +38,7 @@ func main() {
 	esUser := flag.String("es-user", "", "Elasticsearch username")
 	esPass := flag.String("es-pass", "", "Elasticsearch password")
 	pgAddr := flag.String("pg-addr", "", "Postgres connection string of the relation store (required — the stale-backlog gate reads it)")
-	tolerance := flag.Int64("count-tolerance", 0, "Absolute doc-count difference the parity gate tolerates")
+	acceptGap := flag.String("accept-gap", "", "Comma-separated resource names whose doc-count gap you have verified; the doc-gap gate passes them")
 	maxStaleAge := flag.Duration("max-stale-age", core.DefaultMaxStaleAge, "Fail when any resource of the type has been stale longer than this")
 	asJSON := flag.Bool("json", false, "Emit the report as JSON instead of a human-readable summary")
 	flag.Parse()
@@ -52,6 +53,10 @@ func main() {
 	}
 	if err := resources.Validate(); err != nil {
 		log.Fatalf("invalid resource config: %v", err)
+	}
+	accepted, err := parseAcceptGap(*acceptGap, resources)
+	if err != nil {
+		log.Fatal(err)
 	}
 	if *index != "" {
 		cfg := resources.Get(*index)
@@ -74,7 +79,7 @@ func main() {
 	defer pool.Close()
 
 	results := core.CheckCutoverReadiness(ctx, client, postgres.NewStore(pool), resources,
-		core.ReadinessOptions{CountTolerance: *tolerance, MaxStaleAge: *maxStaleAge})
+		core.ReadinessOptions{AcceptGap: accepted, MaxStaleAge: *maxStaleAge})
 
 	var ready bool
 	if *asJSON {
@@ -94,6 +99,24 @@ func main() {
 	if !ready {
 		os.Exit(1)
 	}
+}
+
+// parseAcceptGap parses -accept-gap's comma-separated resource names into
+// the set ReadinessOptions.AcceptGap takes, rejecting a name the config
+// doesn't have.
+func parseAcceptGap(list string, resources resource.Configs) (map[string]bool, error) {
+	if list == "" {
+		return nil, nil
+	}
+	accepted := make(map[string]bool)
+	for name := range strings.SplitSeq(list, ",") {
+		name = strings.TrimSpace(name)
+		if resources.Get(name) == nil {
+			return nil, fmt.Errorf("-accept-gap: unknown resource %q", name)
+		}
+		accepted[name] = true
+	}
+	return accepted, nil
 }
 
 // renderReport writes a human-readable readiness report and reports whether
