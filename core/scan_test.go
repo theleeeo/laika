@@ -510,9 +510,16 @@ func TestScan_ReferenceChildSearchIsAPlainSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("page 1: %v", err)
 	}
-	// The child's config changes between pages; the child search uses the
-	// current one.
-	if err := idx.SetPlans(nil, scanResources(1, scanProductV1())); err != nil {
+	// Between pages the child moves to a new read version with another
+	// field; the parent's config stays as it was. Page 2's child search uses
+	// the child's current config, not page 1's, nor the parent's pinned one.
+	resources := scanResources(1, scanProductV1())
+	brand := resources.Get("brand")
+	brand.Versions = append(brand.Versions, resource.VersionConfig{
+		Version: 2, Fields: []resource.FieldConfig{{Name: "name"}, {Name: "country"}},
+	})
+	brand.ReadVersion = 2
+	if err := idx.SetPlans(nil, resources); err != nil {
 		t.Fatalf("SetPlans: %v", err)
 	}
 	be.calls = nil
@@ -527,13 +534,14 @@ func TestScan_ReferenceChildSearchIsAPlainSearch(t *testing.T) {
 		}
 	}
 	if child == nil {
-		t.Fatalf("no child search reached the backend: %+v", be.calls)
+		t.Fatalf("no child search reached the child's alias: %+v", be.calls)
 	}
-	if child.req.Scan || child.req.PageToken != "" {
-		t.Fatalf("child search Scan=%v PageToken=%q, want a plain search", child.req.Scan, child.req.PageToken)
+	if child.req.Scan || child.req.PageToken != "" || child.req.Resource != "brand" {
+		t.Fatalf("child search Resource=%q Scan=%v PageToken=%q, want a plain search of brand",
+			child.req.Resource, child.req.Scan, child.req.PageToken)
 	}
-	if child.vc != idx.resources.Get("brand").ReadVersionConfig() {
-		t.Fatal("child search didn't get the child's current read config")
+	if child.vc == nil || child.vc.Version != 2 || len(child.vc.Fields) != 2 || child.vc.Fields[1].Name != "country" {
+		t.Fatalf("child search got config %+v, want brand's current version 2 with field country", child.vc)
 	}
 	if p := be.lastPrimary(t); p.req.PageToken != "cur-1" || !p.req.Scan {
 		t.Fatalf("primary got Scan=%v PageToken=%q", p.req.Scan, p.req.PageToken)
