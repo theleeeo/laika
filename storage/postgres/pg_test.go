@@ -3042,7 +3042,7 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	res := func(id string) model.Resource { return model.Resource{Type: "bbs", Id: id} }
 
 	text := func(s string) *string { return &s }
-	owned, marked, plain, empty, tomb, gone := res("owned"), res("marked"), res("plain"), res("empty"), res("tomb"), res("gone")
+	owned, marked, plain, empty, tomb, gone, twice := res("owned"), res("marked"), res("plain"), res("empty"), res("tomb"), res("gone"), res("twice")
 	// owned: registered with metadata, so marked, changed and claimed; its
 	// owner_since backdated so a renewal would show.
 	register(t, st, core.Registration{Resource: owned, Version: 1, Metadata: meta("o")})
@@ -3053,12 +3053,22 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	seedMetadata(t, empty, text(`{}`))
 	tombstone(t, st, tomb)
 	tombBefore := rowJSON(t, tomb)
+	seedMetadata(t, twice, nil)
+	// gone: listed, then hard-deleted, as a finished delete removes a row.
+	markUnclaimed(t, st, gone)
+	_, _, goneSeq, _, _ := row(t, gone)
+	if _, err := st.DeleteResourceIfSeq(ctx, gone, goneSeq, 0); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, gone) {
+		t.Fatal("setup: gone's row was not hard-deleted")
+	}
 
 	type before struct {
 		buildIdx, staleSeq, changeSeq int64
 		since                         *time.Time
 	}
-	live := []model.Resource{owned, marked, plain, empty}
+	live := []model.Resource{owned, marked, plain, empty, twice}
 	was := map[model.Resource]before{}
 	for _, r := range live {
 		_, b, s, since, _ := row(t, r)
@@ -3066,7 +3076,7 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	}
 	floor := start(t, st)
 
-	in := []model.Resource{marked, gone, owned, tomb, plain, empty}
+	in := []model.Resource{marked, gone, twice, owned, tomb, plain, twice, empty}
 	got, err := st.BeginBuilds(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -3077,8 +3087,15 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	}
 
 	wantMeta := map[model.Resource]map[string]string{owned: meta("o"), marked: {"k": "m"}}
+	// A resource given twice is begun once and answered the same both times.
+	if !reflect.DeepEqual(got[2], got[6]) {
+		t.Fatalf("%v given twice: got %+v and %+v, want the same BuildBegun", twice, got[2], got[6])
+	}
 	seen := map[int64]model.Resource{}
 	for i, r := range in {
+		if i == 6 {
+			continue // twice's second answer, checked equal to its first
+		}
 		b := got[i]
 		if r == gone || r == tomb {
 			if !reflect.DeepEqual(b, core.BuildBegun{}) {
@@ -3115,7 +3132,7 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	// Ownership is left alone: the owned row keeps its token and its
 	// backdated owner_since, the others stay unowned.
 	requireOwner(t, testPool, owned, ownedBy, "after BeginBuilds")
-	for _, r := range []model.Resource{marked, plain, empty} {
+	for _, r := range []model.Resource{marked, plain, empty, twice} {
 		requireOwner(t, testPool, r, owner{}, "after BeginBuilds")
 	}
 	if exists(t, gone) {
