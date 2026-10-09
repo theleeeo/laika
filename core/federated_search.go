@@ -107,7 +107,9 @@ type FederatedSearchResult struct {
 // Config.FederatedSearchMiddlewares). The base handler validates, builds
 // per-index filter groups, and queries the backend; see federatedSearchBase.
 func (idx *Indexer) FederatedSearch(ctx context.Context, req FederatedSearchRequest) (FederatedSearchResponse, error) {
-	return idx.federatedSearchChain(ctx, req)
+	// Federated search has no scan: one started inside a scan's middleware
+	// runs without the scan's state.
+	return idx.federatedSearchChain(withScanState(ctx, nil), req)
 }
 
 // federatedSearchBase runs one query across a caller-supplied set of Resource Types
@@ -271,7 +273,7 @@ func (idx *Indexer) buildIndexFilterGroups(ctx context.Context, resources []stri
 			return nil, fmt.Errorf("%q: %w", name, ErrUnknownResource)
 		}
 
-		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, name, perType[name], scope)
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, r.ReadVersionConfig(), perType[name], scope)
 		if err != nil {
 			return nil, fmt.Errorf("resolve reference filters for %q: %w", name, err)
 		}

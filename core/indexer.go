@@ -143,6 +143,12 @@ type Config struct {
 	// error, mutate the FederatedSearchRequest, and inspect or modify the
 	// response. The chain is composed once at construction.
 	FederatedSearchMiddlewares []FederatedSearchMiddleware
+
+	// ScanMaxAge is how long a scan may run from its first page: a later
+	// page's token older than it is ErrCursorExpired, so a scan can't read
+	// an old snapshot under an old version's scoping indefinitely. Default
+	// one hour; New rejects a negative one.
+	ScanMaxAge time.Duration
 }
 
 // Indexer is the core indexing engine. It receives change notifications,
@@ -190,6 +196,12 @@ type Indexer struct {
 	// registered FederatedSearchMiddlewares wrapped around federatedSearchBase.
 	// When no middlewares are registered it equals federatedSearchBase.
 	federatedSearchChain FederatedSearchHandler
+
+	// scanMaxAge is Config.ScanMaxAge with its default applied.
+	scanMaxAge time.Duration
+	// now is the wall clock a scan's start and age are read from; tests set
+	// it.
+	now func() time.Time
 }
 
 const (
@@ -278,8 +290,18 @@ func New(cfg Config) (*Indexer, error) {
 	idx.temporal = cfg.Temporal
 	idx.taskQueue = taskQueue
 
-	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+2)
+	if cfg.ScanMaxAge < 0 {
+		return nil, fmt.Errorf("scan max age %s is negative", cfg.ScanMaxAge)
+	}
+	idx.scanMaxAge = cfg.ScanMaxAge
+	if idx.scanMaxAge == 0 {
+		idx.scanMaxAge = defaultScanMaxAge
+	}
+	idx.now = time.Now
+
+	mws := make([]SearchMiddleware, 0, len(cfg.SearchMiddlewares)+3)
 	mws = append(mws, cfg.SearchMiddlewares...) // user middleware runs first (outermost); nothing precedes it
+	mws = append(mws, idx.scanPage)             // a scan's checks, fingerprint and token, on the request as the user middlewares leave it
 	mws = append(mws, idx.deriveNestedPath)     // fill NestedPath for denormalized-many relation fields, before referenceResolve strips reference filters
 	mws = append(mws, idx.referenceResolve)     // innermost: route filters by path, run child searches, fold terms
 

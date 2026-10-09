@@ -24,13 +24,12 @@ import (
 // shape can always override the derivation.
 func (idx *Indexer) deriveNestedPath(next SearchHandler) SearchHandler {
 	return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-		cfg := idx.resources.Get(req.Resource)
-		if cfg == nil {
-			return next(ctx, req)
+		vc, err := idx.searchVersionConfig(ctx, req)
+		if err != nil {
+			return SearchResponse{}, err
 		}
-		vc := cfg.ReadVersionConfig()
 		if vc == nil {
-			return next(ctx, req)
+			return next(ctx, req) // unknown resource: searchBase reports it
 		}
 
 		for i := range req.Filters {

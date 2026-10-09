@@ -41,7 +41,14 @@ type referenceTarget struct {
 // without recomposing the search chain.
 func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 	return func(ctx context.Context, req SearchRequest) (SearchResponse, error) {
-		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, req.Resource, req.Filters, req.Scope)
+		vc, err := idx.searchVersionConfig(ctx, req)
+		if err != nil {
+			return SearchResponse{}, err
+		}
+		if vc == nil {
+			return next(ctx, req) // unknown resource: searchBase reports it
+		}
+		resolved, matchedNothing, err := idx.resolveReferenceFilters(ctx, vc, req.Filters, req.Scope)
 		if err != nil {
 			return SearchResponse{}, err
 		}
@@ -76,18 +83,13 @@ func (idx *Indexer) referenceResolve(next SearchHandler) SearchHandler {
 // buildScopedNestedClause in backend/elasticsearch/search.go). A single-tenant
 // child ignores Scope, so passing it through is inert there.
 //
-// A resource with no read version config resolves to its filters unchanged.
-// idx.resources is read at call time so SetPlans updates need no chain rebuild.
-func (idx *Indexer) resolveReferenceFilters(ctx context.Context, resourceName string, filters []Filter, scope string) (resolved []Filter, matchedNothing bool, err error) {
+// vc is the parent's config the filters are routed by: a scan's pinned
+// version, otherwise the read version. Each child search is a plain search of
+// the child's alias with its current read config, never a scan, so its result
+// may change between a scan's pages. idx.resources is read at call time so
+// SetPlans updates need no chain rebuild.
+func (idx *Indexer) resolveReferenceFilters(ctx context.Context, vc *resource.VersionConfig, filters []Filter, scope string) (resolved []Filter, matchedNothing bool, err error) {
 	logger := LoggerFromContext(ctx)
-	cfg := idx.resources.Get(resourceName)
-	if cfg == nil {
-		return filters, false, nil
-	}
-	vc := cfg.ReadVersionConfig()
-	if vc == nil {
-		return filters, false, nil
-	}
 
 	logger.Debug("reference resolve: start", slog.Int("filter_count", len(filters)))
 
