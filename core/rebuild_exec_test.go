@@ -218,6 +218,19 @@ type rebuildRecordingStore struct {
 	// names; the call is still recorded.
 	deleteErrs map[string]error
 
+	// uncovered is, per Schema Version, the rows ListUncovered lists of it;
+	// uncoveredErr fails every ListUncovered, and uncoveredMetadata records
+	// each call's metadata.
+	uncovered         map[int][]ListedResource
+	uncoveredErr      error
+	uncoveredMetadata []map[string]string
+	// notBegun names the ids BeginBuilds doesn't begin; beginBuildsErr
+	// fails every BeginBuilds.
+	notBegun       map[string]bool
+	beginBuildsErr error
+	// markLeases records every MarkStale call's lease, in order.
+	markLeases []time.Duration
+
 	// rows holds each resource's row (see the type's comment).
 	rows map[model.Resource]*rebuildRow
 }
@@ -311,6 +324,7 @@ func (s *rebuildRecordingStore) MarkStale(ctx context.Context, rs []model.Resour
 		err = ctx.Err()
 	}
 	s.mu.Lock()
+	s.markLeases = append(s.markLeases, lease)
 	for _, r := range rs {
 		if key := r.Type + "/" + r.Id; s.markErrs[key] > 0 {
 			s.markErrs[key]--
@@ -3285,10 +3299,63 @@ func TestRebuildAll_FinishMarkFails_NotRebuildMarkedFailuresError(t *testing.T) 
 	}
 }
 
-func (s *rebuildRecordingStore) ListUncovered(context.Context, string, int, map[string]string, string, int) ([]ListedResource, error) {
-	return nil, nil
+// ListUncovered records the call — "ListUncovered:<type>:v<version>:<after>:<limit>",
+// its metadata in uncoveredMetadata — and lists version's rows of uncovered
+// that hold metadata (nil and empty are equal) and whose id sorts after
+// after, up to limit, in id order. The test seeds uncovered as the store
+// would answer: the fake doesn't derive it from the walk's writes.
+// uncoveredErr fails every call.
+func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]ListedResource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, fmt.Sprintf("ListUncovered:%s:v%d:%s:%d", resourceType, schemaVersion, after, limit))
+	s.uncoveredMetadata = append(s.uncoveredMetadata, maps.Clone(metadata))
+	if s.uncoveredErr != nil {
+		return nil, s.uncoveredErr
+	}
+	rows := slices.SortedFunc(slices.Values(s.uncovered[schemaVersion]), func(a, b ListedResource) int {
+		return strings.Compare(a.Id, b.Id)
+	})
+	var out []ListedResource
+	for _, r := range rows {
+		if len(out) == limit {
+			break
+		}
+		if r.Type != resourceType || r.Id <= after || metadataKey(r.Metadata) != metadataKey(metadata) {
+			continue
+		}
+		out = append(out, ListedResource{Resource: r.Resource, Metadata: maps.Clone(r.Metadata)})
+	}
+	return out, nil
 }
 
-func (s *rebuildRecordingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
-	return nil, errors.New("BeginBuilds: not implemented")
+// BeginBuilds records the call — "BeginBuilds:<type>/<id>,…" — and begins
+// each resource as BeginBuild does, one Build Sequence each in input order,
+// but those whose id notBegun names: it answers them with the zero
+// BuildBegun, as the store does a row gone or tombstoned since its listing.
+// It creates no row. beginBuildsErr fails the whole call.
+func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, rs []model.Resource) ([]BuildBegun, error) {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = r.Type + "/" + r.Id
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "BeginBuilds:"+strings.Join(names, ","))
+	if s.beginBuildsErr != nil {
+		return nil, s.beginBuildsErr
+	}
+	out := make([]BuildBegun, len(rs))
+	for i, r := range rs {
+		if s.notBegun[r.Id] {
+			continue
+		}
+		s.buildIdx++
+		var md map[string]string
+		if row, ok := s.rows[r]; ok && len(row.metadata) > 0 {
+			md = maps.Clone(row.metadata)
+		}
+		out[i] = BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42, Start: 100 + s.buildIdx, Metadata: md}
+	}
+	return out, nil
 }
