@@ -65,18 +65,30 @@ type Plan struct {
 	// order, and fails where that fetch would fail — as a fetch with no
 	// actor does in a source that needs one. It may use ids as it likes,
 	// filtering them in place included: the caller doesn't read them back.
-	// The reverse sweep (core.Indexer.ReverseSweepNow) calls it with one
-	// actor's ids at a time and marks each id it doesn't return for an owned
-	// build, which rebuilds or deletes it, so a probe that misses an id its
-	// root fetch would find costs a needless build, and one that returns an
-	// id its root fetch would not find misses a delete. Write it beside the
-	// plan, on the clients its root fetch uses: a by-ids call where the
-	// source has one, a call per id otherwise. An error fails the whole call;
-	// nothing of it is used. The sweep uses the first of a type's plans that
-	// has a Probe (ADR 0012), and it answers for its own Schema Version only,
-	// since each version's plan decides its own document's existence
-	// (ADR 0013): an id its version excludes is a suspect at every run, and
-	// an id only another version's plan stops returning is never one.
+	// It answers for its own Schema Version only, since each version's plan
+	// decides its own document's existence (ADR 0013), so it applies its
+	// version's exclusions as the root fetch does: an id the version
+	// excludes is one it doesn't return. Write it beside the plan, on the
+	// clients its root fetch uses: a by-ids call where the source has one, a
+	// call per id otherwise. An error fails the whole call; nothing of it is
+	// used. Two callers ask it:
+	//
+	//   - The reverse sweep (core.Indexer.ReverseSweepNow) calls the first of
+	//     a type's plans that has a Probe (ADR 0012) with one actor's ids at a
+	//     time and marks each id it doesn't return for an owned build, which
+	//     rebuilds or deletes it, so a probe that misses an id its root fetch
+	//     would find costs a needless build, and one that returns an id its
+	//     root fetch would not find misses a delete. An id its version
+	//     excludes is a suspect at every run, and an id only another
+	//     version's plan stops returning is never one.
+	//   - A whole-type backfill that selects versions (core.ResourceSelector.
+	//     Versions) calls each selected version's Probe, a page at a time
+	//     with the backfill's metadata, about the rows its listing left out
+	//     (ADR 0013's Q24 note): an id it doesn't return is one the version
+	//     excludes, whose document of the version is deleted and edge set
+	//     emptied without a build; an id it returns is marked for the sweep.
+	//     A probe that misses an id its root fetch would find deletes that
+	//     version's document until a later build of the resource writes it.
 	Probe func(ctx context.Context, ids []string, metadata map[string]string) (present []string, err error)
 }
 

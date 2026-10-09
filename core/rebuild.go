@@ -17,7 +17,14 @@ type ResourceSelector struct {
 	// document (ADR 0013). A rebuild that leaves out a version with an
 	// executing plan never removes a resource's row: a resource its plans all
 	// find gone loses their versions' documents and is left marked stale for
-	// the sweep, whose build runs every plan and decides the row.
+	// the sweep, whose build runs every plan and decides the row. Such a
+	// rebuild of the whole type (no ResourceIDs), once its walk has
+	// finished, asks each selected version's plan's Probe, a page at a time,
+	// about the type's rows its listing left without an edge set of the
+	// version that hold Metadata: an id the probe leaves out loses that
+	// version's document and edge set, unmarked; an id it returns is marked
+	// stale for the sweep. A selected version without a Probe is skipped
+	// (ADR 0013's Q24 note).
 	Versions    []int
 	ResourceIDs []string
 	// Metadata is the rebuild's own fetch context (e.g. the acting tenant),
