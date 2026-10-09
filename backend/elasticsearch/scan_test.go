@@ -50,12 +50,14 @@ type scanReply struct {
 	body   string
 }
 
-// scanTransport is a mock Elasticsearch that answers by endpoint — opening a
-// point in time (POST /<index>/_pit), searching (/_search), closing a point in
-// time (DELETE /_pit) — each from its own queue of replies, the last of which
-// repeats, and records every request in order.
+// scanTransport is a mock Elasticsearch that answers by endpoint — the
+// cluster info (GET /), opening a point in time (POST /<index>/_pit),
+// searching (/_search), closing a point in time (DELETE /_pit) — each from its
+// own queue of replies, the last of which repeats, and records every request
+// in order. With no info replies queued, GET / answers a supported version.
 type scanTransport struct {
 	t      *testing.T
+	info   []scanReply
 	open   []scanReply
 	search []scanReply
 	close  []scanReply
@@ -84,6 +86,12 @@ func (st *scanTransport) client(opts ...Option) *Client {
 		st.calls = append(st.calls, scanCall{Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(), Body: body})
 		var reply scanReply
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/":
+			if len(st.info) == 0 {
+				reply = infoReply("8.19.0")
+			} else {
+				reply = st.next(&st.info, "cluster info")
+			}
 		case r.Method == http.MethodDelete && r.URL.Path == "/_pit":
 			reply = st.next(&st.close, "close point in time")
 		case strings.HasSuffix(r.URL.Path, "/_pit"):
@@ -119,6 +127,17 @@ func (st *scanTransport) callsTo(method, suffix string) []scanCall {
 	return out
 }
 
+// infoCalls returns the recorded GET / requests.
+func (st *scanTransport) infoCalls() []scanCall {
+	var out []scanCall
+	for _, c := range st.calls {
+		if c.Method == http.MethodGet && c.Path == "/" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 func (st *scanTransport) searches() []scanCall { return st.callsTo("", "/_search") }
 
 func (st *scanTransport) closes() []scanCall { return st.callsTo(http.MethodDelete, "/_pit") }
@@ -126,6 +145,12 @@ func (st *scanTransport) closes() []scanCall { return st.callsTo(http.MethodDele
 const pinnedIndex = "users_search_v3"
 
 func ok(body string) scanReply { return scanReply{status: http.StatusOK, body: body} }
+
+// infoReply renders GET / of a cluster running version.
+func infoReply(version string) scanReply {
+	return ok(`{"name":"node-1","cluster_name":"laika","version":{"number":"` + version +
+		`","lucene_version":"9.12.0"},"tagline":"You Know, for Search"}`)
+}
 
 var closedReply = ok(`{"succeeded":true,"num_freed":1}`)
 
@@ -465,4 +490,105 @@ func TestScan_EmptyLaterPageClosesPointInTime(t *testing.T) {
 	require.Empty(t, resp.Hits)
 	require.Empty(t, resp.NextPageToken)
 	require.Len(t, st.closes(), 1)
+}
+
+// Before Elasticsearch 8.11.0 (Lucene 9.7, apache/lucene#12521) a
+// search_after page on a date, long or double sort drops documents missing
+// the sort field, so a scan would end short as an empty success: a scan
+// refuses such a cluster, on any page, before it opens or searches anything.
+func TestScan_RefusesClusterBefore8_11(t *testing.T) {
+	laterToken := encodeScanCursor(scanCursor{PITID: "pit-1", SearchAfter: jsontext.Value(`["a",0]`), Total: 3})
+	for _, version := range []string{"8.9.0", "8.10.4", "8.10.0-SNAPSHOT", "8.0.0", "7.17.9", "banana", "8", "8.x.1", ""} {
+		for page, token := range map[string]string{"first page": "", "later page": laterToken} {
+			t.Run(version+"/"+page, func(t *testing.T) {
+				st := &scanTransport{t: t, info: []scanReply{infoReply(version)}}
+				resp, err := st.client().Search(context.Background(),
+					core.SearchRequest{Scan: true, PageSize: 10, PageToken: token}, pinnedIndex, vcFlatOnly())
+				require.ErrorIs(t, err, core.ErrScanFault)
+				require.Empty(t, resp.Hits)
+				require.Len(t, st.infoCalls(), 1)
+				require.Len(t, st.calls, 1, "no point in time is opened and nothing searched")
+			})
+		}
+	}
+}
+
+func TestScan_ProceedsOn8_11AndLater(t *testing.T) {
+	for _, version := range []string{"8.11.0", "8.11.0-SNAPSHOT", "8.19.0", "9.0.0"} {
+		t.Run(version, func(t *testing.T) {
+			st := &scanTransport{t: t,
+				info:   []scanReply{infoReply(version)},
+				open:   []scanReply{openReply("pit-1")},
+				search: []scanReply{ok(scanPage("pit-1", 0, 0))},
+				close:  []scanReply{closedReply},
+			}
+			_, err := st.client().Search(context.Background(),
+				core.SearchRequest{Scan: true, PageSize: 10}, pinnedIndex, vcFlatOnly())
+			require.NoError(t, err)
+			require.Len(t, st.callsTo(http.MethodPost, "/_pit"), 1)
+			require.Len(t, st.searches(), 1)
+		})
+	}
+}
+
+func TestScan_LooksUpClusterVersionOnce(t *testing.T) {
+	st := &scanTransport{t: t,
+		open: []scanReply{openReply("pit-1")},
+		search: []scanReply{ok(scanPage("pit-1", 4, 0,
+			scanHit(pinnedIndex, "a", `["a",0]`), scanHit(pinnedIndex, "b", `["b",1]`)))},
+	}
+	c := st.client()
+	ctx := context.Background()
+	req := core.SearchRequest{Scan: true, PageSize: 2}
+
+	page1, err := c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+	require.NoError(t, err)
+	req.PageToken = page1.NextPageToken
+	_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+	require.NoError(t, err)
+	_, err = c.Search(ctx, core.SearchRequest{Scan: true, PageSize: 2}, pinnedIndex, vcFlatOnly())
+	require.NoError(t, err)
+
+	require.Len(t, st.searches(), 3)
+	require.Len(t, st.infoCalls(), 1, "the version is looked up once and cached")
+}
+
+func TestScan_FailedVersionLookupIsRetried(t *testing.T) {
+	st := &scanTransport{t: t,
+		info:   []scanReply{{http.StatusInternalServerError, `{"error":"oops"}`}, infoReply("8.19.0")},
+		open:   []scanReply{openReply("pit-1")},
+		search: []scanReply{ok(scanPage("pit-1", 0, 0))},
+		close:  []scanReply{closedReply},
+	}
+	c := st.client()
+	ctx := context.Background()
+	req := core.SearchRequest{Scan: true, PageSize: 10}
+
+	_, err := c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+	require.Error(t, err)
+	require.Empty(t, st.callsTo(http.MethodPost, "/_pit"), "a scan without a known version opens nothing")
+	require.Empty(t, st.searches())
+
+	_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+	require.NoError(t, err, "a failed lookup isn't cached")
+	require.Len(t, st.infoCalls(), 2)
+	require.Len(t, st.searches(), 1)
+
+	_, err = c.Search(ctx, req, pinnedIndex, vcFlatOnly())
+	require.NoError(t, err)
+	require.Len(t, st.infoCalls(), 2, "a successful lookup is")
+}
+
+func TestSearch_NonScanSearchesNeverLookUpClusterVersion(t *testing.T) {
+	st := &scanTransport{t: t, search: []scanReply{ok(scanPage("", 0, 0))}}
+	c := st.client()
+	ctx := context.Background()
+
+	_, err := c.Search(ctx, core.SearchRequest{PageSize: 10}, "users_search", vcFlatOnly())
+	require.NoError(t, err)
+	_, err = c.FederatedSearch(ctx, core.FederatedSearchParams{PageSize: 10, FilterGroups: fedGroups()})
+	require.NoError(t, err)
+
+	require.Len(t, st.searches(), 2)
+	require.Empty(t, st.infoCalls())
 }

@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/elastic/go-elasticsearch/v8/esapi"
@@ -115,6 +117,10 @@ func (c *Client) scan(ctx context.Context, req core.SearchRequest, index string,
 		return core.SearchResponse{}, err
 	}
 	boolQ["filter"] = append(boolQ["filter"].([]any), map[string]any{"term": map[string]any{"_index": index}})
+
+	if err := c.checkScanSupported(ctx); err != nil {
+		return core.SearchResponse{}, err
+	}
 
 	keepAlive := fmt.Sprintf("%dms", c.scanKeepAlive.Milliseconds())
 	if first {
@@ -275,4 +281,88 @@ func (c *Client) closePointInTime(ctx context.Context, id string) error {
 		return fmt.Errorf("close point in time: %s %s", res.Status(), raw)
 	}
 	return nil
+}
+
+// minScanMajor and minScanMinor are the oldest Elasticsearch a scan runs on,
+// 8.11.0. Before it (Lucene 9.7, apache/lucene#12521, fixed in Lucene 9.8 by
+// apache/lucene#12520) a search_after page on a date, long or double sort
+// drops the documents missing the sort field, so a scan would end short as an
+// empty success.
+const minScanMajor, minScanMinor = 8, 11
+
+// checkScanSupported returns core.ErrScanFault when the cluster runs an
+// Elasticsearch older than 8.11.0, or one whose version doesn't parse. A
+// failed version lookup is returned as it is.
+func (c *Client) checkScanSupported(ctx context.Context) error {
+	version, err := c.lookupClusterVersion(ctx)
+	if err != nil {
+		return err
+	}
+	major, minor, ok := parseMajorMinor(version)
+	if !ok {
+		return fmt.Errorf("%w: cluster version %q doesn't parse; a scan needs Elasticsearch %d.%d.0 or later",
+			core.ErrScanFault, version, minScanMajor, minScanMinor)
+	}
+	if major < minScanMajor || (major == minScanMajor && minor < minScanMinor) {
+		return fmt.Errorf("%w: cluster runs Elasticsearch %s; a scan needs %d.%d.0 or later, since before it "+
+			"(Lucene 9.7, apache/lucene#12521) a search_after page on a date, long or double sort drops documents missing the sort field",
+			core.ErrScanFault, version, minScanMajor, minScanMinor)
+	}
+	return nil
+}
+
+// lookupClusterVersion returns the cluster's version.number from GET /,
+// asked once and cached; a failed lookup isn't cached, so the next scan asks
+// again. Concurrent first scans may each ask; they get the same answer.
+func (c *Client) lookupClusterVersion(ctx context.Context) (string, error) {
+	c.clusterVersionMu.Lock()
+	version, known := c.clusterVersion, c.clusterVersionKnown
+	c.clusterVersionMu.Unlock()
+	if known {
+		return version, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, singleSearchTimeout)
+	defer cancel()
+	res, err := c.es.Info(c.es.Info.WithContext(ctx))
+	if err != nil {
+		return "", fmt.Errorf("look up cluster version: %w", err)
+	}
+	defer res.Body.Close()
+	if res.IsError() {
+		raw, _ := io.ReadAll(res.Body)
+		return "", fmt.Errorf("look up cluster version: %s %s", res.Status(), raw)
+	}
+	var decoded struct {
+		Version struct {
+			Number string `json:"number"`
+		} `json:"version"`
+	}
+	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
+		return "", fmt.Errorf("decode cluster version: %w", err)
+	}
+
+	// Cached even when it doesn't parse: checkScanSupported refuses it, and
+	// asking again wouldn't change the cluster's answer.
+	c.clusterVersionMu.Lock()
+	c.clusterVersion, c.clusterVersionKnown = decoded.Version.Number, true
+	c.clusterVersionMu.Unlock()
+	return decoded.Version.Number, nil
+}
+
+// parseMajorMinor parses the major and minor of a version like "8.19.0" or
+// "8.11.0-SNAPSHOT".
+func parseMajorMinor(version string) (major, minor int, ok bool) {
+	majorStr, rest, found := strings.Cut(version, ".")
+	if !found {
+		return 0, 0, false
+	}
+	minorStr, _, _ := strings.Cut(rest, ".")
+	minorStr, _, _ = strings.Cut(minorStr, "-")
+	major, err1 := strconv.Atoi(majorStr)
+	minor, err2 := strconv.Atoi(minorStr)
+	if err1 != nil || err2 != nil || major < 0 || minor < 0 {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
