@@ -216,6 +216,9 @@ const (
 	scanTieEnd    = scanLowEnd + scanLargeN/2 // 1,650
 	scanHighEnd   = scanLargeN - 100          // 2,400
 	scanLargePage = 1000
+	// scanMissingPage puts the scan's last page boundary, at 2,460, inside
+	// the block of the 100 documents without the sort field.
+	scanMissingPage = 820
 )
 
 // scanLargeDoc is one large-fixture document's sort values; a nil one is
@@ -338,7 +341,7 @@ func (t *TestSuite) Test_Scan_LargeSortedWithTiesAndMissing() {
 
 	rank := func(d scanLargeDoc) *string { return d.rank }
 	stamp := func(d scanLargeDoc) *time.Time { return d.stamp }
-	cases := []struct {
+	sorts := []struct {
 		name string
 		sort core.SortOption
 		want []string
@@ -351,33 +354,51 @@ func (t *TestSuite) Test_Scan_LargeSortedWithTiesAndMissing() {
 			expectedOrder(docs, stamp, time.Time.Compare, true)},
 	}
 
-	for _, c := range cases {
-		t.Run(c.name, func() {
-			// The fixture is what the case means it to be: a plain paged
-			// search in the same sort, with no writes going on, returns the
-			// expected order.
-			t.Require().Equal(c.want, t.pagedOrder(c.sort, scanLargeN),
-				"the paged search's order is the expected one")
+	for _, c := range sorts {
+		// The fixture is what the case means it to be: a plain paged search
+		// in the same sort, with no writes going on, returns the expected
+		// order.
+		t.Require().Equalf(c.want, t.pagedOrder(c.sort, scanLargeN),
+			"%s: the paged search's order is the expected one", c.name)
+	}
 
-			pages := t.scanToEnd(core.SearchRequest{
-				Resource: "s",
-				Sort:     []core.SortOption{c.sort},
-				PageSize: scanLargePage,
-			}, nil)
+	// Each sort is scanned at two page sizes: 1,000, whose boundaries fall
+	// inside the tied block and among the distinct high values, and 820,
+	// whose last boundary, at 2,460, falls inside the block of documents
+	// without the field.
+	for _, pageSize := range []int{scanLargePage, scanMissingPage} {
+		for _, c := range sorts {
+			t.Run(fmt.Sprintf("%s, %d a page", c.name, pageSize), func() {
+				pages := t.scanToEnd(core.SearchRequest{
+					Resource: "s",
+					Sort:     []core.SortOption{c.sort},
+					PageSize: int32(pageSize),
+				}, nil)
 
-			t.Require().Equalf(3, len(pages), "a scan of %d a page over %d documents takes three pages", scanLargePage, scanLargeN)
-			for i, want := range []int{1000, 1000, 500} {
-				t.Require().Lenf(pages[i].ids, want, "page %d's hits", i+1)
-				t.Require().EqualValuesf(scanLargeN, pages[i].total, "page %d's total", i+1)
-			}
-			t.Require().NotEmpty(pages[0].next, "page 1's token")
-			t.Require().NotEmpty(pages[1].next, "page 2's token")
-			t.Require().Empty(pages[2].next, "page 3, the last, has no token")
+				var wantLens []int
+				for left := scanLargeN; left > 0; left -= pageSize {
+					wantLens = append(wantLens, min(pageSize, left))
+				}
+				gotLens := make([]int, len(pages))
+				for i, p := range pages {
+					gotLens[i] = len(p.ids)
+				}
+				t.Require().Equalf(wantLens, gotLens,
+					"a scan of %d a page over %d documents: each page's hits", pageSize, scanLargeN)
+				for i, p := range pages {
+					t.Require().EqualValuesf(scanLargeN, p.total, "page %d's total", i+1)
+					if i < len(pages)-1 {
+						t.Require().NotEmptyf(p.next, "page %d's token", i+1)
+					} else {
+						t.Require().Emptyf(p.next, "page %d, the last, has no token", i+1)
+					}
+				}
 
-			got := scanIDs(pages)
-			t.requireExactlyOnce(c.want, got, c.name)
-			t.Require().Equal(c.want, got, "the scan returns its hits in sort order, resource_id last")
-		})
+				got := scanIDs(pages)
+				t.requireExactlyOnce(c.want, got, c.name)
+				t.Require().Equal(c.want, got, "the scan returns its hits in sort order, resource_id last")
+			})
+		}
 	}
 }
 
