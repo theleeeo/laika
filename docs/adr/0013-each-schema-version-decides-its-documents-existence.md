@@ -14,9 +14,12 @@ ADR 0002's L2.6 and L2.7 notes. Built by runbook step L2.9._
 > predicate the cutover check's coverage counts with, and takes each page's
 > Build Sequences in one statement with `Store.BeginBuilds`, which begins
 > only rows that still exist and aren't tombstones: a row gone since the
-> listing is neither probed nor written. An excluded id's empty edge set is
-> written by a `ReplaceEdges` that declares nothing, so no other version's
-> set is touched. A failed probe, delete, edge write or mark leaves its ids
+> listing is neither probed nor written. Nor is a row whose metadata changed
+> since the listing, as `BeginBuilds` reads it: a registration changed it, and
+> that registration's build, which fetches with it, decides the row, so the
+> probe never answers for metadata the row no longer holds. An excluded id's
+> empty edge set is written by a `ReplaceEdges` that declares nothing, so no
+> other version's set is touched. A failed probe, delete, edge write or mark leaves its ids
 > uncovered for the next backfill and doesn't fail the walk; a failed listing
 > or begin fails the rebuild, which `RunRebuild` retries. The pass keeps no
 > cursor, so a resumed attempt runs it whole again.
