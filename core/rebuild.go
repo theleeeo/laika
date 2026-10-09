@@ -234,6 +234,16 @@ func (w *walkPacer) pageSize() int {
 	return w.pacing.PageSize
 }
 
+// startPage starts a page's clock without waiting: a paced probe pass
+// (Indexer.probeUncovered) calls it before its first page, which follows no
+// page of the pass, and beforePage before each later one. Unpaced, it does
+// nothing.
+func (w *walkPacer) startPage() {
+	if w.pacing != nil {
+		w.pageStart = time.Now()
+	}
+}
+
 // beforePage runs before the walk takes a page: before a plan's Execute,
 // which may fetch its first page at once, and after a page that has a next.
 // It first flushes the walk's pending chunk, so no id the walk has begun —

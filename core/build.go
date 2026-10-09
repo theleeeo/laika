@@ -706,19 +706,21 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 	// A walk that runs fewer than every plan with an Executer walked only
 	// its versions' listings: it asks each one's Probe about the rows its
 	// listing left out (probeUncovered). Its failures aren't the walk's
-	// (fl.failed); a failed listing or begin fails the rebuild, retryably.
+	// (fl.failed); a failed listing or begin fails the rebuild, retryably,
+	// logging what the walk and the pass did until then.
 	attrs := []any{slog.Int("failed", fl.failed)}
 	if !fl.mayDelete {
-		counts, err := idx.probeUncovered(ctx, params, plans, pacer)
-		if err != nil {
-			return err
-		}
+		counts, err := idx.probeUncovered(ctx, params, plans)
 		if len(counts) > 0 {
 			pass := make([]any, len(counts))
 			for i, c := range counts {
 				pass[i] = c.logAttr()
 			}
 			attrs = append(attrs, slog.Group("probe_pass", pass...))
+		}
+		if err != nil {
+			logger.Warn(probePassFailedMsg, append(attrs, slog.String("error", err.Error()))...)
+			return err
 		}
 	}
 

@@ -15,6 +15,11 @@ import (
 // DSL plan lists when BuildRequest.PageSize is 0.
 const defaultProbePassPageSize = 100
 
+// probePassFailedMsg is the Warn a rebuild logs, in place of "rebuild
+// complete", when its probe pass ends with an error: the walk's failures and
+// what the pass did until then.
+const probePassFailedMsg = "rebuild walk complete; its probe pass failed"
+
 // probePassCounts is what a probe pass did for one Schema Version.
 type probePassCounts struct {
 	version int
@@ -53,8 +58,10 @@ func (c probePassCounts) logAttr() slog.Attr {
 // tombstones, have no stale mark, have no edge set of the version, and hold
 // the walk's metadata (Store.ListUncovered), in pages of the walk's page size
 // — the pacing's, defaultProbePassPageSize when it has none — ending after a
-// short page. A paced walk paces each page as its own (walkPacer.beforePage).
-// Each page:
+// short page. A paced walk paces the pass's pages as its own: the first page
+// of each version's pass follows no page of the pass and starts at once, and
+// each later one waits as walkPacer.beforePage does — after a full page, so
+// it waits too before a listing that comes back empty. Each page:
 //
 //   - Begins its rows in one statement (Store.BeginBuilds), which takes each
 //     one's Build Sequence before the probe, as a build takes it before its
@@ -80,7 +87,10 @@ func (c probePassCounts) logAttr() slog.Attr {
 //
 // No lock is held across the probe: BeginBuilds is one statement and the
 // listing locks nothing.
-func (idx *Indexer) probeUncovered(ctx context.Context, params RebuildArgs, plans []projection.Plan, pacer *walkPacer) ([]probePassCounts, error) {
+func (idx *Indexer) probeUncovered(ctx context.Context, params RebuildArgs, plans []projection.Plan) ([]probePassCounts, error) {
+	// The walk has finished: nothing is pending, so a wait has nothing to
+	// flush.
+	pacer := &walkPacer{idx: idx, pacing: params.Pacing, flush: func(context.Context) error { return nil }}
 	pageSize := pacer.pageSize()
 	if pageSize <= 0 {
 		pageSize = defaultProbePassPageSize
@@ -92,6 +102,8 @@ func (idx *Indexer) probeUncovered(ctx context.Context, params RebuildArgs, plan
 
 	var all []probePassCounts
 	for _, plan := range plans {
+		// A plan without an Executer runs in no walk: no listing of it ran,
+		// so it left out nothing to ask its Probe about.
 		if plan.Executer == nil {
 			continue
 		}
@@ -114,13 +126,8 @@ func (idx *Indexer) probeUncovered(ctx context.Context, params RebuildArgs, plan
 // counting into counts.
 func (idx *Indexer) probeVersionUncovered(ctx context.Context, resourceType string, plan projection.Plan, md map[string]string, pageSize int, pacer *walkPacer, counts *probePassCounts) error {
 	after := ""
+	pacer.startPage()
 	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := pacer.beforePage(ctx); err != nil {
-			return err
-		}
 		page, err := idx.st.ListUncovered(ctx, resourceType, plan.Version, md, after, pageSize)
 		if err != nil {
 			return fmt.Errorf("listing after %q: %w", after, err)
@@ -135,6 +142,14 @@ func (idx *Indexer) probeVersionUncovered(ctx context.Context, resourceType stri
 			return nil
 		}
 		after = page[len(page)-1].Id
+		// Another page follows a full one — though its listing may come back
+		// empty: a ctx that ended stops the pass, and a paced one waits.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := pacer.beforePage(ctx); err != nil {
+			return err
+		}
 	}
 }
 

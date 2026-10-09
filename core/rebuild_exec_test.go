@@ -219,10 +219,12 @@ type rebuildRecordingStore struct {
 	deleteErrs map[string]error
 
 	// uncovered is, per Schema Version, the rows ListUncovered lists of it;
-	// uncoveredErr fails every ListUncovered, and uncoveredMetadata records
+	// uncoveredErr fails every ListUncovered from the uncoveredErrFrom-th
+	// call on (1-based; 0 fails every call), and uncoveredMetadata records
 	// each call's metadata.
 	uncovered         map[int][]ListedResource
 	uncoveredErr      error
+	uncoveredErrFrom  int
 	uncoveredMetadata []map[string]string
 	// notBegun names the ids BeginBuilds doesn't begin; beginBuildsErr
 	// fails every BeginBuilds.
@@ -3303,14 +3305,15 @@ func TestRebuildAll_FinishMarkFails_NotRebuildMarkedFailuresError(t *testing.T) 
 // its metadata in uncoveredMetadata — and lists version's rows of uncovered
 // that hold metadata (nil and empty are equal) and whose id sorts after
 // after, up to limit, in id order. The test seeds uncovered as the store
-// would answer: the fake doesn't derive it from the walk's writes.
-// uncoveredErr fails every call.
+// would answer: the fake doesn't derive it from the walk's writes. It is
+// blind to ctx, so a pass that starts after a cancellation still records its
+// listing. uncoveredErr fails the calls uncoveredErrFrom names.
 func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]ListedResource, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, fmt.Sprintf("ListUncovered:%s:v%d:%s:%d", resourceType, schemaVersion, after, limit))
 	s.uncoveredMetadata = append(s.uncoveredMetadata, maps.Clone(metadata))
-	if s.uncoveredErr != nil {
+	if s.uncoveredErr != nil && len(s.uncoveredMetadata) >= s.uncoveredErrFrom {
 		return nil, s.uncoveredErr
 	}
 	rows := slices.SortedFunc(slices.Values(s.uncovered[schemaVersion]), func(a, b ListedResource) int {

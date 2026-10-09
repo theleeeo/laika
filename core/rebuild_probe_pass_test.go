@@ -92,8 +92,14 @@ func walkOf(ids ...string) *staticExecuter {
 // complete" log carries, and whether it carries them.
 func passCounts(t *testing.T, logs *capturedLogs, version int) (map[string]int, bool) {
 	t.Helper()
+	return passCountsIn(t, logs, "rebuild complete", version)
+}
+
+// passCountsIn is passCounts of the log msg.
+func passCountsIn(t *testing.T, logs *capturedLogs, msg string, version int) (map[string]int, bool) {
+	t.Helper()
 	for _, rec := range logs.records(t) {
-		if rec["msg"] != "rebuild complete" {
+		if rec["msg"] != msg {
 			continue
 		}
 		pass, _ := rec["probe_pass"].(map[string]any)
@@ -107,7 +113,7 @@ func passCounts(t *testing.T, logs *capturedLogs, version int) (map[string]int, 
 		}
 		return out, true
 	}
-	t.Fatalf("no \"rebuild complete\" log: %s", logs.buf.String())
+	t.Fatalf("no %q log: %s", msg, logs.buf.String())
 	return nil, false
 }
 
@@ -417,6 +423,64 @@ func TestRebuildAll_VersionSelected_ProbePass_FailedListingOrBegin_FailsTheRebui
 	}
 }
 
+// A pass that fails after serving a page still reports what it did, with the
+// walk's failures, at Warn before the rebuild returns its error.
+func TestRebuildAll_VersionSelected_ProbePass_FailedLaterListing_LogsThePartialCounts(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	st := &rebuildRecordingStore{
+		uncovered:    map[int][]ListedResource{2: uncoveredRows(nil, "X", "Y")},
+		uncoveredErr: errors.New("pg down"), uncoveredErrFrom: 2,
+	}
+	es := &captureBackend{}
+	sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 1}}
+	err := probePassRebuild(t.Context(), t, st, es, sel, map[int]*fakeProbe{2: probeReturning()}, walkOf("1"), walkOf("1"))
+	if err == nil || !strings.Contains(err.Error(), "pg down") {
+		t.Fatalf("the rebuild must return the pass's error, got %v", err)
+	}
+	got, ok := passCountsIn(t, logs, probePassFailedMsg, 2)
+	if !ok || !maps.Equal(got, map[string]int{"asked": 1, "excluded": 1, "marked": 0, "failed": 0}) {
+		t.Fatalf("the failed pass must log the first page's counts, got %v", got)
+	}
+	for _, rec := range logs.records(t) {
+		if rec["msg"] == probePassFailedMsg {
+			if rec["level"] != "WARN" || rec["failed"] != float64(0) || !strings.Contains(fmt.Sprint(rec["error"]), "pg down") {
+				t.Fatalf("the failed pass's log must be a Warn with the walk's failures and the error, got %v", rec)
+			}
+		}
+		if rec["msg"] == "rebuild complete" {
+			t.Fatalf("a rebuild whose pass failed isn't complete: %v", rec)
+		}
+	}
+}
+
+// A paced pass paces its own pages: its first page follows no page of the
+// pass and starts at once, and each later one waits out the rest of the
+// previous page's PageInterval.
+func TestRebuildAll_VersionSelected_ProbePass_PacesOnlyBetweenItsOwnPages(t *testing.T) {
+	t.Run("one page: no wait", func(t *testing.T) {
+		st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(nil, "X")}}
+		sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 2, PageInterval: 2 * time.Second}}
+		start := time.Now()
+		if err := probePassRebuild(t.Context(), t, st, &captureBackend{}, sel, map[int]*fakeProbe{2: probeReturning()}, walkOf("1"), walkOf("1")); err != nil {
+			t.Fatal(err)
+		}
+		if took := time.Since(start); took > time.Second {
+			t.Fatalf("a pass of one page must not wait, took %v", took)
+		}
+	})
+	t.Run("two pages: the second waits", func(t *testing.T) {
+		st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(nil, "X", "Y", "Z")}}
+		sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 2, PageInterval: 300 * time.Millisecond}}
+		start := time.Now()
+		if err := probePassRebuild(t.Context(), t, st, &captureBackend{}, sel, map[int]*fakeProbe{2: probeReturning()}, walkOf("1"), walkOf("1")); err != nil {
+			t.Fatal(err)
+		}
+		if took := time.Since(start); took < 300*time.Millisecond {
+			t.Fatalf("the pass's second page must wait out the first's PageInterval, took %v", took)
+		}
+	})
+}
+
 // No pass runs for a rebuild that aborts or is cancelled mid-walk, one that
 // runs every plan with an executer, or one by ids. A selected version whose
 // plan has no Probe is skipped and logged at Info.
@@ -450,6 +514,8 @@ func TestRebuild_ProbePass_RunsOnlyAfterAWholeVersionSelectedWalk(t *testing.T) 
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("want error %v, got %v", tc.wantErr, err)
 			}
+			// The fake's listing is blind to ctx, so a pass that started —
+			// even after the walk's cancellation — records a ListUncovered.
 			if calls := st.callsSnapshot(); countPrefix(calls, "ListUncovered:") != 0 || countPrefix(calls, "BeginBuilds:") != 0 {
 				t.Fatalf("no pass may run: %v", calls)
 			}
