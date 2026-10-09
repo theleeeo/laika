@@ -121,7 +121,7 @@ they do any search.
   | `ErrInvalidPageToken` | the token doesn't decode, has no backend cursor, or was issued for another request | a consumer bug: it altered the token or sent it with another request |
   | `ErrCursorExpired` | the scan is older than `ScanMaxAge`, its pinned version or index is no longer the config's, or its point in time or index is gone | restart from page 1 |
   | `ErrScanFault` (wraps its cause) | a deployment or invariant fault: an alias it can't pin, a middleware that dropped or changed the scan, a hit from another index, a failed shard or timed-out page | report it; a retry may not help |
-  | `*InvalidArgumentError` | a nonzero `Page`, a `PageToken` without `Scan`, or a filter or sort a paged search would refuse | fix the request |
+  | `*InvalidArgumentError` | a nonzero `Page`, a `PageToken` without `Scan`, or a filter a paged search would refuse | fix the request |
   | `ErrUnknownResource` | the resource isn't configured (or is empty), checked before anything else | fix the request |
 
   A transport error resolving the alias on page 1 is returned wrapped, as itself.
@@ -130,11 +130,12 @@ they do any search.
 
 The token is neither encrypted nor signed. A holder can read the last hit's sort values in it —
 field values of a document the caller was shown — and can alter it. Its checks catch a consumer's
-mistakes, not an attacker: every check is over data the holder can read or compute — the
-fingerprint is an unkeyed hash of the request and the config — so a holder can build a token
-that passes them all. A start time is not checked against a future date, so an altered token can
-outlive `ScanMaxAge`, bounded then by the point in time's keep-alive. Laika leaves sealing to the consumer, since only the consumer knows who holds its
-tokens: the harness gives them only to source apps (SB6.1 in laika-dev's runbooks), which already
+mistakes, not an attacker: nothing in them is keyed — the fingerprint is a plain hash of the
+request and the pinned config — so a holder that knows the request and the config can build a
+token that passes them all. A start time is not checked against a future date, so an altered
+token can outlive `ScanMaxAge`, bounded then by the point in time's keep-alive. Laika leaves
+sealing to the consumer, since only the consumer knows who holds its tokens: the harness's
+`ExportIds` is to give them only to source apps (SB6.1 in laika-dev's runbooks), which already
 hold an app token that reaches the services directly, so sealing would defend a case already
 lost. **A consumer exposing scans to untrusted callers must seal the token first** — encrypt and
 authenticate it (AEAD) on the way out and open it on the way in, around `Indexer.Search` — so a
