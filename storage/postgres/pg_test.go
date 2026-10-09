@@ -3212,3 +3212,61 @@ func TestBeginBuilds_OppositeOrdersDoNotDeadlock(t *testing.T) {
 		}
 	}
 }
+
+// While BeginBuilds waits for the first row in (type, id) order, it holds no
+// lock on a later one, and it draws no value until it holds them all. b is
+// seeded before a, so a statement locking in table order would take b first.
+func TestBeginBuilds_LocksInOrderAndDrawsAfterTheLastLock(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	a, b := model.Resource{Type: "bbs-ord-a", Id: id}, model.Resource{Type: "bbs-ord-b", Id: id}
+	seed(t, b, 0, 0, false)
+	seed(t, a, 0, 0, false)
+
+	g := lockRow(t, testPool, a)
+	type result struct {
+		got []core.BuildBegun
+		err error
+	}
+	results := make(chan result, 1)
+	go func() {
+		got, err := st.BeginBuilds(ctx, []model.Resource{b, a})
+		results <- result{got, err}
+	}()
+	g.waitForWaiters(t, 1)
+
+	// b sorts after a, so the waiting call has not locked it.
+	tx, err := testPool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var one int
+	lockErr := tx.QueryRow(ctx,
+		`SELECT 1 FROM resources WHERE type=$1 AND id=$2 FOR UPDATE NOWAIT`, b.Type, b.Id).Scan(&one)
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if lockErr != nil {
+		g.release()
+		<-results
+		t.Fatalf("lock %v while BeginBuilds waits for %v: %v; want it free, as nothing is locked out of (type, id) order", b, a, lockErr)
+	}
+
+	n := start(t, st)
+	g.release()
+	var r result
+	select {
+	case r = <-results:
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginBuilds did not finish after the gate committed")
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	for i, res := range []model.Resource{b, a} {
+		if r.got[i].BuildIdx <= n {
+			t.Fatalf("%v: BuildIdx %d, want above %d, taken while BeginBuilds waited: every value is drawn after the last lock", res, r.got[i].BuildIdx, n)
+		}
+	}
+}
