@@ -25,7 +25,8 @@ they do any search.
   page, page 1 included, and accepts exactly the filters and sort a paged search accepts,
   validated the same way. Its hits are in the search's sort with `resource_id` last, and carry
   an ID and a score but no `Source` (`_source: false`): a consumer reads what it exports from its
-  own store, by id. Its `Total`, on every page, is the first page's. `FederatedSearch` has no
+  own store, by id. Its `Total`, on every page, is the first page's, except on the empty page
+  that ends a scan whose reference child stopped matching, which reports 0. `FederatedSearch` has no
   scan, and Laika's standalone app (`app/server`, `search.v1`) doesn't expose one.
 - **Page 1 pins what the read alias serves.** `Indexer.Search` reports an unknown resource
   (`ErrUnknownResource`) before anything else, then resolves the alias with
@@ -94,10 +95,14 @@ they do any search.
   expire.
 - **The backend** (`backend/elasticsearch`, `scan.go`) decides scan mode from `req.Scan` alone
   and uses the page size it is given.
-  - It refuses a scan on Elasticsearch below 8.11.0 (below). It reads the cluster's version from
-    `GET /` once, lazily on its first scan; a failed lookup is returned and asked again on the
-    next scan. A version below 8.11.0, or one it can't parse, is `ErrScanFault`, before any point
-    in time is opened. Paged and federated search never look the version up.
+  - It refuses a scan on Elasticsearch below 8.11.0 (below). Before its first scan's point in
+    time it reads the cluster's version from `GET /`, and caches only a passing version: a
+    version below 8.11.0, or one it can't parse, is `ErrScanFault` and is looked up again on the
+    next scan, so a cluster upgraded to 8.11 or later scans without a restart. A failed lookup
+    is returned and asked again too. A 401 or 403 from `GET /` is `ErrScanFault` saying Laika's
+    Elasticsearch credentials need the `monitor` cluster privilege: `GET /` is the only
+    cluster-level call Laika makes, so a deployment that scans grants `monitor` beside its index
+    privileges. Paged and federated search never look the version up.
   - The first page opens a point in time on the pinned index; every page searches with `pit`
     and no index in the path, sends the paged search's query and sort (the caller's, or `_score`
     descending, then `resource_id` ascending), `_source: false`, a `term` on `_index` equal to
@@ -124,7 +129,7 @@ they do any search.
   |---|---|---|
   | `ErrInvalidPageToken` | the token doesn't decode, has no backend cursor, or was issued for another request | a consumer bug: it altered the token or sent it with another request |
   | `ErrCursorExpired` | the scan is older than `ScanMaxAge`, its pinned version or index is no longer the config's, or its point in time or index is gone | restart from page 1 |
-  | `ErrScanFault` (wraps its cause) | a deployment or invariant fault: Elasticsearch below 8.11.0, an alias it can't pin, a middleware that dropped or changed the scan, a hit from another index, a failed shard or timed-out page | report it; a retry may not help |
+  | `ErrScanFault` (wraps its cause) | a deployment or invariant fault: Elasticsearch below 8.11.0, credentials without the `monitor` cluster privilege, an alias it can't pin, a middleware that dropped or changed the scan, a hit from another index, a failed shard or timed-out page | report it; a retry may not help |
   | `*InvalidArgumentError` | a nonzero `Page`, a `PageToken` without `Scan`, or a filter a paged search would refuse | fix the request |
   | `ErrUnknownResource` | the resource isn't configured (or is empty), checked before anything else | fix the request |
 
@@ -161,6 +166,12 @@ A scan that ends short with no error is the failure the scan exists to rule out,
 refuses the whole range below 8.11.0 rather than only the affected sorts and versions, and
 `app/tests` runs Elasticsearch 8.19.0. Which version the vxfiber deployment runs is open point Q27
 in laika-dev's `docs/open-points.md`; its default is this refusal (seams S55).
+
+The guard has one unguarded window. `GET /` reports the version of the node that answers, so
+during a rolling upgrade from 8.10 an 8.11 node can answer while shards on 8.10 nodes still run
+Lucene 9.7: the guard passes, caches the pass, and a scan whose page reaches into a missing-value
+block on those shards can still lose documents. Accepted while nothing is live; checking the
+oldest node's version (`GET _nodes`, also under `monitor`) would close it.
 
 ## Why not the alternatives
 
@@ -213,8 +224,12 @@ in laika-dev's `docs/open-points.md`; its default is this refusal (seams S55).
   `search.max_open_pit_context` (300 per node by default), and a scan ended by an error or
   abandoned by its consumer holds its point in time until the keep-alive lapses, so a caller
   opening many scans can exhaust it for others meanwhile (seams S54).
-- **A deployment that scans runs Elasticsearch 8.11.0 or later.** On an older cluster every scan
-  fails with `ErrScanFault` on its first page; paged and federated search are unaffected.
+- **A deployment that scans runs Elasticsearch 8.11.0 or later, with the `monitor` cluster
+  privilege.** On an older cluster, or without `monitor`, every scan of an existing index fails
+  with `ErrScanFault` on its first page; a scan of a type whose read alias doesn't exist yet
+  answers its empty result without reaching the backend. Paged and federated search are
+  unaffected. A rolling upgrade from 8.10 to 8.11 can pass the guard before every node runs 8.11
+  (above).
 - **The page token is a consumer's to protect** (above).
 
 **Implication for contributors:** a stage of the search chain that reads a resource's config
