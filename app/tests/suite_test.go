@@ -504,7 +504,8 @@ func (t *TestSuite) SetupSuite() {
 	defer cancel()
 
 	wg.Go(func() {
-		elasticsearchContainer, err := esContainer.Run(containerCtx, "docker.elastic.co/elasticsearch/elasticsearch:8.9.0",
+		// Scans need 8.11.0+: 8.9-8.10's Lucene drops missing-value hits after a search_after (apache/lucene#12521).
+		elasticsearchContainer, err := esContainer.Run(containerCtx, "docker.elastic.co/elasticsearch/elasticsearch:8.19.0",
 			// Elasticsearch frees an expired point in time only when this
 			// static node setting's reaper runs, once a minute by default. At
 			// one second, a scan whose short keep-alive lapsed answers its next
