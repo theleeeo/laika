@@ -3,12 +3,17 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"slices"
+	"sync"
 
+	"github.com/theleeeo/laika/aggregation"
 	"github.com/theleeeo/laika/app/dsl"
 	"github.com/theleeeo/laika/backend/elasticsearch"
 	"github.com/theleeeo/laika/core"
 	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/model"
+	"github.com/theleeeo/laika/projection"
 )
 
 // MigrationResourceConfig is the ADR 0004 shape mid-migration: resource "m"
@@ -496,4 +501,175 @@ func (t *TestSuite) Test_Migration_ResumedRebuildWalk() {
 	swept, err := t.idx.SweepStale(t.T().Context(), 0, 100)
 	t.Require().NoError(err)
 	t.Require().Zero(swept, "a completed resumed walk must leave no stale backlog")
+}
+
+// leftOutOfListing wraps a plan's Executer for a Schema Version that excludes
+// some resources by leaving them out of its listing: a walk of the type
+// (ResourceID empty) drops every item rooted at one of ids, and a fetch of one
+// of them by id answers nil, as nilForIDs does.
+type leftOutOfListing struct {
+	inner aggregation.Executer[projection.BuildRequest, projection.BuildDoc]
+	ids   map[string]bool
+}
+
+func (e leftOutOfListing) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+	if req.ResourceID != "" {
+		return nilForIDs(e).Execute(ctx, req)
+	}
+	out := make(chan aggregation.ExecutionResult[projection.BuildDoc])
+	go func() {
+		defer close(out)
+		for r := range e.inner.Execute(ctx, req) {
+			kept := r.Items[:0]
+			for _, item := range r.Items {
+				if !e.ids[item.Root.Id] {
+					kept = append(kept, item)
+				}
+			}
+			r.Items = kept
+			out <- r
+		}
+	}()
+	return out
+}
+
+// Test_Migration_BackfillProbesWhatItsListingLeftOut: v2's plan excludes 2
+// and 4 by leaving them out of its listing, and its Probe leaves them out
+// too. A Versions:[2] backfill walks only 1, 3 and 5, then asks the Probe
+// about the rows it didn't reach — exactly 2 and 4 — and records them as
+// excluded by v2 without a build: an empty v2 edge set, no v2 document, no
+// stale mark (laika ADR 0013's Q24 note). Right after it, with no stale
+// sweep between, coverage passes, the doc-gap is the two left-out ids, and
+// the cutover is ready once the gap is accepted. The pass touches only v2:
+// v1's documents of 2 and 4 stay.
+func (t *TestSuite) Test_Migration_BackfillProbesWhatItsListingLeftOut() {
+	for _, c := range MigrationResourceConfig {
+		c.ApplyDefaults()
+	}
+	t.Require().NoError(MigrationResourceConfig.Validate())
+
+	ctx := t.T().Context()
+	esBackend := elasticsearch.New(t.esClient, true)
+	v1Index, v2Index := core.IndexName("m", 1), core.IndexName("m", 2)
+	ids := []string{"1", "2", "3", "4", "5"}
+	leftOut := map[string]bool{"2": true, "4": true}
+
+	// Pre-migration world: only v1 is configured and serving.
+	v1Only := resource.Configs{{
+		Resource:    "m",
+		Versions:    []resource.VersionConfig{MigrationResourceConfig[0].Versions[0]},
+		ReadVersion: 1,
+	}}
+	for _, c := range v1Only {
+		c.ApplyDefaults()
+	}
+	t.Require().NoError(v1Only.Validate())
+	t.setResourceConfig(v1Only)
+	for _, id := range ids {
+		t.fakeProvider.SetResource("m", id, map[string]any{
+			"id": id, "field1": "orig" + id, "field2": "extra" + id,
+		})
+		t.Require().NoError(t.idx.RegisterChange(ctx, core.Notification{
+			ResourceType: "m", ResourceID: id, Kind: core.ChangeCreated,
+		}))
+	}
+	t.worker.Drain(ctx)
+
+	// v2 added, its plan leaving 2 and 4 out of its listing, its by-id fetch
+	// and its Probe, which records the ids it is asked about.
+	t.setResourceConfig(MigrationResourceConfig)
+	var (
+		probeMu sync.Mutex
+		asked   []string
+	)
+	plans := dsl.BuildPlansFromConfig(t.fakeProvider, MigrationResourceConfig)
+	for i, p := range plans["m"] {
+		if p.Version == 2 {
+			plans["m"][i].Executer = leftOutOfListing{inner: p.Executer, ids: leftOut}
+			plans["m"][i].Probe = func(_ context.Context, probed []string, _ map[string]string) ([]string, error) {
+				probeMu.Lock()
+				defer probeMu.Unlock()
+				asked = append(asked, probed...)
+				var present []string
+				for _, id := range probed {
+					if !leftOut[id] {
+						present = append(present, id)
+					}
+				}
+				return present, nil
+			}
+		}
+	}
+	x := t.newIndexer(MigrationResourceConfig, core.Config{Plans: plans})
+
+	proposed := *MigrationResourceConfig[0]
+	proposed.ReadVersion = 2
+	proposedCfg := resource.Configs{&proposed}
+	t.Require().NoError(proposedCfg.Validate())
+	check := func(opts core.ReadinessOptions) core.ResourceReadiness {
+		results := core.CheckCutoverReadiness(ctx, esBackend, t.st, proposedCfg, opts)
+		t.Require().Len(results, 1)
+		return results[0]
+	}
+	gate := func(r core.ResourceReadiness, name string) core.ReadinessCheck {
+		for _, c := range r.Checks {
+			if c.Name == name {
+				return c
+			}
+		}
+		t.T().Fatalf("readiness has no %q check: %+v", name, r.Checks)
+		return core.ReadinessCheck{}
+	}
+
+	// Backfill v2. No stale sweep runs after it.
+	t.Require().NoError(x.RebuildNow(ctx, []core.ResourceSelector{
+		{ResourceType: "m", Versions: []int{2}},
+	}))
+	t.Require().NoError(x.WaitForIdle(ctx))
+
+	// Covered with no sweep, and v2 holds 3 documents to v1's 5: the gap is
+	// the two left-out ids, and fails until accepted.
+	r := check(core.ReadinessOptions{})
+	t.Require().False(r.Ready)
+	coverage := gate(r, core.CheckCoverage)
+	t.Require().True(coverage.OK, coverage.Detail)
+	docGap := gate(r, core.CheckDocGap)
+	t.Require().False(docGap.OK)
+	t.Require().Contains(docGap.Detail, fmt.Sprintf(`%s holds 5, %s holds 3, of 5 "m" resources (gap %+d)`,
+		v1Index, v2Index, -len(leftOut)))
+
+	r = check(core.ReadinessOptions{AcceptGap: map[string]bool{"m": true}})
+	t.Require().True(r.Ready, "%+v", r.Checks)
+	t.Require().Contains(gate(r, core.CheckDocGap).Detail, "(accepted)")
+
+	// What the readiness rests on: the backfill asked v2's Probe about
+	// exactly the rows its listing left out, and recorded v2's answer for
+	// each of them without marking it or touching v1.
+	probeMu.Lock()
+	slices.Sort(asked)
+	t.Require().Equal([]string{"2", "4"}, asked,
+		"the backfill must ask v2's Probe about exactly the rows its listing left out")
+	probeMu.Unlock()
+	for _, id := range ids {
+		_, ok := t.docFields(v2Index, id)
+		t.Require().Equal(!leftOut[id], ok, "v2 holds %s only if its listing returns it", id)
+		_, ok = t.docFields(v1Index, id)
+		t.Require().True(ok, "the v2 backfill must not touch v1's document of %s", id)
+		t.Require().Nil(t.staleSince("m", id), "%s must not be marked: v2 decided it without a build", id)
+		t.Require().True(t.hasEdgeSet("m", id, 2), "%s must have a v2 edge set after the backfill", id)
+	}
+	for id := range leftOut {
+		t.Require().Empty(t.versionEdges("m", id, 2), "v2 excludes %s: its v2 edge set must be empty", id)
+	}
+}
+
+// hasEdgeSet reports whether the resource has a stored edge set of the
+// Schema Version, empty or not.
+func (t *TestSuite) hasEdgeSet(resourceType, id string, version int) bool {
+	var ok bool
+	err := t.pool.QueryRow(t.T().Context(),
+		`SELECT EXISTS (SELECT 1 FROM edge_sets WHERE type=$1 AND id=$2 AND schema_version=$3)`,
+		resourceType, id, version).Scan(&ok)
+	t.Require().NoError(err)
+	return ok
 }
