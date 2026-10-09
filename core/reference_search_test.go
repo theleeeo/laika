@@ -24,6 +24,7 @@ func (f *fakeBackend) Delete(context.Context, string, string, int64) error { ret
 func (f *fakeBackend) FederatedSearch(context.Context, FederatedSearchParams) (FederatedSearchResult, error) {
 	return FederatedSearchResult{}, nil
 }
+func (f *fakeBackend) GetAliasTargets(context.Context, string) ([]string, error) { return nil, nil }
 func (f *fakeBackend) Search(_ context.Context, req SearchRequest, alias string, _ *resource.VersionConfig) (SearchResponse, error) {
 	f.calls++
 	if hits, ok := f.childHits[alias]; ok {

@@ -51,6 +51,17 @@ type SearchRequest struct {
 	// of the queried resource. Empty ⇒ a resource that declares a scoped block
 	// matches nothing (fail-closed). Ignored by single-tenant resources.
 	Scope string
+
+	// Scan makes the search a scan: its hits come page by page, with a page
+	// token, from one point-in-time snapshot of the index the read alias
+	// served when the scan started, in the search's sort with resource_id
+	// last. Page must be zero. Only Indexer.Search scans; federated search
+	// has none.
+	Scan bool
+	// PageToken continues a scan: the NextPageToken of its previous page.
+	// Empty starts one. Below the core search chain, on the request a
+	// SearchBackend receives, it is the backend's own cursor.
+	PageToken string
 }
 
 // AddFilter appends a filter to the request. It is the explicit way a
@@ -84,6 +95,11 @@ type SearchHit struct {
 type SearchResponse struct {
 	Total int64
 	Hits  []SearchHit
+
+	// NextPageToken continues a scan; empty after its last page and on every
+	// search that isn't a scan. From a SearchBackend it is the backend's own
+	// cursor, which the core search chain wraps in the token it returns.
+	NextPageToken string
 }
 
 // CapabilitiesResponse describes the searchable fields for all configured resources.

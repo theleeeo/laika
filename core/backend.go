@@ -36,8 +36,16 @@ type SearchBackend interface {
 	// stays, as an OCC loss does for a write (ErrVersionConflict). A missing
 	// document is not an error either.
 	Delete(ctx context.Context, index, docID string, version int64) error
+	// Search runs req against indexAlias with vc's mapping. A scan
+	// (req.Scan) is decided from req alone: indexAlias is then the concrete
+	// index the scan pinned, req.PageToken the backend's cursor (empty on the
+	// first page), and the response's NextPageToken the next cursor, empty
+	// after the last page.
 	Search(ctx context.Context, req SearchRequest, indexAlias string, vc *resource.VersionConfig) (SearchResponse, error)
 	FederatedSearch(ctx context.Context, params FederatedSearchParams) (FederatedSearchResult, error)
+	// GetAliasTargets returns every index alias points to, none (and no
+	// error) when the alias doesn't exist.
+	GetAliasTargets(ctx context.Context, alias string) ([]string, error)
 }
 
 // BulkItem is a single document to write in a bulk upsert.

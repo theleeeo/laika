@@ -6,6 +6,7 @@ import (
 	"encoding/json/v2"
 	"fmt"
 	"io"
+	"slices"
 )
 
 // CreateAlias creates an alias pointing to the given index.
@@ -82,6 +83,41 @@ func (c *Client) GetAlias(ctx context.Context, aliasName string) (string, error)
 	}
 
 	return "", nil
+}
+
+// GetAliasTargets returns every index the alias points to, sorted. Returns
+// none and no error if the alias does not exist.
+func (c *Client) GetAliasTargets(ctx context.Context, aliasName string) ([]string, error) {
+	res, err := c.es.Indices.GetAlias(
+		c.es.Indices.GetAlias.WithName(aliasName),
+		c.es.Indices.GetAlias.WithContext(ctx),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get alias: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode == 404 {
+		return nil, nil
+	}
+
+	if res.IsError() {
+		raw, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("get alias error: %s %s", res.Status(), string(raw))
+	}
+
+	// Response shape: { "index_name": { "aliases": { "alias_name": {} } } }
+	var decoded map[string]any
+	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
+		return nil, fmt.Errorf("decode alias response: %w", err)
+	}
+
+	targets := make([]string, 0, len(decoded))
+	for indexName := range decoded {
+		targets = append(targets, indexName)
+	}
+	slices.Sort(targets)
+	return targets, nil
 }
 
 // GetMapping returns the running "mappings" object for indexName (the value

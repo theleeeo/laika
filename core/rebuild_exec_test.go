@@ -134,6 +134,7 @@ func (b *captureBackend) Search(context.Context, SearchRequest, string, *resourc
 func (b *captureBackend) FederatedSearch(context.Context, FederatedSearchParams) (FederatedSearchResult, error) {
 	return FederatedSearchResult{}, nil
 }
+func (b *captureBackend) GetAliasTargets(context.Context, string) ([]string, error) { return nil, nil }
 
 func (b *captureBackend) allBulkItems() []BulkItem {
 	b.mu.Lock()

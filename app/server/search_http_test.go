@@ -35,6 +35,7 @@ func (b *fakeBackend) FederatedSearch(_ context.Context, p core.FederatedSearchP
 	b.fedParams = p
 	return b.fedResponse, nil
 }
+func (b *fakeBackend) GetAliasTargets(context.Context, string) ([]string, error) { return nil, nil }
 
 func (b *fakeBackend) Search(_ context.Context, req core.SearchRequest, alias string, _ *resource.VersionConfig) (core.SearchResponse, error) {
 	b.gotReq = req

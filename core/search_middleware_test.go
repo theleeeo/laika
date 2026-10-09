@@ -41,6 +41,9 @@ func (b *recordingBackend) FederatedSearch(ctx context.Context, params Federated
 	b.fedParams = params
 	return b.fedResponse, nil
 }
+func (b *recordingBackend) GetAliasTargets(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 
 // newSearchIndexer builds an Indexer with a single "product" resource, the
 // given backend, and the given middlewares.

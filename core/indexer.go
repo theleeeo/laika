@@ -15,6 +15,21 @@ import (
 var (
 	ErrUnknownResource = errors.New("unknown resource")
 
+	// ErrInvalidPageToken is returned by a scan whose page token doesn't
+	// decode, carries no backend cursor, or was issued for another request.
+	ErrInvalidPageToken = errors.New("invalid page token")
+
+	// ErrCursorExpired is returned by a scan that can't go on: its token is
+	// older than Config.ScanMaxAge, its pinned schema version or index is no
+	// longer the config's, or its point in time is gone.
+	ErrCursorExpired = errors.New("cursor expired")
+
+	// ErrScanFault is returned, wrapping its cause, by a scan that met a
+	// deployment or invariant fault rather than a caller's mistake: an alias
+	// it can't pin, a middleware that dropped the scan's state, a hit from
+	// another index, a failed shard.
+	ErrScanFault = errors.New("scan fault")
+
 	// ErrStaleVersion is returned when a resource upsert is rejected because the
 	// provided version is not strictly greater than the currently stored version.
 	ErrStaleVersion = errors.New("stale version")

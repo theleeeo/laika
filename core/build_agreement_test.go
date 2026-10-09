@@ -98,6 +98,9 @@ func (b *versionedBackend) Search(context.Context, SearchRequest, string, *resou
 func (b *versionedBackend) FederatedSearch(context.Context, FederatedSearchParams) (FederatedSearchResult, error) {
 	return FederatedSearchResult{}, nil
 }
+func (b *versionedBackend) GetAliasTargets(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 
 func (b *versionedBackend) opsSnapshot() []string {
 	b.mu.Lock()
