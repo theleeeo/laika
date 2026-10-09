@@ -646,10 +646,10 @@ func (t *TestSuite) Test_Migration_BackfillProbesWhatItsListingLeftOut() {
 	// exactly the rows its listing left out, and recorded v2's answer for
 	// each of them without marking it or touching v1.
 	probeMu.Lock()
-	slices.Sort(asked)
-	t.Require().Equal([]string{"2", "4"}, asked,
-		"the backfill must ask v2's Probe about exactly the rows its listing left out")
+	gotAsked := slices.Sorted(slices.Values(asked))
 	probeMu.Unlock()
+	t.Require().Equal([]string{"2", "4"}, gotAsked,
+		"the backfill must ask v2's Probe about exactly the rows its listing left out")
 	for _, id := range ids {
 		_, ok := t.docFields(v2Index, id)
 		t.Require().Equal(!leftOut[id], ok, "v2 holds %s only if its listing returns it", id)
@@ -657,6 +657,7 @@ func (t *TestSuite) Test_Migration_BackfillProbesWhatItsListingLeftOut() {
 		t.Require().True(ok, "the v2 backfill must not touch v1's document of %s", id)
 		t.Require().Nil(t.staleSince("m", id), "%s must not be marked: v2 decided it without a build", id)
 		t.Require().True(t.hasEdgeSet("m", id, 2), "%s must have a v2 edge set after the backfill", id)
+		t.Require().True(t.hasEdgeSet("m", id, 1), "the v2 backfill must not touch v1's edge set of %s", id)
 	}
 	for id := range leftOut {
 		t.Require().Empty(t.versionEdges("m", id, 2), "v2 excludes %s: its v2 edge set must be empty", id)
