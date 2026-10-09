@@ -66,7 +66,10 @@ func (c probePassCounts) logAttr() slog.Attr {
 //   - Begins its rows in one statement (Store.BeginBuilds), which takes each
 //     one's Build Sequence before the probe, as a build takes it before its
 //     fetch (ADR 0002). A row gone or tombstoned since the listing isn't
-//     begun, and is neither probed nor written.
+//     begun, and is neither probed nor written. Nor is a row begun with
+//     other metadata than the walk's (nil and empty equal): a registration
+//     changed it since the listing, and that registration's build, which
+//     fetches with it, decides the row. Neither counts as asked.
 //   - Probes the begun ids in one call with the walk's metadata.
 //   - Of an id the probe leaves out, which the version excludes, deletes the
 //     version's document at the id's Build Sequence — an OCC loss is no
@@ -82,8 +85,11 @@ func (c probePassCounts) logAttr() slog.Attr {
 // mark writes nothing more for those ids: they stay uncovered, which fails
 // the cutover's coverage closed, and the next backfill asks again. These are
 // logged and counted, and are not the walk's failures (rebuildFlusher.failed),
-// so they don't make RunRebuild retry. A failed listing or begin, or a ctx
-// that ended, ends the pass with an error the rebuild returns.
+// so they don't make RunRebuild retry. A failed listing or begin ends the
+// pass with an error the rebuild returns. ctx is checked only after a full
+// page, before the next one, and when a probe fails: an ended ctx then ends
+// the pass with its error. Within a page it is not checked, so a write of
+// that page that fails on the ended ctx is counted as failed like any other.
 //
 // No lock is held across the probe: BeginBuilds is one statement and the
 // listing locks nothing.
@@ -169,11 +175,16 @@ func (idx *Indexer) probeUncoveredPage(ctx context.Context, resourceType string,
 	}
 
 	// Ruling R2: a row BeginBuilds didn't begin is gone or a tombstone since
-	// the listing; it is neither probed nor written.
+	// the listing; it is neither probed nor written. Ruling R7: so is a row
+	// begun with other metadata than the walk's (nil and empty equal) — a
+	// registration of it since the listing, whose owned build fetches with
+	// that metadata and decides it. A probe asked with the walk's metadata
+	// would answer for metadata the row no longer holds, and a delete at this
+	// newer Build Sequence would beat that build's write unmarked.
 	seqs := make(map[string]int64, len(roots))
 	var ids []string
 	for i, b := range begun {
-		if b.BuildIdx == 0 {
+		if b.BuildIdx == 0 || metadataKey(b.Metadata) != metadataKey(md) {
 			continue
 		}
 		seqs[roots[i].Id] = b.BuildIdx

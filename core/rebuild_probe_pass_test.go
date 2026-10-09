@@ -241,6 +241,10 @@ func TestRebuildAll_VersionSelected_ProbePass_AsksOnlyRowsWithTheWalksMetadata(t
 	actorA, actorB := map[string]string{"actor": "A"}, map[string]string{"actor": "B"}
 	rows := slices.Concat(uncoveredRows(actorA, "a1"), uncoveredRows(actorB, "b1"), uncoveredRows(nil, "n1"))
 	st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: rows}}
+	// Each row holds the metadata it is listed with, as BeginBuilds reads it.
+	for _, r := range rows {
+		st.seedRow(r.Resource, r.Metadata)
+	}
 	es := &captureBackend{}
 	probe := probeReturning()
 	sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Metadata: actorA}
@@ -336,6 +340,50 @@ func TestRebuildAll_VersionSelected_ProbePass_NotBegunIDIsNeitherProbedNorWritte
 		}
 		assertUntouched(t, st, es, "X")
 	})
+}
+
+// Ruling R7: an id whose row holds other metadata when BeginBuilds begins it
+// than the walk's — a registration of it since the listing, whose owned build
+// fetches as that actor — is treated as not begun: neither probed nor
+// written, and not asked. Its registration's build decides it: a probe asked
+// as the walk's actor could leave it out, and the pass's delete at the newer
+// Build Sequence would beat that build's write. The page's other ids are
+// served as usual.
+func TestRebuildAll_VersionSelected_ProbePass_IDBegunWithOtherMetadata_IsNeitherProbedNorWritten(t *testing.T) {
+	actorA, actorB := map[string]string{"actor": "A"}, map[string]string{"actor": "B"}
+	for name, walkMD := range map[string]map[string]string{
+		"walk as A, X registered as B since":             actorA,
+		"walk without metadata, X registered as B since": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(walkMD, "W", "X", "Y")}}
+			st.seedRow(product("W"), walkMD)
+			st.seedRow(product("X"), actorB)
+			st.seedRow(product("Y"), walkMD)
+			es := &captureBackend{}
+			probe := probeReturning("Y")
+			sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Metadata: walkMD}
+			if err := probePassRebuild(t.Context(), t, st, es, sel, map[int]*fakeProbe{2: probe}, walkOf("1"), walkOf("1")); err != nil {
+				t.Fatal(err)
+			}
+			if got := probe.probedIDs(); !slices.Equal(got, []string{"W", "Y"}) {
+				t.Fatalf("only W and Y, begun with the walk's metadata, are probed, got %v", got)
+			}
+			assertUntouched(t, st, es, "X")
+			// The walk begins 1 at 1; BeginBuilds begins W at 2, X at 3, Y at 4.
+			if got := es.deletesAt(); !slices.Equal(got, []string{"product_search_v2/W@2"}) {
+				t.Fatalf("W, excluded, loses its v2 document at 2, got %v", got)
+			}
+			assertReplaces(t, st, product("W"), 2, []EdgeSet{versionSet(2)})
+			if calls := st.callsSnapshot(); countPrefix(calls, "MarkStale:product/Y") != 1 {
+				t.Fatalf("Y, returned, is marked: %v", calls)
+			}
+			if got, _ := passCounts(t, logs, 2); !maps.Equal(got, map[string]int{"asked": 2, "excluded": 1, "marked": 1, "failed": 0}) {
+				t.Fatalf("X isn't asked, got %v", got)
+			}
+		})
+	}
 }
 
 // A failed delete or edge-set write of an excluded id, or a failed mark of a
