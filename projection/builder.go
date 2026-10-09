@@ -14,7 +14,8 @@ type BuildRequest struct {
 	// Metadata. The plan answers each of them exactly once: a BuildDoc with
 	// its document, with a nil Doc (its version's nil, ADR 0013), or with
 	// Err. An asked id left unanswered fails; it is never read as a nil
-	// (ADR 0014). The ids are distinct: the caller deduplicates them, since
+	// (ADR 0014). The plan closes its result channel once it has answered,
+	// since core reads it to the end. The ids are distinct: the caller deduplicates them, since
 	// a plan given a repeated id may answer it twice, which fails the call.
 	// Empty asks for the all-of-type walk, which answers whatever its
 	// listing finds.

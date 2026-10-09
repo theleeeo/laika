@@ -61,17 +61,19 @@ func versionsOf(docs []versionedDoc) []int {
 
 func TestExecuteAllPlans_AnswersEachAskedIDWithItsOwnOutcome(t *testing.T) {
 	errC := errors.New("c failed at source")
+	errD := errors.New("d failed at source")
 	// Version 1 answers a with a document, b with an explicit nil and c
-	// with an error of its own; version 2 has a document for each.
-	v1 := &answerExecuter{items: []projection.BuildDoc{productDoc("a"), nilDoc("b"), errDoc("c", errC)}}
-	v2 := &answerExecuter{items: []projection.BuildDoc{productDoc("c"), productDoc("b"), productDoc("a")}}
+	// with an error of its own; version 2 has a document for each but d,
+	// which version 1 built and version 2 fails.
+	v1 := &answerExecuter{items: []projection.BuildDoc{productDoc("a"), nilDoc("b"), errDoc("c", errC), productDoc("d")}}
+	v2 := &answerExecuter{items: []projection.BuildDoc{productDoc("c"), errDoc("d", errD), productDoc("b"), productDoc("a")}}
 	plans := []projection.Plan{{Version: 1, Executer: v1}, {Version: 2, Executer: v2}}
 
-	got, err := executeAllPlans(t.Context(), plans, askProducts("a", "b", "c"))
+	got, err := executeAllPlans(t.Context(), plans, askProducts("a", "b", "c", "d"))
 	if err != nil {
 		t.Fatalf("a per-id error must not fail the call: %v", err)
 	}
-	if len(got) != 3 {
+	if len(got) != 4 {
 		t.Fatalf("want one outcome per asked id, got %+v", got)
 	}
 
@@ -91,6 +93,14 @@ func TestExecuteAllPlans_AnswersEachAskedIDWithItsOwnOutcome(t *testing.T) {
 	c := got["c"]
 	if !errors.Is(c.err, errC) || len(c.docs) != 0 || len(c.missing) != 0 {
 		t.Fatalf("c: want its own error and nothing else, got %+v", c)
+	}
+	if !strings.Contains(c.err.Error(), "version 1") {
+		t.Fatalf("c: the error must name the version that failed it, got %v", c.err)
+	}
+	// A later plan's error fails the id, dropping what an earlier plan built.
+	d := got["d"]
+	if !errors.Is(d.err, errD) || len(d.docs) != 0 || len(d.missing) != 0 {
+		t.Fatalf("d: want version 2's error and no documents or nils, got %+v", d)
 	}
 }
 
@@ -154,26 +164,35 @@ func TestExecuteAllPlans_ALaterPlansBrokenAnswerFailsTheCall(t *testing.T) {
 	}
 }
 
-// A build of one id whose plans answer nothing fails, as a plan error does,
-// and deletes nothing: no document leaves the backend, and the row stays,
-// marked, for a later build.
+// A build of one id whose plans answer nothing, or answer it with its own
+// error, fails, as a plan error does, and deletes nothing: no document
+// leaves the backend, and the row stays, marked, for a later build.
 func TestBuild_AnIDThePlansLeaveUnanswered_FailsAndDeletesNothing(t *testing.T) {
+	for name, answer := range map[string][]projection.BuildDoc{
+		"unanswered":    {},
+		"its own error": {errDoc("X", errors.New("X failed at source"))},
+	} {
+		t.Run(name, func(t *testing.T) { testBuildFailsAndDeletesNothing(t, answer) })
+	}
+}
+
+func testBuildFailsAndDeletesNothing(t *testing.T, answer []projection.BuildDoc) {
 	noDeletes := func(t *testing.T, st *recordingStore, be *captureBackend) {
 		t.Helper()
 		if d := be.deletesAt(); len(d) != 0 {
-			t.Fatalf("an unanswered id must delete no document, got %v", d)
+			t.Fatalf("a failed id must delete no document, got %v", d)
 		}
 		for _, prefix := range []string{"RemoveResource", "DeleteResourceIfSeq", "ReplaceEdges"} {
 			if n := st.count(prefix); n != 0 {
-				t.Fatalf("an unanswered id must reach no %s: %v", prefix, st.callsSnapshot())
+				t.Fatalf("a failed id must reach no %s: %v", prefix, st.callsSnapshot())
 			}
 		}
 		if len(be.upserts) != 0 || len(be.bulkCalls) != 0 {
-			t.Fatalf("an unanswered id must write nothing: upserts %v, bulk %v", be.upserts, be.bulkCalls)
+			t.Fatalf("a failed id must write nothing: upserts %v, bulk %v", be.upserts, be.bulkCalls)
 		}
 	}
 	silent := func() *staticExecuter {
-		return &staticExecuter{byID: map[string][]projection.BuildDoc{"X": {}}}
+		return &staticExecuter{byID: map[string][]projection.BuildDoc{"X": answer}}
 	}
 
 	t.Run("unowned", func(t *testing.T) {
@@ -212,7 +231,7 @@ func TestBuild_AnIDThePlansLeaveUnanswered_FailsAndDeletesNothing(t *testing.T) 
 
 		err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"X"}}})
 		if err == nil {
-			t.Fatal("a rebuild whose id went unanswered must fail")
+			t.Fatal("a rebuild whose id failed must fail")
 		}
 
 		noDeletes(t, st, be)
@@ -248,5 +267,35 @@ func TestExecutePlan_ABrokenAnswerStopsThePlan(t *testing.T) {
 	case <-stopped:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the plan's context must end when the call fails")
+	}
+}
+
+// A by-ids rebuild fails an id its plan answers with an error of its own
+// where the plan's error fails it: marked at once, before the next id
+// begins — not left unsettled for finish to mark — counted once, and none
+// of the other plan's document for it written. The next id completes.
+func TestRebuildByIDs_AnIDsOwnError_FailsItAsAPlanError(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	es := &captureBackend{}
+	err := rebuildSelected(t, st, es, 0, twoVersionResources(),
+		ResourceSelector{ResourceType: "product", ResourceIDs: []string{"X", "1"}},
+		&staticExecuter{docs: []projection.BuildDoc{productDoc("1")}, byID: map[string][]projection.BuildDoc{"X": {errDoc("X", errors.New("X failed at source"))}}},
+		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
+
+	assertFailedOnce(t, st, err, "X")
+	calls := st.callsSnapshot()
+	if n := countPrefix(calls, "BeginBuild:product/X"); n != 1 {
+		t.Fatalf("X must be begun once, got %d: %v", n, calls)
+	}
+	marked, next := callIndexes(calls, "MarkStale:product/X"), callIndexes(calls, "BeginBuild:product/1")
+	if len(marked) != 1 || len(next) != 1 || marked[0] > next[0] {
+		t.Fatalf("X must be failed, and marked, before 1 begins: %v", calls)
+	}
+	for _, chunk := range es.bulkCalls {
+		for _, it := range chunk {
+			if it.ID == "X" {
+				t.Fatalf("no document of the failed X may be written, got %+v", it)
+			}
+		}
 	}
 }

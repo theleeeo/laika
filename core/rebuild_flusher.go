@@ -91,8 +91,9 @@ func executePlan(ctx context.Context, plan projection.Plan, req projection.Build
 			}
 			answered[id] = true
 			if item.Err != nil {
-				// The id's error is all the plan says about it.
-				item = projection.BuildDoc{Root: item.Root, Err: item.Err}
+				// The id's error is all the plan says about it, named with
+				// the plan's version so the build's log says which failed it.
+				item = projection.BuildDoc{Root: item.Root, Err: fmt.Errorf("plan of %s version %d: %w", req.ResourceType, plan.Version, item.Err)}
 			}
 			answers[id] = item
 		}
