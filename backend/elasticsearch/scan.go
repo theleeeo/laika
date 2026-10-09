@@ -49,17 +49,24 @@ func decodeScanCursor(token string) (scanCursor, error) {
 	if c.PITID == "" {
 		return scanCursor{}, fmt.Errorf("%w: cursor has no point-in-time id", core.ErrInvalidPageToken)
 	}
-	var after []jsontext.Value
-	if len(c.SearchAfter) == 0 || json.Unmarshal(c.SearchAfter, &after) != nil || len(after) == 0 {
+	if !hasSortValues(c.SearchAfter) {
 		return scanCursor{}, fmt.Errorf("%w: cursor has no sort values", core.ErrInvalidPageToken)
 	}
 	return c, nil
 }
 
+// hasSortValues reports whether raw is a non-empty JSON array, the shape of a
+// hit's sort values and of search_after.
+func hasSortValues(raw jsontext.Value) bool {
+	var values []jsontext.Value
+	return len(raw) > 0 && raw.Kind() == '[' && json.Unmarshal(raw, &values) == nil && len(values) > 0
+}
+
 // scanResponse is the part of a point-in-time search response a scan reads.
 type scanResponse struct {
-	PITID  string `json:"pit_id"`
-	Shards struct {
+	PITID    string `json:"pit_id"`
+	TimedOut bool   `json:"timed_out"`
+	Shards   struct {
 		Failed int `json:"failed"`
 	} `json:"_shards"`
 	Hits struct {
@@ -154,6 +161,11 @@ func (c *Client) scan(ctx context.Context, req core.SearchRequest, index string,
 	if err := json.UnmarshalRead(res.Body, &decoded); err != nil {
 		return core.SearchResponse{}, fmt.Errorf("decode es scan response: %w", err)
 	}
+	// A page cut short by a search timeout would read as the last one and
+	// end the scan as a success with documents missing.
+	if decoded.TimedOut {
+		return core.SearchResponse{}, fmt.Errorf("%w: a scan page of %s timed out", core.ErrScanFault, index)
+	}
 	if decoded.Shards.Failed > 0 {
 		return core.SearchResponse{}, fmt.Errorf("%w: %d shards of %s failed in a scan page", core.ErrScanFault, decoded.Shards.Failed, index)
 	}
@@ -187,7 +199,11 @@ func (c *Client) scan(ctx context.Context, req core.SearchRequest, index string,
 			)
 		}
 	} else {
-		cur.SearchAfter = hits[len(hits)-1].Sort
+		lastHit := hits[len(hits)-1]
+		if !hasSortValues(lastHit.Sort) {
+			return core.SearchResponse{}, fmt.Errorf("%w: scan of %s: last hit %q of a full page has no sort values", core.ErrScanFault, index, lastHit.ID)
+		}
+		cur.SearchAfter = lastHit.Sort
 		out.NextPageToken = encodeScanCursor(cur)
 	}
 

@@ -326,6 +326,42 @@ func TestScan_BackstopsFailThePage(t *testing.T) {
 	}
 }
 
+// A page cut short by a search timeout would otherwise read as the last
+// page and end the scan as a success with documents missing.
+func TestScan_TimedOutFailsThePage(t *testing.T) {
+	page := strings.Replace(scanPage("pit-1", 5, 0, scanHit(pinnedIndex, "a", `["a",0]`)),
+		`"timed_out":false`, `"timed_out":true`, 1)
+	st := &scanTransport{t: t, open: []scanReply{openReply("pit-1")}, search: []scanReply{ok(page)}}
+	resp, err := st.client().Search(context.Background(),
+		core.SearchRequest{Scan: true, PageSize: 10}, pinnedIndex, vcFlatOnly())
+	require.ErrorIs(t, err, core.ErrScanFault)
+	require.Empty(t, resp.Hits)
+	require.Empty(t, resp.NextPageToken)
+	require.Empty(t, st.closes(), "a scan ended by an error leaves its point in time to expire")
+}
+
+// A full page whose last hit has no sort values can't be continued: it fails
+// rather than issuing a cursor the next page would reject.
+func TestScan_FullPageWithoutLastSortValuesIsAFault(t *testing.T) {
+	cases := map[string]string{
+		"sort missing": `{"_index":"` + pinnedIndex + `","_id":"b","_score":null}`,
+		"sort null":    scanHit(pinnedIndex, "b", `null`),
+		"sort empty":   scanHit(pinnedIndex, "b", `[]`),
+	}
+	for name, last := range cases {
+		t.Run(name, func(t *testing.T) {
+			page := scanPage("pit-1", 5, 0, scanHit(pinnedIndex, "a", `["a",0]`), last)
+			st := &scanTransport{t: t, open: []scanReply{openReply("pit-1")}, search: []scanReply{ok(page)}}
+			resp, err := st.client().Search(context.Background(),
+				core.SearchRequest{Scan: true, PageSize: 2}, pinnedIndex, vcFlatOnly())
+			require.ErrorIs(t, err, core.ErrScanFault)
+			require.Empty(t, resp.Hits)
+			require.Empty(t, resp.NextPageToken)
+			require.Empty(t, st.closes())
+		})
+	}
+}
+
 func TestScan_CursorWithoutPointInTimeOrSortIsInvalid(t *testing.T) {
 	cases := map[string]string{
 		"no point-in-time id": encodeScanCursor(scanCursor{SearchAfter: jsontext.Value(`["a",0]`), Total: 3}),
