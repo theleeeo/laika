@@ -81,9 +81,10 @@ type Plan struct {
 	//     root fetch would not find misses a delete. An id its version
 	//     excludes is a suspect at every run, and an id only another
 	//     version's plan stops returning is never one.
-	//   - A whole-type backfill that selects versions (core.ResourceSelector.
-	//     Versions) calls each selected version's Probe, a page at a time
-	//     with the backfill's metadata, about the rows its listing left out
+	//   - A whole-type backfill that selects fewer than all of the type's
+	//     versions with an Executer (core.ResourceSelector.Versions) calls
+	//     each selected version's Probe, a page at a time with the
+	//     backfill's metadata, about the rows its listing left out
 	//     (ADR 0013's Q24 note): an id it doesn't return is one the version
 	//     excludes, whose document of the version is deleted and edge set
 	//     emptied without a build; an id it returns is marked for the sweep.
