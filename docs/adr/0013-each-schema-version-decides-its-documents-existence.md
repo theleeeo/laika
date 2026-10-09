@@ -4,6 +4,23 @@ _Accepted, 2026-10-06. Supersedes the cross-version existence agreement in
 [ADR 0004](0004-multi-schema-version-writes-for-graceful-migrations.md) and the existence rule of
 ADR 0002's L2.6 and L2.7 notes. Built by runbook step L2.9._
 
+> **Note (2026-10-09, runbook step L3.10):** the backfill's part of the Q24
+> note below is built, as the probe pass (`core/rebuild_probe_pass.go`). It
+> runs at the end of a whole-type rebuild that runs fewer than all of the
+> type's plans with an `Executer`, once the walk has finished, for each
+> selected version whose plan has a `Probe`; a version without one is
+> skipped, logged at Info, and its left-out rows stay uncovered. It also
+> leaves out tombstones. It lists its rows with `Store.ListUncovered`, by the
+> predicate the cutover check's coverage counts with, and takes each page's
+> Build Sequences in one statement with `Store.BeginBuilds`, which begins
+> only rows that still exist and aren't tombstones: a row gone since the
+> listing is neither probed nor written. An excluded id's empty edge set is
+> written by a `ReplaceEdges` that declares nothing, so no other version's
+> set is touched. A failed probe, delete, edge write or mark leaves its ids
+> uncovered for the next backfill and doesn't fail the walk; a failed listing
+> or begin fails the rebuild, which `RunRebuild` retries. The pass keeps no
+> cursor, so a resumed attempt runs it whole again.
+
 > **Note (2026-10-08, open point Q24):** decided, and runbook step L3.10 builds
 > the backfill's part.
 >

@@ -166,10 +166,10 @@ type Store interface {
 	// ListUncovered returns up to limit rows of resourceType whose id sorts
 	// after after, in id order, each with its metadata, that aren't
 	// tombstones, carry no stale mark, have no edge set of schemaVersion and
-	// hold metadata (nil and empty are equal): the rows a backfill of that
-	// version left without a document decision. An empty after starts at the
-	// first id. It claims and locks nothing. A backfill asks the version's
-	// Probe about them (ADR 0013).
+	// hold the given metadata (nil and empty are equal): the rows a backfill
+	// of that version left without a document decision. An empty after
+	// starts at the first id. It claims and locks nothing. A backfill asks
+	// the version's Probe about them (ADR 0013).
 	ListUncovered(ctx context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]ListedResource, error)
 	// BeginBuilds begins resources in one statement, as BeginBuild begins
 	// one with a token of 0: each row that exists and isn't a tombstone gets
