@@ -22,13 +22,11 @@ import (
 // version's document and edge set at a Build Sequence taken before the probe;
 // an id it returns is marked for the sweep (ADR 0013's Q24 note).
 
-// probePassRebuild runs sel over the product type with v1 and v2 under ctx,
-// the plans' executers execs (Versions 1, 2, …) and, for each version probes
-// names, that probe as its plan's Probe; each probe call also records
-// "Probe:v<version>:<ids>" in st's call log. It waits for the re-builds the
-// rebuild schedules.
-func probePassRebuild(ctx context.Context, t *testing.T, st *rebuildRecordingStore, es *captureBackend, sel ResourceSelector, probes map[int]*fakeProbe, execs ...aggregation.Executer[projection.BuildRequest, projection.BuildDoc]) error {
-	t.Helper()
+// probePassIndexer serves the product type with v1 and v2 over st and es:
+// the plans' executers are execs (Versions 1, 2, …) and, for each version
+// probes names, that probe is its plan's Probe; each probe call also records
+// "Probe:v<version>:<ids>" in st's call log.
+func probePassIndexer(st *rebuildRecordingStore, es *captureBackend, probes map[int]*fakeProbe, execs ...aggregation.Executer[projection.BuildRequest, projection.BuildDoc]) *Indexer {
 	plans := make([]projection.Plan, len(execs))
 	for i, e := range execs {
 		v := i + 1
@@ -40,12 +38,19 @@ func probePassRebuild(ctx context.Context, t *testing.T, st *rebuildRecordingSto
 			}
 		}
 	}
-	idx := mustNew(Config{
+	return mustNew(Config{
 		Resources: twoVersionResources(),
 		Plans:     map[string][]projection.Plan{"product": plans},
 		ES:        es,
 		Store:     st,
 	})
+}
+
+// probePassRebuild runs sel under ctx on a probePassIndexer and waits for the
+// re-builds the rebuild schedules.
+func probePassRebuild(ctx context.Context, t *testing.T, st *rebuildRecordingStore, es *captureBackend, sel ResourceSelector, probes map[int]*fakeProbe, execs ...aggregation.Executer[projection.BuildRequest, projection.BuildDoc]) error {
+	t.Helper()
+	idx := probePassIndexer(st, es, probes, execs...)
 	err := idx.RebuildNow(ctx, []ResourceSelector{sel})
 	if werr := idx.WaitForIdle(t.Context()); werr != nil {
 		t.Fatal(werr)
@@ -455,30 +460,57 @@ func TestRebuildAll_VersionSelected_ProbePass_FailedLaterListing_LogsThePartialC
 
 // A paced pass paces its own pages: its first page follows no page of the
 // pass and starts at once, and each later one waits out the rest of the
-// previous page's PageInterval.
+// previous page's PageInterval. The page-interval waits are recorded, as
+// "WaitPageInterval" in the call log, instead of waited.
 func TestRebuildAll_VersionSelected_ProbePass_PacesOnlyBetweenItsOwnPages(t *testing.T) {
-	t.Run("one page: no wait", func(t *testing.T) {
-		st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(nil, "X")}}
-		sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 2, PageInterval: 2 * time.Second}}
-		start := time.Now()
-		if err := probePassRebuild(t.Context(), t, st, &captureBackend{}, sel, map[int]*fakeProbe{2: probeReturning()}, walkOf("1"), walkOf("1")); err != nil {
-			t.Fatal(err)
-		}
-		if took := time.Since(start); took > time.Second {
-			t.Fatalf("a pass of one page must not wait, took %v", took)
-		}
-	})
-	t.Run("two pages: the second waits", func(t *testing.T) {
-		st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(nil, "X", "Y", "Z")}}
-		sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 2, PageInterval: 300 * time.Millisecond}}
-		start := time.Now()
-		if err := probePassRebuild(t.Context(), t, st, &captureBackend{}, sel, map[int]*fakeProbe{2: probeReturning()}, walkOf("1"), walkOf("1")); err != nil {
-			t.Fatal(err)
-		}
-		if took := time.Since(start); took < 300*time.Millisecond {
-			t.Fatalf("the pass's second page must wait out the first's PageInterval, took %v", took)
-		}
-	})
+	for name, tc := range map[string]struct {
+		rows      []string
+		wantCalls []string
+	}{
+		"one page: no wait": {[]string{"X"}, []string{
+			"ListUncovered:product:v2::2", "BeginBuilds:product/X", "Probe:v2:X",
+		}},
+		"two pages: one wait between them": {[]string{"X", "Y", "Z"}, []string{
+			"ListUncovered:product:v2::2", "BeginBuilds:product/X,product/Y", "Probe:v2:X,Y",
+			"WaitPageInterval",
+			"ListUncovered:product:v2:Y:2", "BeginBuilds:product/Z", "Probe:v2:Z",
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			st := &rebuildRecordingStore{uncovered: map[int][]ListedResource{2: uncoveredRows(nil, tc.rows...)}}
+			idx := probePassIndexer(st, &captureBackend{}, map[int]*fakeProbe{2: probeReturning(tc.rows...)}, walkOf("1"), walkOf("1"))
+			idx.waitPageInterval = func(ctx context.Context, _ time.Duration) error {
+				st.record("WaitPageInterval")
+				return ctx.Err()
+			}
+			sel := ResourceSelector{ResourceType: "product", Versions: []int{2}, Pacing: &WalkPacing{PageSize: 2, PageInterval: time.Hour}}
+			if err := idx.RebuildNow(t.Context(), []ResourceSelector{sel}); err != nil {
+				t.Fatal(err)
+			}
+			if err := idx.WaitForIdle(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			// The walk's one page waits for nothing; from the pass's first
+			// listing on, the calls are the pass's own, its marks aside.
+			calls := st.callsSnapshot()
+			if countPrefix(calls, "WaitPageInterval") != countPrefix(tc.wantCalls, "WaitPageInterval") {
+				t.Fatalf("want %d page-interval wait(s), got calls %v", countPrefix(tc.wantCalls, "WaitPageInterval"), calls)
+			}
+			first := slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "ListUncovered:") })
+			if first < 0 {
+				t.Fatalf("the pass must run: %v", calls)
+			}
+			var pass []string
+			for _, c := range calls[first:] {
+				if !strings.HasPrefix(c, "MarkStale:") {
+					pass = append(pass, c)
+				}
+			}
+			if !slices.Equal(pass, tc.wantCalls) {
+				t.Fatalf("the pass's calls:\n got %v\nwant %v", pass, tc.wantCalls)
+			}
+		})
+	}
 }
 
 // No pass runs for a rebuild that aborts or is cancelled mid-walk, one that
