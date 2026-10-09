@@ -1029,6 +1029,18 @@ func (s *Store) CountStale(ctx context.Context, resourceType string, before time
 	return count, *oldest, nil
 }
 
+// uncovered is the predicate on a resources row r that it has no stale mark
+// and no edge_sets row of the Schema Version bound to version, a placeholder
+// such as "$2". An empty set — a version whose plan declared no children, or
+// one that decided against the resource — is a row there, so it covers. The
+// cutover check counts these rows (CountMissingEdgeSets) and a backfill lists
+// them (ListUncovered), so the two agree on what is uncovered.
+func uncovered(version string) string {
+	return `(r.stale_since IS NULL AND NOT EXISTS (
+		     SELECT 1 FROM edge_sets e
+		     WHERE e.type = r.type AND e.id = r.id AND e.schema_version = ` + version + `))`
+}
+
 // CountMissingEdgeSets returns how many resources of the type have a row that
 // isn't a tombstone, and how many of those with no stale mark have no
 // edge_sets row of the Schema Version — an empty set counts as one. This is
@@ -1036,10 +1048,7 @@ func (s *Store) CountStale(ctx context.Context, resourceType string, before time
 func (s *Store) CountMissingEdgeSets(ctx context.Context, resourceType string, schemaVersion int) (int, int, error) {
 	var rows, missing int
 	err := s.pool.QueryRow(ctx,
-		`SELECT count(*),
-		        count(*) FILTER (WHERE r.stale_since IS NULL AND NOT EXISTS (
-		            SELECT 1 FROM edge_sets e
-		            WHERE e.type = r.type AND e.id = r.id AND e.schema_version = $2))
+		`SELECT count(*), count(*) FILTER (WHERE `+uncovered("$2")+`)
 		 FROM resources r
 		 WHERE r.type = $1 AND NOT r.deleted`,
 		resourceType, schemaVersion,
@@ -1050,9 +1059,45 @@ func (s *Store) CountMissingEdgeSets(ctx context.Context, resourceType string, s
 	return rows, missing, nil
 }
 
-// ListUncovered implements core.Store.
+// ListUncovered returns up to limit rows of resourceType whose id sorts after
+// after, in id order, that aren't tombstones, are uncovered for the Schema
+// Version — no stale mark and no edge set of it, by the predicate the
+// cutover check counts with — and hold metadata, each with its metadata (nil
+// when the row has none). No metadata — a nil or empty map, NULL or the empty
+// object — equals no metadata. Like ListResources it is a keyset page on the
+// UNIQUE (type, id) index and a plain read: it claims nothing and takes no
+// row lock, so a page can be out of date by the time its caller acts on it.
 func (s *Store) ListUncovered(ctx context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]core.ListedResource, error) {
-	return nil, errors.New("ListUncovered: not implemented")
+	var want any // NULL: no metadata
+	if len(metadata) > 0 {
+		want = metadata
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT r.id, r.metadata FROM resources r
+		 WHERE r.type = $1 AND NOT r.deleted AND r.id > $3
+		   AND COALESCE(r.metadata, '{}'::jsonb) = COALESCE($4::jsonb, '{}'::jsonb)
+		   AND `+uncovered("$2")+`
+		 ORDER BY r.id
+		 LIMIT $5`,
+		resourceType, schemaVersion, after, want, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []core.ListedResource
+	for rows.Next() {
+		e := core.ListedResource{Resource: model.Resource{Type: resourceType}}
+		if err := rows.Scan(&e.Id, &e.Metadata); err != nil {
+			return nil, err
+		}
+		if len(e.Metadata) == 0 {
+			e.Metadata = nil
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // BeginBuilds implements core.Store.

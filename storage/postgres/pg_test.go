@@ -552,6 +552,122 @@ func TestListResources_PagesLiveRowsOfTheTypeInIdOrderWithTheirMetadata(t *testi
 	}
 }
 
+// seedRow writes a resources row with the given metadata (JSON text, nil for
+// NULL), tombstone flag and stale mark, independent of the Store under test.
+func seedRow(t *testing.T, res model.Resource, metadata *string, deleted, stale bool) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO resources (type, id, metadata, deleted, stale_seq, stale_since)
+		 VALUES ($1, $2, $3::jsonb, $4, CASE WHEN $5 THEN 1 ELSE 0 END, CASE WHEN $5 THEN now() END)`,
+		res.Type, res.Id, metadata, deleted, stale); err != nil {
+		t.Fatalf("seed %s/%s: %v", res.Type, res.Id, err)
+	}
+}
+
+func TestListUncovered_PagesTheVersionsUndecidedRowsWithTheGivenMetadata(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+
+	text := func(s string) *string { return &s }
+	m := text(`{"actor":"u1"}`)
+	res := func(id string) model.Resource { return model.Resource{Type: "lu", Id: id} }
+	child := model.Resource{Type: "lu-child", Id: "c"}
+
+	// Inserted out of id order; the uncovered ones are bare, v1-only and zz.
+	zz, bare, v1Only := res("zz"), res("bare"), res("v1-only")
+	covered, empty, stale, tomb, other := res("covered"), res("empty"), res("stale"), res("tomb"), res("other")
+	for _, r := range []model.Resource{zz, covered, bare, empty, v1Only} {
+		seedRow(t, r, m, false, false)
+	}
+	seedRow(t, stale, m, false, true)
+	seedRow(t, tomb, m, true, false)
+	seedRow(t, other, text(`{"actor":"u2"}`), false, false)
+	// Another type's row under an uncovered id, and its set under one.
+	seedRow(t, model.Resource{Type: "lu-other", Id: "bare"}, m, false, false)
+	seedRow(t, model.Resource{Type: "lu-other", Id: "v1-only"}, m, false, false)
+	replace(t, st, model.Resource{Type: "lu-other", Id: "v1-only"}, 10, nil, edgeSet(2))
+	replace(t, st, covered, 10, nil, edgeSet(2, child))
+	replace(t, st, empty, 10, nil, edgeSet(2)) // a version that declared no children
+	replace(t, st, v1Only, 10, nil, edgeSet(1, child))
+
+	actor := map[string]string{"actor": "u1"}
+	wantBare := core.ListedResource{Resource: bare, Metadata: actor}
+	wantV1 := core.ListedResource{Resource: v1Only, Metadata: actor}
+	wantZZ := core.ListedResource{Resource: zz, Metadata: actor}
+
+	// A row lock held elsewhere doesn't hold the listing up: it locks nothing.
+	lockRow(t, testPool, bare)
+	lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	cases := []struct {
+		name    string
+		version int
+		after   string
+		limit   int
+		want    []core.ListedResource
+	}{
+		{"an empty after starts at the first id", 2, "", 10, []core.ListedResource{wantBare, wantV1, wantZZ}},
+		{"limit bounds the page", 2, "", 2, []core.ListedResource{wantBare, wantV1}},
+		{"the next page follows the last id", 2, "v1-only", 2, []core.ListedResource{wantZZ}},
+		{"an after that is no row's id", 2, "c", 10, []core.ListedResource{wantV1, wantZZ}},
+		{"after the last id", 2, "zz", 10, nil},
+		// v1: only v1-only has a v1 set; the empty v2 set covers nothing of v1.
+		{"another version", 1, "", 10, []core.ListedResource{wantBare, {Resource: covered, Metadata: actor}, {Resource: empty, Metadata: actor}, wantZZ}},
+	}
+	for _, tc := range cases {
+		got, err := st.ListUncovered(lctx, "lu", tc.version, actor, tc.after, tc.limit)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if len(got) == 0 && len(tc.want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("%s: ListUncovered(lu, v%d, %q, %d) = %+v, want %+v", tc.name, tc.version, tc.after, tc.limit, got, tc.want)
+		}
+	}
+
+	// Other metadata lists only its own rows.
+	got, err := st.ListUncovered(lctx, "lu", 2, map[string]string{"actor": "u2"}, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []core.ListedResource{{Resource: other, Metadata: map[string]string{"actor": "u2"}}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("metadata u2: got %+v, want %+v", got, want)
+	}
+
+	// It claims nothing and leaves every row as it was.
+	for _, r := range []model.Resource{bare, v1Only, zz} {
+		requireOwner(t, testPool, r, owner{}, "after ListUncovered")
+		if _, _, _, since, _ := row(t, r); since != nil {
+			t.Fatalf("%s/%s: stale_since %v after ListUncovered, want none", r.Type, r.Id, since)
+		}
+	}
+}
+
+func TestListUncovered_NoMetadataMatchesNullAndTheEmptyObject(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+
+	text := func(s string) *string { return &s }
+	null, empty, some := model.Resource{Type: "lun", Id: "a"}, model.Resource{Type: "lun", Id: "b"}, model.Resource{Type: "lun", Id: "c"}
+	seedRow(t, null, nil, false, false)
+	seedRow(t, empty, text(`{}`), false, false)
+	seedRow(t, some, text(`{"actor":"u1"}`), false, false)
+
+	want := []core.ListedResource{{Resource: null}, {Resource: empty}}
+	for _, m := range []map[string]string{nil, {}} {
+		got, err := st.ListUncovered(ctx, "lun", 2, m, "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("metadata %#v: got %+v, want %+v (both rows without metadata, each with nil)", m, got, want)
+		}
+	}
+}
+
 // register runs RegisterChanges and fails the test on error.
 func register(t *testing.T, st *Store, items ...core.Registration) core.Registered {
 	t.Helper()
