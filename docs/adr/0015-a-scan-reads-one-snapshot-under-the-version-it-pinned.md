@@ -2,6 +2,11 @@
 
 _Accepted, 2026-10-09. Built by runbook step L4.1._
 
+> **Note (2026-10-09, open point Q27):** decided: the vxfiber deployment can run any
+> Elasticsearch version, so it runs the 8.x release `app/tests` run (8.19 today) and the refusal
+> below 8.11.0 stays as built; no workaround for 8.9 or 8.10 is planned. The rolling-upgrade window stays unguarded: no
+> deployment that scans upgrades from 8.10.
+
 Single-resource search pages by `from`/`size` (`Page`, `PageSize`, capped at 100 by
 `normalizePaging`). That serves a person paging through a result list, where a hit that enters,
 leaves or moves between two requests shifts the later pages by one, so a row is shown twice or
