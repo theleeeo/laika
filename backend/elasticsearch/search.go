@@ -66,10 +66,19 @@ func federatedSort() []any {
 	}
 }
 
+// singleSearchTimeout bounds one single-resource ES round trip: a paged
+// search, and each request of a scan page.
+const singleSearchTimeout = 10 * time.Second
+
 // Search runs one resource's search page: the caller's sort, or _score
 // descending when it gives none, then resourceIDSort, so every search has a
-// total order.
+// total order. A scan (req.Scan) is served from a point in time instead (see
+// scan).
 func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias string, vc *resource.VersionConfig) (core.SearchResponse, error) {
+	if req.Scan {
+		return c.scan(ctx, req, indexAlias, vc)
+	}
+
 	start := time.Now()
 	logger := core.LoggerFromContext(ctx)
 
@@ -78,44 +87,17 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		return core.SearchResponse{}, err
 	}
 
-	boolQ := map[string]any{
-		"must":   []any{},
-		"filter": []any{},
-	}
-
-	if req.Query != "" {
-		boolQ["must"] = append(boolQ["must"].([]any), buildFullTextQuery(req.Query))
-	}
-
-	filters, err := buildScopedFilterClauses(req.Filters, vc.ScopedNestedBlocks(), req.Scope)
+	boolQ, err := searchBoolQuery(req, vc)
 	if err != nil {
 		return core.SearchResponse{}, err
 	}
-	boolQ["filter"] = filters
 
 	body := map[string]any{
 		"query": map[string]any{"bool": boolQ},
 		"from":  from,
 		"size":  req.PageSize,
+		"sort":  searchSort(req),
 	}
-
-	var sorts []any
-	for _, srt := range req.Sort {
-		if srt.Field == "" {
-			continue
-		}
-		order := "asc"
-		if srt.Desc {
-			order = "desc"
-		}
-		sorts = append(sorts, map[string]any{
-			srt.Field: map[string]any{"order": order},
-		})
-	}
-	if len(sorts) == 0 {
-		sorts = append(sorts, scoreDescSort())
-	}
-	body["sort"] = append(sorts, resourceIDSort())
 
 	b, err := json.Marshal(body)
 	if err != nil {
@@ -130,7 +112,7 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		slog.String("body", string(b)),
 	)
 
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, singleSearchTimeout)
 	defer cancel()
 
 	res, err := c.es.Search(
@@ -185,6 +167,44 @@ func (c *Client) Search(ctx context.Context, req core.SearchRequest, indexAlias 
 		slog.Duration("duration", time.Since(start)),
 	)
 	return out, nil
+}
+
+// searchBoolQuery builds the bool query of a single-resource search, paged or
+// scan: the primary text query when there is one, and the caller's filters
+// with every scoped block of vc correlated with req.Scope.
+func searchBoolQuery(req core.SearchRequest, vc *resource.VersionConfig) (map[string]any, error) {
+	must := []any{}
+	if req.Query != "" {
+		must = append(must, buildFullTextQuery(req.Query))
+	}
+	filters, err := buildScopedFilterClauses(req.Filters, vc.ScopedNestedBlocks(), req.Scope)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"must": must, "filter": filters}, nil
+}
+
+// searchSort is the sort of a single-resource search, paged or scan: the
+// caller's sort, or _score descending when it gives none, then
+// resourceIDSort.
+func searchSort(req core.SearchRequest) []any {
+	var sorts []any
+	for _, srt := range req.Sort {
+		if srt.Field == "" {
+			continue
+		}
+		order := "asc"
+		if srt.Desc {
+			order = "desc"
+		}
+		sorts = append(sorts, map[string]any{
+			srt.Field: map[string]any{"order": order},
+		})
+	}
+	if len(sorts) == 0 {
+		sorts = append(sorts, scoreDescSort())
+	}
+	return append(sorts, resourceIDSort())
 }
 
 // federatedSearchType is the ES search_type for the default single-query
