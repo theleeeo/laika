@@ -3033,3 +3033,165 @@ func TestBeginDelete_SupersededChangesNothing(t *testing.T) {
 		}
 	})
 }
+
+// ---- BeginBuilds ----
+
+func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := func(id string) model.Resource { return model.Resource{Type: "bbs", Id: id} }
+
+	text := func(s string) *string { return &s }
+	owned, marked, plain, empty, tomb, gone := res("owned"), res("marked"), res("plain"), res("empty"), res("tomb"), res("gone")
+	// owned: registered with metadata, so marked, changed and claimed; its
+	// owner_since backdated so a renewal would show.
+	register(t, st, core.Registration{Resource: owned, Version: 1, Metadata: meta("o")})
+	ownedBy := owner{seq: ownerOf(t, testPool, owned).seq, since: backdateOwner(t, testPool, owned, "10 seconds")}
+	seedMetadata(t, marked, text(`{"k":"m"}`))
+	markUnclaimed(t, st, marked)
+	seedMetadata(t, plain, nil)
+	seedMetadata(t, empty, text(`{}`))
+	tombstone(t, st, tomb)
+	tombBefore := rowJSON(t, tomb)
+
+	type before struct {
+		buildIdx, staleSeq, changeSeq int64
+		since                         *time.Time
+	}
+	live := []model.Resource{owned, marked, plain, empty}
+	was := map[model.Resource]before{}
+	for _, r := range live {
+		_, b, s, since, _ := row(t, r)
+		was[r] = before{b, s, changeSeq(t, testPool, r), since}
+	}
+	floor := start(t, st)
+
+	in := []model.Resource{marked, gone, owned, tomb, plain, empty}
+	got, err := st.BeginBuilds(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceiling := start(t, st)
+	if len(got) != len(in) {
+		t.Fatalf("got %d BuildBegun for %d resources: %+v", len(got), len(in), got)
+	}
+
+	wantMeta := map[model.Resource]map[string]string{owned: meta("o"), marked: {"k": "m"}}
+	seen := map[int64]model.Resource{}
+	for i, r := range in {
+		b := got[i]
+		if r == gone || r == tomb {
+			if !reflect.DeepEqual(b, core.BuildBegun{}) {
+				t.Fatalf("%v (input %d): got %+v, want the zero BuildBegun", r, i, b)
+			}
+			continue
+		}
+		_, rowIdx, rowSeq, since, _ := row(t, r)
+		w := was[r]
+		if b.BuildIdx != rowIdx || b.BuildIdx <= floor || b.BuildIdx >= ceiling || b.BuildIdx <= w.buildIdx {
+			t.Fatalf("%v (input %d): BuildIdx %d, row build_idx %d; want the row's, drawn between %d and %d, above its old %d", r, i, b.BuildIdx, rowIdx, floor, ceiling, w.buildIdx)
+		}
+		if prev, dup := seen[b.BuildIdx]; dup {
+			t.Fatalf("%v and %v share BuildIdx %d", prev, r, b.BuildIdx)
+		}
+		seen[b.BuildIdx] = r
+		if b.Start != b.BuildIdx {
+			t.Fatalf("%v: Start %d, want the BuildIdx %d", r, b.Start, b.BuildIdx)
+		}
+		if b.StaleSeq != w.staleSeq || rowSeq != w.staleSeq {
+			t.Fatalf("%v: StaleSeq %d, row stale_seq %d; want the captured %d, unchanged", r, b.StaleSeq, rowSeq, w.staleSeq)
+		}
+		if !reflect.DeepEqual(b.Metadata, wantMeta[r]) {
+			t.Fatalf("%v: Metadata %#v, want %#v", r, b.Metadata, wantMeta[r])
+		}
+		if cs := changeSeq(t, testPool, r); cs != w.changeSeq {
+			t.Fatalf("%v: change_seq %d, want %d: a build is not a change", r, cs, w.changeSeq)
+		}
+		if (since == nil) != (w.since == nil) || (since != nil && !since.Equal(*w.since)) {
+			t.Fatalf("%v: stale_since %v, want %v", r, since, w.since)
+		}
+	}
+
+	// Ownership is left alone: the owned row keeps its token and its
+	// backdated owner_since, the others stay unowned.
+	requireOwner(t, testPool, owned, ownedBy, "after BeginBuilds")
+	for _, r := range []model.Resource{marked, plain, empty} {
+		requireOwner(t, testPool, r, owner{}, "after BeginBuilds")
+	}
+	if exists(t, gone) {
+		t.Fatal("BeginBuilds recreated a hard-deleted row")
+	}
+	if after := rowJSON(t, tomb); !reflect.DeepEqual(after, tombBefore) {
+		t.Fatalf("tombstone changed:\n got %v\nwant %v", after, tombBefore)
+	}
+}
+
+func TestBeginBuilds_EmptyInputIsEmptyWithoutAQuery(t *testing.T) {
+	// A nil pool panics on any query.
+	got, err := NewStore(nil).BeginBuilds(context.Background(), nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty input: got %+v, %v; want none, nil", got, err)
+	}
+}
+
+// Two BeginBuilds over the same rows, given in opposite orders, both lock
+// them in (type, id) order, so neither holds one row while waiting for the
+// other: both complete, one after the other.
+func TestBeginBuilds_OppositeOrdersDoNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	a, b := model.Resource{Type: "bbs-dl-a", Id: id}, model.Resource{Type: "bbs-dl-b", Id: id}
+	seed(t, a, 0, 0, false)
+	seed(t, b, 0, 0, false)
+
+	gates := []*gate{lockRow(t, testPool, a), lockRow(t, testPool, b)}
+	type result struct {
+		call int
+		got  []core.BuildBegun
+		err  error
+	}
+	results := make(chan result, 2)
+	orders := [2][]model.Resource{{a, b}, {b, a}}
+	for call, in := range orders {
+		go func() {
+			got, err := st.BeginBuilds(ctx, in)
+			results <- result{call, got, err}
+		}()
+	}
+	waitBehindGates(t, 2, gates...)
+	// Release b first: a call that had locked a, out of order, would then
+	// take b and the other call's hold on b would wait for it.
+	gates[1].release()
+	gates[0].release()
+
+	var idx [2]map[model.Resource]int64
+	for range 2 {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Fatalf("BeginBuilds %v: %v", orders[r.call], r.err)
+			}
+			if len(r.got) != 2 {
+				t.Fatalf("BeginBuilds %v: %+v, want two", orders[r.call], r.got)
+			}
+			idx[r.call] = map[model.Resource]int64{orders[r.call][0]: r.got[0].BuildIdx, orders[r.call][1]: r.got[1].BuildIdx}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a BeginBuilds did not finish after the gates committed")
+		}
+	}
+	// One call ran wholly before the other: its Build Sequence is below the
+	// other's on both rows, and each row holds the later one's.
+	first, second := idx[0], idx[1]
+	if first[a] > second[a] {
+		first, second = second, first
+	}
+	for _, r := range []model.Resource{a, b} {
+		if first[r] == 0 || first[r] >= second[r] {
+			t.Fatalf("%v: BuildIdx %d then %d, want both calls to begin it, one after the other (calls: %v)", r, first[r], second[r], idx)
+		}
+		if _, rowIdx, _, _, _ := row(t, r); rowIdx != second[r] {
+			t.Fatalf("%v: build_idx %d, want the later call's %d", r, rowIdx, second[r])
+		}
+	}
+}

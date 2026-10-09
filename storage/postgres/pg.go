@@ -1100,7 +1100,63 @@ func (s *Store) ListUncovered(ctx context.Context, resourceType string, schemaVe
 	return out, rows.Err()
 }
 
-// BeginBuilds implements core.Store.
+// BeginBuilds begins existing rows in one statement, as BeginBuild begins
+// one with no token: each row of resources that exists and isn't a
+// tombstone gets its Build Sequence bumped to a fresh Change Sequence value,
+// which is also its build's start, and returns the stale_seq it carries and
+// its metadata (nil when NULL or the empty object). It locks the rows in
+// (type, id) order before its first write, as MarkStale does, and draws
+// every value after the last lock, so each row's value is above every number
+// it carried, as BeginBuild's is for an existing row. Being an UPDATE, it
+// inserts no row: a row hard-deleted since its caller listed it stays gone,
+// and one created by a transaction uncommitted when the statement started is
+// not begun either. A tombstone is locked but not written. It leaves
+// change_seq, the stale mark and the owner columns alone.
+//
+// It returns one BuildBegun per resource, in input order; a resource it
+// didn't begin gets the zero BuildBegun, and a resource given twice the same
+// one twice.
 func (s *Store) BeginBuilds(ctx context.Context, resources []model.Resource) ([]core.BuildBegun, error) {
-	return nil, errors.New("BeginBuilds: not implemented")
+	if len(resources) == 0 {
+		return nil, nil
+	}
+	types := make([]string, len(resources))
+	ids := make([]string, len(resources))
+	for i, r := range resources {
+		types[i], ids[i] = r.Type, r.Id
+	}
+	rows, err := s.pool.Query(ctx,
+		`WITH `+lockedInput+`
+		 UPDATE resources r SET build_idx = nextval('change_sequence')
+		 FROM (SELECT DISTINCT t, i FROM unnest($1::text[], $2::text[]) AS u(t, i)) AS x
+		 CROSS JOIN (SELECT count(*) FROM locked) AS l
+		 WHERE r.type = x.t AND r.id = x.i AND NOT r.deleted
+		 RETURNING r.type, r.id, r.build_idx, r.stale_seq, r.metadata`,
+		types, ids,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	begun := make(map[model.Resource]core.BuildBegun, len(resources))
+	for rows.Next() {
+		var r model.Resource
+		var b core.BuildBegun
+		if err := rows.Scan(&r.Type, &r.Id, &b.BuildIdx, &b.StaleSeq, &b.Metadata); err != nil {
+			return nil, err
+		}
+		if len(b.Metadata) == 0 {
+			b.Metadata = nil
+		}
+		b.Start = b.BuildIdx
+		begun[r] = b
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]core.BuildBegun, len(resources))
+	for i, r := range resources {
+		out[i] = begun[r]
+	}
+	return out, nil
 }
