@@ -504,7 +504,13 @@ func (t *TestSuite) SetupSuite() {
 	defer cancel()
 
 	wg.Go(func() {
-		elasticsearchContainer, err := esContainer.Run(containerCtx, "docker.elastic.co/elasticsearch/elasticsearch:8.9.0")
+		elasticsearchContainer, err := esContainer.Run(containerCtx, "docker.elastic.co/elasticsearch/elasticsearch:8.9.0",
+			// Elasticsearch frees an expired point in time only when this
+			// static node setting's reaper runs, once a minute by default. At
+			// one second, a scan whose short keep-alive lapsed answers its next
+			// page with the expiry within the test's pause.
+			testcontainers.WithEnv(map[string]string{"search.keep_alive_interval": "1s"}),
+		)
 		if err != nil {
 			t.FailNow("failed to start elasticsearch container", err)
 		}
