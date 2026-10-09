@@ -986,21 +986,21 @@ func (e *recordingExecuter) Execute(_ context.Context, req projection.BuildReque
 	e.mu.Lock()
 	e.reqs = append(e.reqs, req)
 	e.mu.Unlock()
-	if e.arrived != nil && (e.parkIDs == nil || e.parkIDs[req.ResourceID]) {
-		e.arrived <- req.ResourceID
+	if e.arrived != nil && (e.parkIDs == nil || e.parkIDs[firstID(req)]) {
+		e.arrived <- firstID(req)
 		<-e.proceed
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-	if e.failIDs[req.ResourceID] {
+	if e.failIDs[firstID(req)] {
 		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Err: errors.New("plan failed")}
 		close(ch)
 		return ch
 	}
 	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-		Root:      model.Resource{Type: req.ResourceType, Id: req.ResourceID},
+		Root:      model.Resource{Type: req.ResourceType, Id: firstID(req)},
 		Doc:       map[string]any{"fields": map[string]any{"title": "t"}},
-		Relations: e.relations[req.ResourceID],
-		Parents:   e.parents[req.ResourceID],
+		Relations: e.relations[firstID(req)],
+		Parents:   e.parents[firstID(req)],
 	}}}
 	close(ch)
 	return ch
@@ -1012,7 +1012,7 @@ func (e *recordingExecuter) requestsFor(id string) []projection.BuildRequest {
 	defer e.mu.Unlock()
 	var out []projection.BuildRequest
 	for _, r := range e.reqs {
-		if r.ResourceID == id {
+		if firstID(r) == id {
 			out = append(out, r)
 		}
 	}
@@ -1025,7 +1025,7 @@ func (e *recordingExecuter) metadataByID() map[string]map[string]string {
 	defer e.mu.Unlock()
 	out := make(map[string]map[string]string, len(e.reqs))
 	for _, r := range e.reqs {
-		out[r.ResourceID] = r.Metadata
+		out[firstID(r)] = r.Metadata
 	}
 	return out
 }
@@ -1242,4 +1242,12 @@ func (s *recordingStore) ListUncovered(context.Context, string, int, map[string]
 
 func (s *recordingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
 	return nil, errors.New("BeginBuilds: not implemented")
+}
+
+// firstID is a request's first asked id, or "" for an all-of-type walk.
+func firstID(req projection.BuildRequest) string {
+	if len(req.ResourceIDs) == 0 {
+		return ""
+	}
+	return req.ResourceIDs[0]
 }

@@ -10,10 +10,16 @@ import (
 // BuildRequest is the request parameter for the aggregation plan.
 type BuildRequest struct {
 	ResourceType string
-	ResourceID   string
-	Metadata     map[string]string
+	// ResourceIDs are the ids the plan is asked about, all fetched with
+	// Metadata. The plan answers each of them exactly once: a BuildDoc with
+	// its document, with a nil Doc (its version's nil, ADR 0013), or with
+	// Err. An asked id left unanswered fails; it is never read as a nil
+	// (ADR 0014). Empty asks for the all-of-type walk, which answers
+	// whatever its listing finds.
+	ResourceIDs []string
+	Metadata    map[string]string
 
-	// PageToken starts an all-of-type walk (ResourceID == "") mid-listing:
+	// PageToken starts an all-of-type walk (ResourceIDs empty) mid-listing:
 	// the walk's first fetch uses it in place of the first page. Empty means
 	// the beginning. Ignored for single-resource builds. Set by core when
 	// resuming a rebuild walk from a RebuildCursor.
@@ -52,6 +58,11 @@ type BuildDoc struct {
 	// This bootstraps a Parent edge for a brand-new Child that has no persisted
 	// edge yet. See ADR 0006.
 	Parents []model.Resource
+
+	// Err is the plan's error for Root.Id alone: it fails that id's build
+	// and no other's. A BuildDoc carrying Err carries nothing else core
+	// reads but Root.
+	Err error
 }
 
 // TODO: NewPlan builder

@@ -28,7 +28,7 @@ func (e *staticExecuter) Execute(ctx context.Context, req projection.BuildReques
 		e.onExecute()
 	}
 	docs := e.docs
-	if d, ok := e.byID[req.ResourceID]; ok {
+	if d, ok := e.byID[firstID(req)]; ok {
 		docs = d
 	}
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)

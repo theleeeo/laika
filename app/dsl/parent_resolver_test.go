@@ -25,7 +25,7 @@ func childParents(t *testing.T, resources resource.Configs, childType, childID s
 
 	ch := childPlans[0].Execute(context.Background(), projection.BuildRequest{
 		ResourceType: childType,
-		ResourceID:   childID,
+		ResourceIDs:  []string{childID},
 	})
 
 	var doc projection.BuildDoc

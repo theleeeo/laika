@@ -151,7 +151,7 @@ func TestRelationFetch_PassesForeignFieldToProvider(t *testing.T) {
 	plan := buildPlanForVersion(prov, "order", vc, nil)
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "order",
-		ResourceID:   "1",
+		ResourceIDs:  []string{"1"},
 	})
 	for r := range ch {
 		require.NoError(t, r.Err)
@@ -189,7 +189,7 @@ func TestRelationFetch_ChainedJoinFromSibling(t *testing.T) {
 
 	plan := buildPlanForVersion(prov, "order", vc, nil)
 	var docs []projection.BuildDoc
-	for r := range plan.Execute(context.Background(), projection.BuildRequest{ResourceType: "order", ResourceID: "1"}) {
+	for r := range plan.Execute(context.Background(), projection.BuildRequest{ResourceType: "order", ResourceIDs: []string{"1"}}) {
 		require.NoError(t, r.Err)
 		docs = append(docs, r.Items...)
 	}
@@ -223,7 +223,7 @@ func TestBuildPlanForVersion_PropagatesMetadata(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "order",
-		ResourceID:   "1",
+		ResourceIDs:  []string{"1"},
 		Metadata:     metadata,
 	})
 
@@ -253,7 +253,7 @@ func TestBuildPlanForVersion_FetchSingle(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "1",
+		ResourceIDs:  []string{"1"},
 	})
 
 	var docs []projection.BuildDoc
@@ -277,7 +277,7 @@ func TestBuildPlanForVersion_FetchSingle_NotFound(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "999",
+		ResourceIDs:  []string{"999"},
 	})
 
 	var docs []projection.BuildDoc
@@ -303,7 +303,6 @@ func TestBuildPlanForVersion_FetchAll_SinglePage(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "", // empty = list all
 	})
 
 	var docs []projection.BuildDoc
@@ -334,7 +333,6 @@ func TestBuildPlanForVersion_FetchAll_MultiplePages(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "",
 	})
 
 	var docs []projection.BuildDoc
@@ -368,7 +366,6 @@ func TestBuildPlanForVersion_FetchAll_StartsAtRequestPageToken(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "",
 		PageToken:    "3", // resume mid-walk: page tokens in mockProvider are resource IDs
 	})
 
@@ -433,7 +430,6 @@ func TestBuildPlanForVersion_FetchAll_Empty(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "product",
-		ResourceID:   "",
 	})
 
 	var docs []projection.BuildDoc
@@ -470,7 +466,6 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: "order",
-		ResourceID:   "",
 	})
 
 	var docs []projection.BuildDoc
@@ -502,7 +497,7 @@ func runPlan(t *testing.T, plan projection.Plan, resourceType, resourceID string
 	t.Helper()
 	ch := plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: resourceType,
-		ResourceID:   resourceID,
+		ResourceIDs:  []string{resourceID},
 	})
 	for r := range ch {
 		require.NoError(t, r.Err)
@@ -537,7 +532,7 @@ func execSinglePlan(t *testing.T, prov *mockProvider, vc *resource.VersionConfig
 	var docs []projection.BuildDoc
 	for r := range plan.Execute(context.Background(), projection.BuildRequest{
 		ResourceType: resourceType,
-		ResourceID:   id,
+		ResourceIDs:  []string{id},
 	}) {
 		require.NoError(t, r.Err)
 		docs = append(docs, r.Items...)
@@ -674,7 +669,7 @@ func TestBuildPlansFromConfig_VersionedPlans(t *testing.T) {
 
 	// Version 1: only title.
 	ch1 := plans["product"][0].Execute(context.Background(), projection.BuildRequest{
-		ResourceType: "product", ResourceID: "1",
+		ResourceType: "product", ResourceIDs: []string{"1"},
 	})
 	var docs1 []projection.BuildDoc
 	for r := range ch1 {
@@ -690,7 +685,7 @@ func TestBuildPlansFromConfig_VersionedPlans(t *testing.T) {
 
 	// Version 2: title + price.
 	ch2 := plans["product"][1].Execute(context.Background(), projection.BuildRequest{
-		ResourceType: "product", ResourceID: "1",
+		ResourceType: "product", ResourceIDs: []string{"1"},
 	})
 	var docs2 []projection.BuildDoc
 	for r := range ch2 {

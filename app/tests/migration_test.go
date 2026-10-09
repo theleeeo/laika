@@ -513,7 +513,7 @@ type leftOutOfListing struct {
 }
 
 func (e leftOutOfListing) Execute(ctx context.Context, req projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
-	if req.ResourceID != "" {
+	if len(req.ResourceIDs) != 0 {
 		return nilForIDs(e).Execute(ctx, req)
 	}
 	out := make(chan aggregation.ExecutionResult[projection.BuildDoc])

@@ -33,7 +33,7 @@ func TestPlanExecute_PropagatesContextToProvider_SingleResource(t *testing.T) {
 	plan := buildPlanForVersion(prov, "order", customerRelationConfig(), nil)
 
 	ctx := context.WithValue(context.Background(), ctxMarkerKey{}, "marker")
-	for r := range plan.Execute(ctx, projection.BuildRequest{ResourceType: "order", ResourceID: "1"}) {
+	for r := range plan.Execute(ctx, projection.BuildRequest{ResourceType: "order", ResourceIDs: []string{"1"}}) {
 		require.NoError(t, r.Err)
 	}
 

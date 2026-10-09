@@ -233,7 +233,7 @@ func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resou
 	// from the last.
 	docs, missing, err := executeAllPlans(ctx, plans, projection.BuildRequest{
 		ResourceType: resourceType,
-		ResourceID:   resourceID,
+		ResourceIDs:  []string{resourceID},
 		Metadata:     metadata,
 	})
 	if err != nil {
@@ -425,7 +425,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		// edge set, never another version's.
 		docs, missing, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
-			ResourceID:   id,
+			ResourceIDs:  []string{id},
 			Metadata:     params.Metadata,
 		})
 		if planErr != nil {
@@ -583,7 +583,7 @@ func (idx *Indexer) rebuildAll(ctx context.Context, params RebuildArgs, resume r
 
 		ch := plan.Execute(ctx, projection.BuildRequest{
 			ResourceType: params.ResourceType,
-			ResourceID:   "",
+			ResourceIDs:  nil,
 			Metadata:     params.Metadata,
 			// Non-empty only on a resumable walk, whose sole active plan this
 			// is; every other walk starts its plans at the listing's head.

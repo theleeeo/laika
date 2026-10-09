@@ -36,14 +36,14 @@ func BuildPlansFromConfig(provider source.Provider, resources resource.Configs) 
 // discovery: the root plan derives BuildDoc.Parents from the root's own data.
 func buildPlanForVersion(provider source.Provider, resourceName string, vc *resource.VersionConfig, parentRefs []parentRef) projection.Plan {
 	// Root plan: fetches the root resource and initialises the BuildDoc.
-	// When ResourceID is empty, the plan lists all resources of the type with
+	// When ResourceIDs is empty, the plan lists all resources of the type with
 	// pagination via provider.ListResources. When set, it fetches a single
 	// resource as before. After fetching, it derives the Parents to bootstrap
 	// from the root's own data (see ADR 0006).
 	plan := aggregation.Root(func(ctx context.Context, params aggregation.FetchParameters[projection.BuildRequest]) (aggregation.FetchResult[projection.BuildDoc], error) {
 		var result aggregation.FetchResult[projection.BuildDoc]
 		var err error
-		if params.Request.ResourceID == "" {
+		if len(params.Request.ResourceIDs) == 0 {
 			result, err = fetchAllResources(ctx, provider, resourceName, vc.Fields, params)
 		} else {
 			result, err = fetchSingleResource(ctx, provider, resourceName, vc.Fields, params)
@@ -201,14 +201,14 @@ func fetchSingleResource(
 ) (aggregation.FetchResult[projection.BuildDoc], error) {
 	data, err := provider.FetchResource(ctx, source.FetchResourceParams{
 		ResourceType: params.Request.ResourceType,
-		ResourceID:   params.Request.ResourceID,
+		ResourceID:   params.Request.ResourceIDs[0],
 		Metadata:     params.Request.Metadata,
 	})
 	if err != nil {
-		return aggregation.FetchResult[projection.BuildDoc]{}, fmt.Errorf("fetch resource %s/%s: %w", params.Request.ResourceType, params.Request.ResourceID, err)
+		return aggregation.FetchResult[projection.BuildDoc]{}, fmt.Errorf("fetch resource %s/%s: %w", params.Request.ResourceType, params.Request.ResourceIDs[0], err)
 	}
 
-	root := model.Resource{Type: params.Request.ResourceType, Id: params.Request.ResourceID}
+	root := model.Resource{Type: params.Request.ResourceType, Id: params.Request.ResourceIDs[0]}
 
 	if data.Data == nil {
 		return aggregation.FetchResult[projection.BuildDoc]{Items: []projection.BuildDoc{{

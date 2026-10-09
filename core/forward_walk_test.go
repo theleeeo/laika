@@ -41,9 +41,9 @@ func (e *walkExecuter) Execute(ctx context.Context, req projection.BuildRequest)
 	e.mu.Lock()
 	e.reqs = append(e.reqs, req)
 	e.mu.Unlock()
-	if req.ResourceID != "" {
+	if len(req.ResourceIDs) != 0 {
 		ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
-		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{productDoc(req.ResourceID)}}
+		ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{productDoc(firstID(req))}}
 		close(ch)
 		return ch
 	}
@@ -230,7 +230,7 @@ func TestForwardWalkNow_WalksOncePerMetadataMap(t *testing.T) {
 		t.Fatalf("want one walk per map, got %+v", reqs)
 	}
 	for i, want := range []map[string]string{actor("A"), actor("B")} {
-		if !maps.Equal(reqs[i].Metadata, want) || reqs[i].ResourceID != "" || reqs[i].PageSize != 2 {
+		if !maps.Equal(reqs[i].Metadata, want) || len(reqs[i].ResourceIDs) != 0 || reqs[i].PageSize != 2 {
 			t.Fatalf("walk %d: got %+v, want an all-of-type walk with metadata %v and page size 2", i, reqs[i], want)
 		}
 	}

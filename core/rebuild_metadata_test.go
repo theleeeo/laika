@@ -42,7 +42,7 @@ func (l *requestLog) requestsFor(id string) []projection.BuildRequest {
 	defer l.mu.Unlock()
 	var out []projection.BuildRequest
 	for _, r := range l.reqs {
-		if r.ResourceID == id {
+		if firstID(r) == id {
 			out = append(out, r)
 		}
 	}

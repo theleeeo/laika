@@ -92,7 +92,7 @@ func (e *requestExecuter) Execute(_ context.Context, req projection.BuildRequest
 	e.mu.Unlock()
 	ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
 	ch <- aggregation.ExecutionResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-		Root: model.Resource{Type: req.ResourceType, Id: req.ResourceID},
+		Root: model.Resource{Type: req.ResourceType, Id: firstID(req)},
 		Doc:  map[string]any{"fields": map[string]any{}},
 	}}}
 	close(ch)
@@ -129,7 +129,7 @@ func TestSweepStale_BuildsEachEntryWithItsRowsMetadata(t *testing.T) {
 
 	got := make(map[string]map[string]string, len(exec.requests))
 	for _, req := range exec.requests {
-		got[req.ResourceID] = req.Metadata
+		got[firstID(req)] = req.Metadata
 	}
 	want := map[string]map[string]string{
 		"1": {"fiber_operator_id": "op-1"},
