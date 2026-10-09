@@ -2,12 +2,14 @@ package dsl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/theleeeo/laika/app/source"
 	"github.com/theleeeo/laika/core/resource"
+	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
 )
 
@@ -32,6 +34,16 @@ type mockProvider struct {
 	// lastCtxValues records, per provider method, the test marker value found
 	// on the incoming ctx — for asserting the plan's ctx reaches the provider.
 	lastCtxValues map[string]any
+	// fetchedResourceIDs records the ResourceID of every FetchResource call,
+	// in call order.
+	fetchedResourceIDs []string
+	// fetchResourceErr fails FetchResource for the ids it names.
+	fetchResourceErr map[string]error
+	// fetchedRelatedRoots records the root id of every FetchRelated call.
+	fetchedRelatedRoots []string
+	// onFetchResource, when set, runs at the start of every FetchResource
+	// call with its id.
+	onFetchResource func(id string)
 }
 
 type ctxMarkerKey struct{}
@@ -67,6 +79,13 @@ func copyMetadata(in map[string]string) map[string]string {
 func (m *mockProvider) FetchResource(ctx context.Context, params source.FetchResourceParams) (source.FetchResourceResult, error) {
 	m.recordCtx("FetchResource", ctx)
 	m.lastFetchResourceMetadata = copyMetadata(params.Metadata)
+	m.fetchedResourceIDs = append(m.fetchedResourceIDs, params.ResourceID)
+	if m.onFetchResource != nil {
+		m.onFetchResource(params.ResourceID)
+	}
+	if err := m.fetchResourceErr[params.ResourceID]; err != nil {
+		return source.FetchResourceResult{}, err
+	}
 	data, ok := m.resources[params.ResourceType+"|"+params.ResourceID]
 	if !ok {
 		return source.FetchResourceResult{}, nil
@@ -79,6 +98,7 @@ func (m *mockProvider) FetchRelated(ctx context.Context, params source.FetchRela
 	m.lastFetchRelatedMetadata = copyMetadata(params.Metadata)
 	m.lastFetchRelatedKey = params.Key
 	m.fetchedRelated[params.ResourceType] = true
+	m.fetchedRelatedRoots = append(m.fetchedRelatedRoots, params.RootResource.Id)
 	key := params.ResourceType + "|" + params.Key.Value
 	data, ok := m.related[key]
 	if !ok {
@@ -288,6 +308,121 @@ func TestBuildPlanForVersion_FetchSingle_NotFound(t *testing.T) {
 
 	require.Len(t, docs, 1)
 	require.Nil(t, docs[0].Doc, "doc should be nil for missing resource")
+}
+
+// collectPlan executes the plan for the request and returns every item,
+// failing the test if the execution reports an error.
+func collectPlan(t *testing.T, plan projection.Plan, req projection.BuildRequest) []projection.BuildDoc {
+	t.Helper()
+	var docs []projection.BuildDoc
+	for r := range plan.Execute(context.Background(), req) {
+		require.NoError(t, r.Err)
+		docs = append(docs, r.Items...)
+	}
+	return docs
+}
+
+func TestBuildPlanForVersion_FetchByIDs_OneFetchPerID(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["product|1"] = map[string]any{"id": "1", "title": "Widget"}
+	prov.resources["product|2"] = map[string]any{"id": "2", "title": "Gadget"}
+
+	vc := &resource.VersionConfig{Fields: []resource.FieldConfig{{Name: "title"}}}
+	plan := buildPlanForVersion(prov, "product", vc, nil)
+
+	docs := collectPlan(t, plan, projection.BuildRequest{ResourceType: "product", ResourceIDs: []string{"2", "1"}})
+
+	require.Equal(t, []string{"2", "1"}, prov.fetchedResourceIDs, "one FetchResource per asked id, in asked order")
+	require.Len(t, docs, 2)
+	require.Equal(t, "2", docs[0].Root.Id)
+	require.Equal(t, "Gadget", docs[0].Doc["fields"].(map[string]any)["title"])
+	require.Equal(t, "1", docs[1].Root.Id)
+	require.Equal(t, "Widget", docs[1].Doc["fields"].(map[string]any)["title"])
+	for _, d := range docs {
+		require.Equal(t, "product", d.Root.Type)
+		require.NoError(t, d.Err)
+	}
+}
+
+func TestBuildPlanForVersion_FetchByIDs_NoDataAnswersNil(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["product|1"] = map[string]any{"id": "1", "title": "Widget"}
+
+	vc := &resource.VersionConfig{Fields: []resource.FieldConfig{{Name: "title"}}}
+	plan := buildPlanForVersion(prov, "product", vc, nil)
+
+	docs := collectPlan(t, plan, projection.BuildRequest{ResourceType: "product", ResourceIDs: []string{"1", "999"}})
+
+	require.Len(t, docs, 2)
+	require.Equal(t, "1", docs[0].Root.Id)
+	require.NotNil(t, docs[0].Doc)
+	require.Equal(t, model.Resource{Type: "product", Id: "999"}, docs[1].Root)
+	require.Nil(t, docs[1].Doc, "an id the provider has no data for is answered with an explicit nil")
+	require.NoError(t, docs[1].Err)
+}
+
+func TestBuildPlanForVersion_FetchByIDs_ErrorFailsThatIDAlone(t *testing.T) {
+	prov := newMockProvider()
+	prov.resources["order|1"] = map[string]any{"id": "1", "number": "ORD-1", "shop_id": "s1"}
+	prov.resources["order|2"] = map[string]any{"id": "2", "number": "ORD-2", "shop_id": "s2"}
+	prov.related["customer|1"] = []map[string]any{{"id": "c1", "name": "Alice"}}
+	prov.related["customer|2"] = []map[string]any{{"id": "c2", "name": "Bob"}}
+	failure := errors.New("source unavailable")
+	prov.fetchResourceErr = map[string]error{"2": failure}
+
+	// The relation and the parent ref exercise every later stage: an Err
+	// item must pass through them untouched.
+	parentRefs := []parentRef{{parentType: "shop", foreignField: "shop_id"}}
+	plan := buildPlanForVersion(prov, "order", customerRelationConfig(), parentRefs)
+
+	docs := collectPlan(t, plan, projection.BuildRequest{
+		ResourceType: "order",
+		ResourceIDs:  []string{"1", "2"},
+		Metadata:     map[string]string{"tenant": "t1"},
+	})
+
+	require.Len(t, docs, 2)
+
+	require.Equal(t, "1", docs[0].Root.Id)
+	require.NoError(t, docs[0].Err)
+	require.Equal(t, "ORD-1", docs[0].Doc["fields"].(map[string]any)["number"])
+	require.Equal(t, []model.Resource{{Type: "shop", Id: "s1"}}, docs[0].Parents)
+	require.Equal(t, []model.Resource{{Type: "customer", Id: "c1"}}, docs[0].Relations)
+
+	require.ErrorIs(t, docs[1].Err, failure)
+	require.Equal(t, projection.BuildDoc{Root: model.Resource{Type: "order", Id: "2"}, Err: docs[1].Err}, docs[1],
+		"a failed id carries its Root and Err and nothing else")
+	require.Equal(t, []string{"1"}, prov.fetchedRelatedRoots, "no related read for the failed id")
+}
+
+func TestBuildPlanForVersion_FetchByIDs_CancelledFailsExecution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	prov := newMockProvider()
+	prov.resources["product|1"] = map[string]any{"id": "1", "title": "Widget"}
+	prov.fetchResourceErr = map[string]error{"2": context.Canceled}
+	prov.onFetchResource = func(id string) {
+		if id == "2" {
+			cancel()
+		}
+	}
+
+	vc := &resource.VersionConfig{Fields: []resource.FieldConfig{{Name: "title"}}}
+	plan := buildPlanForVersion(prov, "product", vc, nil)
+
+	var execErr error
+	var docs []projection.BuildDoc
+	for r := range plan.Execute(ctx, projection.BuildRequest{ResourceType: "product", ResourceIDs: []string{"1", "2", "3"}}) {
+		if r.Err != nil {
+			execErr = r.Err
+		}
+		docs = append(docs, r.Items...)
+	}
+
+	require.ErrorIs(t, execErr, context.Canceled, "a cancelled read fails the execution, not the id")
+	require.Empty(t, docs)
+	require.Equal(t, []string{"1", "2"}, prov.fetchedResourceIDs, "no read after the cancellation")
 }
 
 func TestBuildPlanForVersion_FetchAll_SinglePage(t *testing.T) {

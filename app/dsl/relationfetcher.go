@@ -19,6 +19,9 @@ func newRelationFetcher(provider source.Provider, rel resource.RelationConfig) *
 	return &relationFetcher{provider: provider, rel: rel}
 }
 
+// Fetch reads the relation's resources for one parent document. A parent with
+// a nil Doc (the root fetch answered a nil or an Err for it) has nothing to
+// relate and is not read for.
 func (f *relationFetcher) Fetch(ctx context.Context, parent projection.BuildDoc) (*fetchedRelation, error) {
 	if parent.Doc == nil {
 		return nil, nil

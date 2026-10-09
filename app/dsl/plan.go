@@ -35,18 +35,22 @@ func BuildPlansFromConfig(provider source.Provider, resources resource.Configs) 
 // for each relation in topological order. parentRefs drives reverse-relation
 // discovery: the root plan derives BuildDoc.Parents from the root's own data.
 func buildPlanForVersion(provider source.Provider, resourceName string, vc *resource.VersionConfig, parentRefs []parentRef) projection.Plan {
-	// Root plan: fetches the root resource and initialises the BuildDoc.
+	// Root plan: fetches the root resources and initialises their BuildDocs.
 	// When ResourceIDs is empty, the plan lists all resources of the type with
-	// pagination via provider.ListResources. When set, it fetches a single
-	// resource as before. After fetching, it derives the Parents to bootstrap
-	// from the root's own data (see ADR 0006).
+	// pagination via provider.ListResources. When set, it answers every asked
+	// id exactly once, in asked order: with its document, with a nil Doc when
+	// the provider has no data for it, or with Err when its read fails (ADR
+	// 0014). After fetching, it derives the Parents to bootstrap from each
+	// root's own data (see ADR 0006). An item with a nil Doc, whether a nil or
+	// an Err, has no resolved data, so it derives no Parents, and every later
+	// stage passes it through untouched.
 	plan := aggregation.Root(func(ctx context.Context, params aggregation.FetchParameters[projection.BuildRequest]) (aggregation.FetchResult[projection.BuildDoc], error) {
 		var result aggregation.FetchResult[projection.BuildDoc]
 		var err error
 		if len(params.Request.ResourceIDs) == 0 {
 			result, err = fetchAllResources(ctx, provider, resourceName, vc.Fields, params)
 		} else {
-			result, err = fetchSingleResource(ctx, provider, resourceName, vc.Fields, params)
+			result, err = fetchResourcesByID(ctx, provider, resourceName, vc.Fields, params)
 		}
 		if err != nil {
 			return result, err
@@ -87,7 +91,8 @@ func buildPlanForVersion(provider source.Provider, resourceName string, vc *reso
 
 // relationBuilder returns the build stage for a single relation: it folds the
 // resources the fetcher returned into the parent document. A nil fetch result
-// means the relation resolved to nothing, and the document is left untouched.
+// means the relation resolved to nothing, and the document is left untouched,
+// as is a parent with a nil Doc (a nil or an Err item).
 func relationBuilder(rel resource.RelationConfig) func(projection.BuildDoc, *fetchedRelation) projection.BuildDoc {
 	// TODO: There are a bunch of things here that can go wrong, like missing id, incorrect types, etc. Handle that better.
 	return func(parentDoc projection.BuildDoc, fr *fetchedRelation) projection.BuildDoc {
@@ -191,48 +196,58 @@ func resolveOrder(relations []resource.RelationConfig) ([]resource.RelationConfi
 	return ordered, nil
 }
 
-// fetchSingleResource fetches one resource by ID and wraps it in a BuildDoc.
-func fetchSingleResource(
+// fetchResourcesByID answers every asked id, in asked order, with one
+// FetchResource each, until the provider has a by-ids read (L5.4). An id the
+// provider has no data for is answered with an explicit nil Doc, its
+// version's nil (ADR 0013). A read that fails answers its id alone with
+// BuildDoc.Err, carrying nothing but Root, and the other ids are still read
+// (ADR 0014). A read that fails because ctx is done fails the execution
+// instead: the build was cancelled, not the id.
+func fetchResourcesByID(
 	ctx context.Context,
 	provider source.Provider,
 	resourceName string,
 	fields []resource.FieldConfig,
 	params aggregation.FetchParameters[projection.BuildRequest],
 ) (aggregation.FetchResult[projection.BuildDoc], error) {
-	data, err := provider.FetchResource(ctx, source.FetchResourceParams{
-		ResourceType: params.Request.ResourceType,
-		ResourceID:   params.Request.ResourceIDs[0],
-		Metadata:     params.Request.Metadata,
-	})
-	if err != nil {
-		return aggregation.FetchResult[projection.BuildDoc]{}, fmt.Errorf("fetch resource %s/%s: %w", params.Request.ResourceType, params.Request.ResourceIDs[0], err)
-	}
+	items := make([]projection.BuildDoc, 0, len(params.Request.ResourceIDs))
+	for _, id := range params.Request.ResourceIDs {
+		root := model.Resource{Type: params.Request.ResourceType, Id: id}
 
-	root := model.Resource{Type: params.Request.ResourceType, Id: params.Request.ResourceIDs[0]}
+		data, err := provider.FetchResource(ctx, source.FetchResourceParams{
+			ResourceType: params.Request.ResourceType,
+			ResourceID:   id,
+			Metadata:     params.Request.Metadata,
+		})
+		if err != nil {
+			err = fmt.Errorf("fetch resource %s/%s: %w", params.Request.ResourceType, id, err)
+			if ctx.Err() != nil {
+				return aggregation.FetchResult[projection.BuildDoc]{}, err
+			}
+			items = append(items, projection.BuildDoc{Root: root, Err: err})
+			continue
+		}
 
-	if data.Data == nil {
-		return aggregation.FetchResult[projection.BuildDoc]{Items: []projection.BuildDoc{{
-			Doc:      nil,
-			Resolved: nil,
-			Root:     root,
-			Metadata: params.Request.Metadata,
-		}}}, nil
-	}
+		if data.Data == nil {
+			items = append(items, projection.BuildDoc{
+				Root:     root,
+				Metadata: params.Request.Metadata,
+			})
+			continue
+		}
 
-	filtered := filterFields(data.Data, fields)
-
-	return aggregation.FetchResult[projection.BuildDoc]{
-		Items: []projection.BuildDoc{{
+		items = append(items, projection.BuildDoc{
 			Doc: map[string]any{
-				"fields": filtered,
+				"fields": filterFields(data.Data, fields),
 			},
 			Resolved: map[string][]map[string]any{
 				resourceName: {data.Data},
 			},
 			Root:     root,
 			Metadata: params.Request.Metadata,
-		}},
-	}, nil
+		})
+	}
+	return aggregation.FetchResult[projection.BuildDoc]{Items: items}, nil
 }
 
 // defaultListPageSize is an all-of-type walk's listing page size when its
