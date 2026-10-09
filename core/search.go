@@ -50,6 +50,9 @@ func (idx *Indexer) Search(ctx context.Context, req SearchRequest) (SearchRespon
 		ctx = withScanState(ctx, st)
 		vc = st.vc
 	} else {
+		if req.PageToken != "" {
+			return SearchResponse{}, &InvalidArgumentError{Msg: "a page token continues a scan: scan must be set"}
+		}
 		ctx = withScanState(ctx, nil)
 		if cfg != nil {
 			vc = cfg.ReadVersionConfig()

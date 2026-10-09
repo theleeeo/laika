@@ -1025,3 +1025,22 @@ func TestScan_PageSizeIsNormalizedBeforeFingerprinting(t *testing.T) {
 		t.Fatalf("page size 7 reached the backend as %d", got)
 	}
 }
+
+// Ruling R7: a page token without Scan is a caller's mistake, not page 1.
+func TestScan_PageTokenWithoutScanIsInvalidArgument(t *testing.T) {
+	be := &scanBackend{}
+	idx, _ := newScanIndexer(t, be)
+
+	resp1, err := idx.Search(context.Background(), scanReq())
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	req := nextPage(t, scanReq(), resp1)
+	req.Scan = false
+	calls := len(be.calls)
+	_, err = idx.Search(context.Background(), req)
+	assertInvalidArgument(t, err)
+	if len(be.calls) != calls {
+		t.Fatal("the backend was called")
+	}
+}
