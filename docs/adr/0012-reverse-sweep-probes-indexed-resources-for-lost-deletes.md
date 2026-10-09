@@ -2,6 +2,14 @@
 
 _Accepted, 2026-10-06._
 
+> **Note (2026-10-09, runbook step L4.1):** `SearchBackend` now has a
+> point-in-time read, the scan ([ADR
+> 0015](./0015-a-scan-reads-one-snapshot-under-the-version-it-pinned.md)), so
+> the first alternative below no longer rests on its absence. The choice
+> stands: a scan reads only the index the read alias serves, through the search
+> chain, and returns ids without the actor a probe needs, which the
+> `resources` table holds per row.
+
 > **Note (2026-10-07, runbook step L2.5):** the other direction is built, the
 > **forward walk**. The reverse sweep finds what the source no longer has; the
 > forward walk finds what Laika never heard of, a resource created or changed
