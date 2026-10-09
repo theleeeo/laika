@@ -307,12 +307,26 @@ func TestBuildPlanForVersion_FetchSingle_NotFound(t *testing.T) {
 	}
 
 	require.Len(t, docs, 1)
+	require.NoError(t, docs[0].Err)
 	require.Nil(t, docs[0].Doc, "doc should be nil for missing resource")
 }
 
 // collectPlan executes the plan for the request and returns every item,
-// failing the test if the execution reports an error.
+// failing the test if the execution or any item reports an error: a root
+// read that fails arrives as an item with Err and a nil Doc, which would
+// otherwise pass for an absent resource.
 func collectPlan(t *testing.T, plan projection.Plan, req projection.BuildRequest) []projection.BuildDoc {
+	t.Helper()
+	docs := collectPlanAllowingItemErr(t, plan, req)
+	for _, d := range docs {
+		require.NoError(t, d.Err, "item %s/%s", d.Root.Type, d.Root.Id)
+	}
+	return docs
+}
+
+// collectPlanAllowingItemErr is collectPlan for a test that expects some
+// items to carry their id's error: it fails only on an execution error.
+func collectPlanAllowingItemErr(t *testing.T, plan projection.Plan, req projection.BuildRequest) []projection.BuildDoc {
 	t.Helper()
 	var docs []projection.BuildDoc
 	for r := range plan.Execute(context.Background(), req) {
@@ -375,7 +389,7 @@ func TestBuildPlanForVersion_FetchByIDs_ErrorFailsThatIDAlone(t *testing.T) {
 	parentRefs := []parentRef{{parentType: "shop", foreignField: "shop_id"}}
 	plan := buildPlanForVersion(prov, "order", customerRelationConfig(), parentRefs)
 
-	docs := collectPlan(t, plan, projection.BuildRequest{
+	docs := collectPlanAllowingItemErr(t, plan, projection.BuildRequest{
 		ResourceType: "order",
 		ResourceIDs:  []string{"1", "2"},
 		Metadata:     map[string]string{"tenant": "t1"},
@@ -627,16 +641,13 @@ func TestBuildPlanForVersion_FetchAll_WithRelation(t *testing.T) {
 }
 
 // runPlan executes the plan for a single resource ID and drains the channel,
-// failing the test if any error is emitted.
+// failing the test if the execution or any item reports an error.
 func runPlan(t *testing.T, plan projection.Plan, resourceType, resourceID string) {
 	t.Helper()
-	ch := plan.Execute(context.Background(), projection.BuildRequest{
+	collectPlan(t, plan, projection.BuildRequest{
 		ResourceType: resourceType,
 		ResourceIDs:  []string{resourceID},
 	})
-	for r := range ch {
-		require.NoError(t, r.Err)
-	}
 }
 
 func TestReferenceRelationNotFetched(t *testing.T) {
@@ -660,18 +671,15 @@ func TestReferenceRelationNotFetched(t *testing.T) {
 }
 
 // execSinglePlan builds a single-version plan, executes it for one resource id,
-// drains the result channel asserting no error, and returns the single BuildDoc.
+// drains the result channel asserting neither the execution nor the item
+// reports an error, and returns the single BuildDoc.
 func execSinglePlan(t *testing.T, prov *mockProvider, vc *resource.VersionConfig, resourceType, id string) projection.BuildDoc {
 	t.Helper()
 	plan := buildPlanForVersion(prov, resourceType, vc, nil)
-	var docs []projection.BuildDoc
-	for r := range plan.Execute(context.Background(), projection.BuildRequest{
+	docs := collectPlan(t, plan, projection.BuildRequest{
 		ResourceType: resourceType,
 		ResourceIDs:  []string{id},
-	}) {
-		require.NoError(t, r.Err)
-		docs = append(docs, r.Items...)
-	}
+	})
 	require.Len(t, docs, 1)
 	return docs[0]
 }

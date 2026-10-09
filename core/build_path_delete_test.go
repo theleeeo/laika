@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/theleeeo/laika/aggregation"
 	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
 )
@@ -20,7 +21,7 @@ import (
 
 // newDeletePathIndexer serves "product" over two Schema Versions, both from
 // ex, on recordingStore.
-func newDeletePathIndexer(st *recordingStore, ex *staticExecuter) (*Indexer, *captureBackend) {
+func newDeletePathIndexer(st *recordingStore, ex aggregation.Executer[projection.BuildRequest, projection.BuildDoc]) (*Indexer, *captureBackend) {
 	be := &captureBackend{}
 	return mustNew(Config{
 		Resources: twoVersionResources(),

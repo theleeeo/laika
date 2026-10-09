@@ -10,12 +10,14 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/theleeeo/laika/aggregation"
+	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
 )
 
@@ -239,6 +241,57 @@ func testBuildFailsAndDeletesNothing(t *testing.T, answer []projection.BuildDoc)
 			t.Fatalf("X's row must stay for the sweep: %v", st.callsSnapshot())
 		}
 	})
+}
+
+// An owned build whose ctx ends while its plans run, and whose plans then
+// close without answering its id — as a plan cut short by a cancellation or
+// shutdown does — leaves the id unanswered, which is no nil: nothing is
+// deleted for it, no row removed, no edge set replaced. The failure is the
+// cancellation's, not the build's, so the id is released without a backoff
+// through ReleaseOwners, and its row stays marked for the sweep.
+func TestBuild_ACancelledOwnedBuildWhosePlansCloseUnanswered_DeletesNothingAndIsNotBackedOff(t *testing.T) {
+	st := &recordingStore{}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var executed int
+	closesUnanswered := executerFunc(func(context.Context, projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+		executed++
+		cancel()
+		ch := make(chan aggregation.ExecutionResult[projection.BuildDoc])
+		close(ch)
+		return ch
+	})
+	idx, be := newDeletePathIndexer(st, closesUnanswered)
+
+	owned, err := st.MarkStale(t.Context(), []model.Resource{product("X")}, time.Minute)
+	if err != nil || len(owned) != 1 {
+		t.Fatalf("claiming: %v %v", owned, err)
+	}
+	token := owned[0].Token
+
+	_ = idx.Build(ctx, BuildArgs{ResourceType: "product", ResourceIds: []string{"X"}, OwnerTokens: map[string]int64{"X": token}})
+	waitIdle(t, idx)
+
+	if executed == 0 {
+		t.Fatalf("X's plans must have run: %v", st.callsSnapshot())
+	}
+	if d := be.deletesAt(); len(d) != 0 {
+		t.Fatalf("an unanswered id must delete no document, got %v", d)
+	}
+	for _, prefix := range []string{"DeleteResourceIfSeq", "RemoveResource", "ReplaceEdges", "FinishOwned"} {
+		if n := st.count(prefix); n != 0 {
+			t.Fatalf("an unanswered id must reach no %s: %v", prefix, st.callsSnapshot())
+		}
+	}
+	if n := st.count("ReleaseFailed"); n != 0 {
+		t.Fatalf("a build the cancellation cut short must not back X off: %v", st.callsSnapshot())
+	}
+	if st.indexOf(fmt.Sprintf("ReleaseOwners:product/X:%d", token)) == -1 || st.owner(product("X")) != 0 {
+		t.Fatalf("X's ownership must be released on a live ctx, owner now %d: %v", st.owner(product("X")), st.callsSnapshot())
+	}
+	if r, ok := st.row(product("X")); !ok || !r.stale {
+		t.Fatalf("X's row must stay, marked, got %+v (present %v)", r, ok)
+	}
 }
 
 // A call that fails on a broken answer stops the plan: its context ends, so
