@@ -3455,20 +3455,25 @@ func TestBeginBuilds_InsertBeginsATombstoneAsBeginBuildDoes(t *testing.T) {
 }
 
 // A token that no longer matches the row's owner token, like 0, leaves the
-// row's ownership alone, as BeginBuild does; the matching one renews it.
+// row's ownership alone, as BeginBuild does; the matching one renews it. A
+// token is matched against the row it is given for only: another row's owner
+// token renews neither row, and renews that other row when given for it.
 func TestBeginBuilds_InsertRenewsOnlyAMatchingToken(t *testing.T) {
 	ctx := context.Background()
 	st := NewStore(testPool)
 	res := func(id string) model.Resource { return model.Resource{Type: "bbs-ins-tok", Id: id} }
-	stale, zero := res("stale"), res("zero")
-	markUnclaimed(t, st, stale, zero)
+	stale, zero, x, y := res("stale"), res("zero"), res("x"), res("y")
+	markUnclaimed(t, st, stale, zero, x, y)
 	tokens, expired := map[model.Resource]int64{}, map[model.Resource]owner{}
-	for _, r := range []model.Resource{stale, zero} {
+	for _, r := range []model.Resource{stale, zero, x, y} {
 		tokens[r] = own(t, testPool, r)
 		expired[r] = owner{seq: tokens[r], since: expireOwner(t, testPool, r)}
 	}
+	// A token no row owns: a fresh value of the Change Sequence, which every
+	// owner token is drawn from too.
+	unowned := start(t, st)
 
-	got, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: stale, Token: tokens[stale] + 1}, {Resource: zero}})
+	got, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: stale, Token: unowned}, {Resource: zero}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3488,6 +3493,19 @@ func TestBeginBuilds_InsertRenewsOnlyAMatchingToken(t *testing.T) {
 	}
 	requireFreshOwner(t, testPool, stale, tokens[stale])
 	requireOwner(t, testPool, zero, expired[zero], "a row not given")
+
+	// Each given the other's owner token: neither is renewed.
+	if _, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: x, Token: tokens[y]}, {Resource: y, Token: tokens[x]}}); err != nil {
+		t.Fatal(err)
+	}
+	requireOwner(t, testPool, x, expired[x], "given y's owner token")
+	requireOwner(t, testPool, y, expired[y], "given x's owner token")
+	// y's owner token given for both: it renews y alone.
+	if _, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: x, Token: tokens[y]}, {Resource: y, Token: tokens[y]}}); err != nil {
+		t.Fatal(err)
+	}
+	requireOwner(t, testPool, x, expired[x], "given y's owner token")
+	requireFreshOwner(t, testPool, y, tokens[y])
 }
 
 // Two insert-mode calls over the same existing rows, given in opposite
