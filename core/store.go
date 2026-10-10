@@ -176,10 +176,10 @@ type Store interface {
 	// from the Change Sequence and its metadata read, each with values of its
 	// own. It locks the existing rows in (type, id) order before its first
 	// write, as MarkStale does (ADR 0002), and draws after the last lock;
-	// in BeginInsert, a row created by a transaction still uncommitted when
-	// the call started is locked only after the draw, and is drawn for again
-	// under the lock when the first value isn't above every number its
-	// creator left, as BeginBuild's is. mode says which rows it begins:
+	// in BeginInsert, a row the call's snapshot could not see is locked only
+	// after the draw, and is drawn for again under the lock when the first
+	// value isn't above every number its creator left, as BeginBuild's is.
+	// mode says which rows it begins:
 	//
 	//   - BeginExisting begins each row that exists and isn't a tombstone. It
 	//     inserts no row, so a row deleted since it was listed isn't
