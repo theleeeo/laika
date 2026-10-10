@@ -3615,3 +3615,56 @@ func TestBeginBuilds_InsertARowCreatedWhileItWaitsGetsAHigherBuildIdx(t *testing
 		t.Fatalf("%v: %+v, want begun with a Build Sequence of its own", existing, e)
 	}
 }
+
+// The insert mode draws after it locks an existing row: a row hard-deleted
+// under another transaction's lock while the call waits for it is inserted
+// again above every number the deleter drew. The gate locks the row; the
+// call starts and queues behind it (seen in pg_stat_activity); only then
+// does the gate draw a number, delete the row and commit. A call that drew
+// before it waited would insert the row below the deleter's number, where
+// no update follows to draw again.
+func TestBeginBuilds_InsertARowDeletedUnderALockIsInsertedAboveTheDeletersNumbers(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	res := model.Resource{Type: "bbs-ins-del", Id: id}
+	seed(t, res, 0, 0, false)
+	g := lockRow(t, testPool, res)
+	type result struct {
+		got []core.BuildBegun
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: res}})
+		done <- result{got, err}
+	}()
+	g.waitForWaiters(t, 1)
+	var deleter int64
+	if err := g.tx.QueryRow(ctx, `SELECT nextval('change_sequence')`).Scan(&deleter); err != nil {
+		t.Fatalf("draw in the gate: %v", err)
+	}
+	if _, err := g.tx.Exec(ctx, `DELETE FROM resources WHERE type=$1 AND id=$2`, res.Type, res.Id); err != nil {
+		t.Fatalf("delete in the gate: %v", err)
+	}
+	g.release()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginBuilds did not finish after the gate committed")
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	b := r.got[0]
+	if b.BuildIdx <= deleter || b.Start != b.BuildIdx {
+		t.Fatalf("%+v; want a BuildIdx above the deleter's number %d, as the Start too", b, deleter)
+	}
+	if !exists(t, res) {
+		t.Fatal("the deleted row was not inserted again")
+	}
+	if _, idx, seq, _, _ := row(t, res); idx != b.BuildIdx || seq != 0 {
+		t.Fatalf("build_idx %d stale_seq %d, want the returned BuildIdx %d on a fresh row (stale_seq 0)", idx, seq, b.BuildIdx)
+	}
+}
