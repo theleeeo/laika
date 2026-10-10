@@ -1,12 +1,13 @@
 -- The Change Sequence: drawn by every RegisterChanges item (an accepted one
 -- keeps it as its change_seq and its stale_seq), every other stale mark (a
--- marked Parent, a MarkStale row: its stale_seq), every BeginBuild (its
--- build_idx, which is also the build's start), every BeginDelete (its
--- build_idx) and every Rebuild walk start (NextChangeSeq). The drift check
--- compares a resource's change_seq with the start of the build that fetched
--- it, so nextval order must be real-time order across sessions (CACHE 1: no
--- per-session blocks) and the sequence must never wrap below existing stamps
--- (NO CYCLE: exhausting it fails registrations loudly). Because build_idx and
+-- marked Parent, a MarkStale row: its stale_seq), every BeginBuild and every
+-- row a BeginBuilds begins (its build_idx, which is also the build's start),
+-- every BeginDelete (its build_idx) and every Rebuild walk start
+-- (NextChangeSeq). The drift check compares a resource's change_seq with the
+-- start of the build that fetched it, so nextval order must be real-time
+-- order across sessions (CACHE 1: no per-session blocks) and the sequence
+-- must never wrap below existing stamps (NO CYCLE: exhausting it fails
+-- registrations loudly). Because build_idx and
 -- stale_seq come from it too, their values never repeat, across a hard delete
 -- and a recreate of a row as well, so no token of the old row matches the new
 -- one. build_idx never goes backwards, so a recreated resource is built above
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS resources (
     type VARCHAR NOT NULL,
     id VARCHAR NOT NULL,
     version BIGINT NOT NULL DEFAULT 0,
-    build_idx BIGINT NOT NULL DEFAULT 0,    -- Build Sequence: Change Sequence value of the last BeginBuild or BeginDelete; 0 = never built
+    build_idx BIGINT NOT NULL DEFAULT 0,    -- Build Sequence: Change Sequence value of the last BeginBuild, BeginBuilds or BeginDelete; 0 = never built
     stale_seq BIGINT NOT NULL DEFAULT 0,    -- Change Sequence value of the last stale mark; 0 = never marked
     change_seq BIGINT NOT NULL DEFAULT 0,   -- Change Sequence value of the last accepted change; 0 = never changed
     stale_since TIMESTAMPTZ,                -- NULL = clean
