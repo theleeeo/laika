@@ -3077,7 +3077,7 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 	floor := start(t, st)
 
 	in := []model.Resource{marked, gone, twice, owned, tomb, plain, twice, empty}
-	got, err := st.BeginBuilds(ctx, in)
+	got, err := st.BeginBuilds(ctx, core.BeginExisting, begins(in))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3145,7 +3145,7 @@ func TestBeginBuilds_BeginsEachLiveRowInInputOrderAndSkipsGoneAndTombstoned(t *t
 
 func TestBeginBuilds_EmptyInputIsEmptyWithoutAQuery(t *testing.T) {
 	// A nil pool panics on any query.
-	got, err := NewStore(nil).BeginBuilds(context.Background(), nil)
+	got, err := NewStore(nil).BeginBuilds(context.Background(), core.BeginExisting, nil)
 	if err != nil || len(got) != 0 {
 		t.Fatalf("empty input: got %+v, %v; want none, nil", got, err)
 	}
@@ -3172,7 +3172,7 @@ func TestBeginBuilds_OppositeOrdersDoNotDeadlock(t *testing.T) {
 	orders := [2][]model.Resource{{a, b}, {b, a}}
 	for call, in := range orders {
 		go func() {
-			got, err := st.BeginBuilds(ctx, in)
+			got, err := st.BeginBuilds(ctx, core.BeginExisting, begins(in))
 			results <- result{call, got, err}
 		}()
 	}
@@ -3231,7 +3231,7 @@ func TestBeginBuilds_LocksInOrderAndDrawsAfterTheLastLock(t *testing.T) {
 	}
 	results := make(chan result, 1)
 	go func() {
-		got, err := st.BeginBuilds(ctx, []model.Resource{b, a})
+		got, err := st.BeginBuilds(ctx, core.BeginExisting, begins([]model.Resource{b, a}))
 		results <- result{got, err}
 	}()
 	g.waitForWaiters(t, 1)
@@ -3268,5 +3268,350 @@ func TestBeginBuilds_LocksInOrderAndDrawsAfterTheLastLock(t *testing.T) {
 		if r.got[i].BuildIdx <= n {
 			t.Fatalf("%v: BuildIdx %d, want above %d, taken while BeginBuilds waited: every value is drawn after the last lock", res, r.got[i].BuildIdx, n)
 		}
+	}
+}
+
+// deref is *s, or "NULL" for nil.
+func deref(s *string) string {
+	if s == nil {
+		return "NULL"
+	}
+	return *s
+}
+
+// begins makes token-0 Begins of resources, as BeginExisting takes them.
+func begins(resources []model.Resource) []core.Begin {
+	out := make([]core.Begin, len(resources))
+	for i, r := range resources {
+		out[i] = core.Begin{Resource: r}
+	}
+	return out
+}
+
+// Each call fails before any query: a nil pool panics on one.
+func TestBeginBuilds_RejectsWhatItCantBeginWithoutAQuery(t *testing.T) {
+	a, b := model.Resource{Type: "bbs-rej", Id: "a"}, model.Resource{Type: "bbs-rej", Id: "b"}
+	for _, tc := range []struct {
+		name   string
+		mode   core.BeginMode
+		begins []core.Begin
+	}{
+		// Ruling R2: the existing mode owns nothing.
+		{"existing mode given a token", core.BeginExisting, []core.Begin{{Resource: a}, {Resource: b, Token: 7}}},
+		// Ruling R3: one resource can't be begun for two owners.
+		{"insert mode given a resource twice with different tokens", core.BeginInsert, []core.Begin{{Resource: a, Token: 7}, {Resource: b}, {Resource: a}}},
+		{"an unknown mode", core.BeginMode(99), []core.Begin{{Resource: a}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NewStore(nil).BeginBuilds(context.Background(), tc.mode, tc.begins)
+			if err == nil || got != nil {
+				t.Fatalf("got %+v, %v; want nil and an error", got, err)
+			}
+		})
+	}
+}
+
+func TestBeginBuilds_InsertEmptyInputIsEmptyWithoutAQuery(t *testing.T) {
+	// A nil pool panics on any query.
+	got, err := NewStore(nil).BeginBuilds(context.Background(), core.BeginInsert, nil)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("empty input: got %+v, %v; want none, nil", got, err)
+	}
+}
+
+// The insert mode begins each resource as BeginBuild does with its token: an
+// owned row given its owner token has its lease renewed, an unowned one is
+// begun and stays unowned, and a missing one is inserted as BeginBuild
+// inserts it. Each gets a Build Sequence of its own, drawn in the call, and
+// no row's change_seq or stale mark moves. A resource given twice is begun
+// once and answered the same both times.
+func TestBeginBuilds_InsertBeginsOwnedUnownedAndMissingRows(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := func(id string) model.Resource { return model.Resource{Type: "bbs-ins", Id: id} }
+	owned, unowned, missing := res("owned"), res("unowned"), res("missing")
+
+	// owned: registered with metadata, so marked, changed and claimed; its
+	// owner_since backdated so a renewal shows.
+	register(t, st, core.Registration{Resource: owned, Version: 1, Metadata: meta("o")})
+	token := ownerOf(t, testPool, owned).seq
+	if token == 0 {
+		t.Fatal("setup: the registration did not claim owned")
+	}
+	ownedSince := backdateOwner(t, testPool, owned, "10 seconds")
+	text := func(s string) *string { return &s }
+	seedMetadata(t, unowned, text(`{"k":"u"}`))
+	markUnclaimed(t, st, unowned)
+
+	type before struct {
+		buildIdx, staleSeq, changeSeq int64
+		since                         *time.Time
+	}
+	was := map[model.Resource]before{}
+	for _, r := range []model.Resource{owned, unowned} {
+		_, b, s, since, _ := row(t, r)
+		was[r] = before{b, s, changeSeq(t, testPool, r), since}
+	}
+	floor := start(t, st)
+
+	in := []core.Begin{{Resource: missing}, {Resource: owned, Token: token}, {Resource: unowned}, {Resource: owned, Token: token}}
+	got, err := st.BeginBuilds(ctx, core.BeginInsert, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ceiling := start(t, st)
+	if len(got) != len(in) {
+		t.Fatalf("got %d BuildBegun for %d Begins: %+v", len(got), len(in), got)
+	}
+	if !reflect.DeepEqual(got[1], got[3]) {
+		t.Fatalf("%v given twice: got %+v and %+v, want the same BuildBegun", owned, got[1], got[3])
+	}
+
+	seen := map[int64]model.Resource{}
+	for i, b := range got[:3] {
+		r := in[i].Resource
+		_, rowIdx, _, _, _ := row(t, r)
+		if b.BuildIdx != rowIdx || b.BuildIdx <= floor || b.BuildIdx >= ceiling {
+			t.Fatalf("%v: BuildIdx %d, row build_idx %d; want the row's, drawn between %d and %d", r, b.BuildIdx, rowIdx, floor, ceiling)
+		}
+		if prev, dup := seen[b.BuildIdx]; dup {
+			t.Fatalf("%v and %v share BuildIdx %d", prev, r, b.BuildIdx)
+		}
+		seen[b.BuildIdx] = r
+		if b.Start != b.BuildIdx {
+			t.Fatalf("%v: Start %d, want the BuildIdx %d", r, b.Start, b.BuildIdx)
+		}
+	}
+
+	// The existing rows: begun above their old Build Sequence, their stale
+	// mark captured and kept, change_seq untouched, metadata read.
+	wantMeta := map[model.Resource]map[string]string{owned: meta("o"), unowned: {"k": "u"}}
+	for _, i := range []int{1, 2} {
+		r, b, w := in[i].Resource, got[i], was[in[i].Resource]
+		_, _, rowSeq, since, _ := row(t, r)
+		if b.BuildIdx <= w.buildIdx {
+			t.Fatalf("%v: BuildIdx %d, want above its old %d", r, b.BuildIdx, w.buildIdx)
+		}
+		if b.StaleSeq != w.staleSeq || rowSeq != w.staleSeq {
+			t.Fatalf("%v: StaleSeq %d, row stale_seq %d; want the captured %d, unchanged", r, b.StaleSeq, rowSeq, w.staleSeq)
+		}
+		if (since == nil) != (w.since == nil) || (since != nil && !since.Equal(*w.since)) {
+			t.Fatalf("%v: stale_since %v, want %v", r, since, w.since)
+		}
+		if cs := changeSeq(t, testPool, r); cs != w.changeSeq {
+			t.Fatalf("%v: change_seq %d, want %d: a build is not a change", r, cs, w.changeSeq)
+		}
+		if !reflect.DeepEqual(b.Metadata, wantMeta[r]) {
+			t.Fatalf("%v: Metadata %#v, want %#v", r, b.Metadata, wantMeta[r])
+		}
+	}
+	requireFreshOwner(t, testPool, owned, token)
+	if o := ownerOf(t, testPool, owned); !o.since.After(ownedSince) {
+		t.Fatalf("%v: owner_since %v, want moved forward from %v", owned, o.since, ownedSince)
+	}
+	requireOwner(t, testPool, unowned, owner{}, "an unowned row begun with token 0")
+
+	// The missing row: inserted as BeginBuild inserts one.
+	b := got[0]
+	_, rowIdx, rowSeq, since, deleted := row(t, missing)
+	if rowIdx != b.BuildIdx || rowSeq != 0 || b.StaleSeq != 0 || since != nil || deleted {
+		t.Fatalf("%v: build_idx %d stale_seq %d stale_since %v deleted %v, StaleSeq %d; want the BuildIdx %d drawn, stale_seq 0, no mark, live",
+			missing, rowIdx, rowSeq, since, deleted, b.StaleSeq, b.BuildIdx)
+	}
+	if cs := changeSeq(t, testPool, missing); cs != 0 {
+		t.Fatalf("%v: change_seq %d, want 0", missing, cs)
+	}
+	requireOwner(t, testPool, missing, owner{}, "an inserted row")
+	if m := rawMetadata(t, missing); m != nil || b.Metadata != nil {
+		t.Fatalf("%v: metadata %q, Metadata %#v; want NULL and nil", missing, deref(m), b.Metadata)
+	}
+}
+
+// Ruling R4: the insert mode begins a tombstone as BeginBuild does — bumped
+// above every number it carries, its stale_seq and metadata returned, still
+// a tombstone — where the existing mode skips it.
+func TestBeginBuilds_InsertBeginsATombstoneAsBeginBuildDoes(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	tomb := model.Resource{Type: "bbs-ins-tomb", Id: "1"}
+	staleSeq := tombstone(t, st, tomb)
+	ownedBy := ownerOf(t, testPool, tomb)
+	top := highest(t, tomb)
+
+	got, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: tomb}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := got[0]
+	_, rowIdx, rowSeq, _, deleted := row(t, tomb)
+	if b.BuildIdx <= top || b.BuildIdx != rowIdx || b.Start != b.BuildIdx || b.StaleSeq != staleSeq || rowSeq != staleSeq || !deleted {
+		t.Fatalf("got %+v; row build_idx %d stale_seq %d deleted %v; want a BuildIdx above %d in the row, StaleSeq %d kept, still a tombstone",
+			b, rowIdx, rowSeq, deleted, top, staleSeq)
+	}
+	if !reflect.DeepEqual(b.Metadata, metadataOf(t, tomb)) {
+		t.Fatalf("Metadata %#v, want the row's %#v", b.Metadata, metadataOf(t, tomb))
+	}
+	requireOwner(t, testPool, tomb, ownedBy, "token 0 leaves ownership alone")
+}
+
+// A token that no longer matches the row's owner token, like 0, leaves the
+// row's ownership alone, as BeginBuild does; the matching one renews it.
+func TestBeginBuilds_InsertRenewsOnlyAMatchingToken(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	res := func(id string) model.Resource { return model.Resource{Type: "bbs-ins-tok", Id: id} }
+	stale, zero := res("stale"), res("zero")
+	markUnclaimed(t, st, stale, zero)
+	tokens, expired := map[model.Resource]int64{}, map[model.Resource]owner{}
+	for _, r := range []model.Resource{stale, zero} {
+		tokens[r] = own(t, testPool, r)
+		expired[r] = owner{seq: tokens[r], since: expireOwner(t, testPool, r)}
+	}
+
+	got, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: stale, Token: tokens[stale] + 1}, {Resource: zero}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, r := range []model.Resource{stale, zero} {
+		if got[i].BuildIdx == 0 || got[i].StaleSeq != tokens[r] {
+			t.Fatalf("%v: %+v, want begun with StaleSeq %d", r, got[i], tokens[r])
+		}
+		requireOwner(t, testPool, r, expired[r], "a token that is not the owner token")
+	}
+
+	again, err := st.BeginBuilds(ctx, core.BeginInsert, []core.Begin{{Resource: stale, Token: tokens[stale]}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again[0].BuildIdx <= got[0].BuildIdx {
+		t.Fatalf("BuildIdx %d after %d, want it to rise", again[0].BuildIdx, got[0].BuildIdx)
+	}
+	requireFreshOwner(t, testPool, stale, tokens[stale])
+	requireOwner(t, testPool, zero, expired[zero], "a row not given")
+}
+
+// Two insert-mode calls over the same existing rows, given in opposite
+// orders, both lock them in (type, id) order before their first write, so
+// neither holds one row while waiting for the other: both complete, one
+// after the other.
+func TestBeginBuilds_InsertOppositeOrdersDoNotDeadlock(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	a, b := model.Resource{Type: "bbs-ins-dl-a", Id: id}, model.Resource{Type: "bbs-ins-dl-b", Id: id}
+	seed(t, a, 0, 0, false)
+	seed(t, b, 0, 0, false)
+
+	gates := []*gate{lockRow(t, testPool, a), lockRow(t, testPool, b)}
+	type result struct {
+		call int
+		got  []core.BuildBegun
+		err  error
+	}
+	results := make(chan result, 2)
+	orders := [2][]model.Resource{{a, b}, {b, a}}
+	for call, in := range orders {
+		go func() {
+			got, err := st.BeginBuilds(ctx, core.BeginInsert, begins(in))
+			results <- result{call, got, err}
+		}()
+	}
+	waitBehindGates(t, 2, gates...)
+	// Release b first: a call that had locked a, out of order, would then
+	// take b and the other call's hold on b would wait for it.
+	gates[1].release()
+	gates[0].release()
+
+	var idx [2]map[model.Resource]int64
+	for range 2 {
+		select {
+		case r := <-results:
+			if r.err != nil {
+				t.Fatalf("BeginBuilds %v: %v", orders[r.call], r.err)
+			}
+			if len(r.got) != 2 {
+				t.Fatalf("BeginBuilds %v: %+v, want two", orders[r.call], r.got)
+			}
+			idx[r.call] = map[model.Resource]int64{orders[r.call][0]: r.got[0].BuildIdx, orders[r.call][1]: r.got[1].BuildIdx}
+		case <-time.After(10 * time.Second):
+			t.Fatal("a BeginBuilds did not finish after the gates committed")
+		}
+	}
+	// One call ran wholly before the other: its Build Sequence is below the
+	// other's on both rows, and each row holds the later one's.
+	first, second := idx[0], idx[1]
+	if first[a] > second[a] {
+		first, second = second, first
+	}
+	for _, r := range []model.Resource{a, b} {
+		if first[r] == 0 || first[r] >= second[r] {
+			t.Fatalf("%v: BuildIdx %d then %d, want both calls to begin it, one after the other (calls: %v)", r, first[r], second[r], idx)
+		}
+		if _, rowIdx, _, _, _ := row(t, r); rowIdx != second[r] {
+			t.Fatalf("%v: build_idx %d, want the later call's %d", r, rowIdx, second[r])
+		}
+	}
+}
+
+// An insert-mode call that queues behind a concurrent creation of one of its
+// rows — a row its snapshot could not see, so it was not locked before the
+// draw — still begins it above every number the creator left: it draws
+// again under the lock when the value it drew is not above them. The gate
+// inserts the row and holds it uncommitted; the call starts, begins the
+// existing row and queues on the new one (seen in pg_stat_activity); only
+// then does the gate draw a number into each of the row's sequence columns,
+// and commit.
+func TestBeginBuilds_InsertARowCreatedWhileItWaitsGetsAHigherBuildIdx(t *testing.T) {
+	ctx := context.Background()
+	st := NewStore(testPool)
+	id := fmt.Sprint(deadlockRuns.Add(1)) // fresh rows on every -count run
+	existing, created := model.Resource{Type: "bbs-ins-cr", Id: "a" + id}, model.Resource{Type: "bbs-ins-cr", Id: "b" + id}
+	seed(t, existing, 0, 0, false)
+	g := openGate(t, testPool,
+		`INSERT INTO resources (type, id) VALUES ($1, $2) RETURNING pg_backend_pid()`, created.Type, created.Id)
+	type result struct {
+		got []core.BuildBegun
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := st.BeginBuilds(ctx, core.BeginInsert, begins([]model.Resource{created, existing}))
+		done <- result{got, err}
+	}()
+	g.waitForWaiters(t, 1)
+	var buildIdx, staleSeq, changeSeqN, ownerSeq int64
+	if err := g.tx.QueryRow(ctx,
+		`UPDATE resources SET build_idx = nextval('change_sequence'), stale_seq = nextval('change_sequence'),
+		     change_seq = nextval('change_sequence'), owner_seq = nextval('change_sequence'), owner_since = now()
+		 WHERE type=$1 AND id=$2 RETURNING build_idx, stale_seq, change_seq, owner_seq`,
+		created.Type, created.Id).Scan(&buildIdx, &staleSeq, &changeSeqN, &ownerSeq); err != nil {
+		t.Fatalf("write in the gate: %v", err)
+	}
+	creator := max(buildIdx, staleSeq, changeSeqN, ownerSeq)
+	g.release()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("BeginBuilds did not finish after the gate committed")
+	}
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	b := r.got[0]
+	if b.BuildIdx <= creator || b.Start != b.BuildIdx || b.StaleSeq != staleSeq {
+		t.Fatalf("%+v; want a BuildIdx above every number the creator left (%d), as the Start too, and its StaleSeq %d", b, creator, staleSeq)
+	}
+	if _, idx, seq, _, _ := row(t, created); idx != b.BuildIdx || seq != staleSeq {
+		t.Fatalf("build_idx %d stale_seq %d, want the returned BuildIdx %d and the creator's stale_seq %d", idx, seq, b.BuildIdx, staleSeq)
+	}
+	if cs := changeSeq(t, testPool, created); cs != changeSeqN {
+		t.Fatalf("change_seq %d, want the creator's %d", cs, changeSeqN)
+	}
+	if o := ownerOf(t, testPool, created); o.seq != ownerSeq {
+		t.Fatalf("owner_seq %d, want the creator's %d", o.seq, ownerSeq)
+	}
+	if e := r.got[1]; e.BuildIdx == 0 || e.BuildIdx == b.BuildIdx {
+		t.Fatalf("%v: %+v, want begun with a Build Sequence of its own", existing, e)
 	}
 }

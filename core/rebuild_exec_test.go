@@ -3337,11 +3337,20 @@ func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType st
 // each resource as BeginBuild does, one Build Sequence each in input order,
 // but those whose id notBegun names: it answers them with the zero
 // BuildBegun, as the store does a row gone or tombstoned since its listing.
-// It creates no row. beginBuildsErr fails the whole call.
-func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, rs []model.Resource) ([]BuildBegun, error) {
-	names := make([]string, len(rs))
-	for i, r := range rs {
-		names[i] = r.Type + "/" + r.Id
+// It creates no row, so it fakes BeginExisting only and fails any other mode
+// or a non-zero token. beginBuildsErr fails the whole call.
+func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
+	if mode != BeginExisting {
+		return nil, fmt.Errorf("BeginBuilds: mode %d not faked", mode)
+	}
+	rs := make([]model.Resource, len(begins))
+	names := make([]string, len(begins))
+	for i, b := range begins {
+		if b.Token != 0 {
+			return nil, fmt.Errorf("BeginBuilds: token %d in BeginExisting", b.Token)
+		}
+		rs[i] = b.Resource
+		names[i] = b.Type + "/" + b.Id
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

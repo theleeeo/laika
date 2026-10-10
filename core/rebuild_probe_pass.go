@@ -163,10 +163,12 @@ func (idx *Indexer) probeVersionUncovered(ctx context.Context, resourceType stri
 // probeVersionUncovered.
 func (idx *Indexer) probeUncoveredPage(ctx context.Context, resourceType string, plan projection.Plan, md map[string]string, page []ListedResource, counts *probePassCounts) error {
 	roots := make([]model.Resource, len(page))
+	begins := make([]Begin, len(page))
 	for i, r := range page {
 		roots[i] = r.Resource
+		begins[i] = Begin{Resource: r.Resource}
 	}
-	begun, err := idx.st.BeginBuilds(ctx, roots)
+	begun, err := idx.st.BeginBuilds(ctx, BeginExisting, begins)
 	if err != nil {
 		return fmt.Errorf("beginning %d row(s): %w", len(roots), err)
 	}

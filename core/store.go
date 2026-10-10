@@ -171,16 +171,28 @@ type Store interface {
 	// starts at the first id. It claims and locks nothing. A backfill asks
 	// the version's Probe about them (ADR 0013).
 	ListUncovered(ctx context.Context, resourceType string, schemaVersion int, metadata map[string]string, after string, limit int) ([]ListedResource, error)
-	// BeginBuilds begins resources in one statement, as BeginBuild begins
-	// one with a token of 0: each row that exists and isn't a tombstone gets
-	// its Build Sequence bumped, its stale_seq captured, a start from the
-	// Change Sequence and its metadata read. It locks the rows in (type, id)
-	// order before its first write, as MarkStale does (ADR 0002). It inserts
-	// no row, so a row deleted since it was listed isn't recreated, and it
-	// leaves ownership (owner_seq, owner_since) alone. It returns one
-	// BuildBegun per resource, in input order; a resource it didn't begin —
-	// gone or a tombstone — gets the zero BuildBegun (BuildIdx 0).
-	BeginBuilds(ctx context.Context, resources []model.Resource) ([]BuildBegun, error)
+	// BeginBuilds begins resources in one statement, each as BeginBuild
+	// begins one: its Build Sequence bumped, its stale_seq captured, a start
+	// from the Change Sequence and its metadata read, each with values of its
+	// own. It locks the existing rows in (type, id) order before its first
+	// write, as MarkStale does (ADR 0002), and draws after the last lock.
+	// mode says which rows it begins:
+	//
+	//   - BeginExisting begins each row that exists and isn't a tombstone. It
+	//     inserts no row, so a row deleted since it was listed isn't
+	//     recreated, and it leaves ownership (owner_seq, owner_since) alone;
+	//     every Begin's Token must be 0, else it fails before any query.
+	//   - BeginInsert begins every resource as BeginBuild with the Begin's
+	//     Token: a missing row is inserted, a tombstone is begun, and a
+	//     non-zero Token that is the row's owner token renews its lease
+	//     (owner_since = now()). A resource given twice with different Tokens
+	//     fails the call before any query.
+	//
+	// It returns one BuildBegun per Begin, in input order; a resource given
+	// twice is begun once and answered the same both times, and one it didn't
+	// begin — in BeginExisting, gone or a tombstone — gets the zero BuildBegun
+	// (BuildIdx 0).
+	BeginBuilds(ctx context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error)
 }
 
 // ListedResource is one row ListResources returns.
@@ -196,6 +208,25 @@ type EdgeSet struct {
 	SchemaVersion int
 	Children      []model.Resource
 }
+
+// Begin is one resource BeginBuilds begins and the token its build owns it
+// by; 0 owns nothing.
+type Begin struct {
+	model.Resource
+	Token int64
+}
+
+// BeginMode is which rows BeginBuilds begins.
+type BeginMode int
+
+const (
+	// BeginExisting begins existing rows that aren't tombstones, inserts
+	// none and leaves ownership alone: every Token is 0.
+	BeginExisting BeginMode = iota
+	// BeginInsert begins every resource as BeginBuild does with its Token:
+	// it inserts a missing row and renews a matching token's lease.
+	BeginInsert
+)
 
 // BuildBegun is what BeginBuild returns for one resource.
 type BuildBegun struct {

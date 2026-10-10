@@ -164,6 +164,6 @@ func (s *cancellingStore) ListUncovered(context.Context, string, int, map[string
 	return nil, nil
 }
 
-func (s *cancellingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
+func (s *cancellingStore) BeginBuilds(context.Context, BeginMode, []Begin) ([]BuildBegun, error) {
 	return nil, errors.New("BeginBuilds: not implemented")
 }

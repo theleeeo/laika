@@ -1244,7 +1244,7 @@ func (s *recordingStore) ListUncovered(context.Context, string, int, map[string]
 	return nil, nil
 }
 
-func (s *recordingStore) BeginBuilds(context.Context, []model.Resource) ([]BuildBegun, error) {
+func (s *recordingStore) BeginBuilds(context.Context, BeginMode, []Begin) ([]BuildBegun, error) {
 	return nil, errors.New("BeginBuilds: not implemented")
 }
 

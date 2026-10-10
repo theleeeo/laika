@@ -1100,45 +1100,110 @@ func (s *Store) ListUncovered(ctx context.Context, resourceType string, schemaVe
 	return out, rows.Err()
 }
 
-// BeginBuilds begins existing rows in one statement, as BeginBuild begins
-// one with no token: each row of resources that exists and isn't a
-// tombstone gets its Build Sequence bumped to a fresh Change Sequence value,
-// which is also its build's start, and returns the stale_seq it carries and
-// its metadata (nil when NULL or the empty object). It locks the rows in
-// (type, id) order before its first write, as MarkStale does, and draws
-// every value after the last lock, so each row's value is above every number
-// it carried, as BeginBuild's is for an existing row. Being an UPDATE, it
-// inserts no row: a row hard-deleted since its caller listed it stays gone,
-// and one created by a transaction uncommitted when the statement started is
-// not begun either. A tombstone is locked but not written. It leaves
-// change_seq, the stale mark and the owner columns alone.
+// BeginBuilds begins resources in one statement, each as BeginBuild begins
+// one: its Build Sequence bumped to a fresh Change Sequence value of its own,
+// which is also its build's start, and the stale_seq it carries and its
+// metadata (nil when NULL or the empty object) returned. It locks the
+// existing rows in (type, id) order before its first write, as MarkStale
+// does, and draws every value after the last lock, so each existing row's
+// value is above every number it carried, as BeginBuild's is. It leaves
+// change_seq and the stale mark alone. mode says which rows it begins:
 //
-// It returns one BuildBegun per resource, in input order; a resource it
-// didn't begin gets the zero BuildBegun, and a resource given twice the same
-// one twice.
-func (s *Store) BeginBuilds(ctx context.Context, resources []model.Resource) ([]core.BuildBegun, error) {
-	if len(resources) == 0 {
+//   - core.BeginExisting is an UPDATE: it inserts no row, so a row
+//     hard-deleted since its caller listed it stays gone, and one created by
+//     a transaction uncommitted when the statement started is not begun
+//     either. A tombstone is locked but not written. It leaves the owner
+//     columns alone, and fails before any query when a Begin carries a
+//     token.
+//   - core.BeginInsert is BeginBuild per row, as one INSERT … ON CONFLICT
+//     DO UPDATE in (type, id) order: it inserts a missing row (build_idx
+//     drawn, nothing else set), begins a tombstone, and renews the lease of
+//     a row whose owner token is its Begin's non-zero Token. A row its
+//     snapshot could not see — created by a transaction still uncommitted
+//     when it started — is locked only by ON CONFLICT, after the draw, and
+//     the update draws again under the lock when the first value is not
+//     above every number the creator left, as BeginBuild's does. A resource
+//     given twice with different Tokens fails before any query. Rows
+//     created or removed concurrently aren't locked in (type, id) order, so
+//     it can deadlock over those as the marks can (seams S4).
+//
+// It returns one BuildBegun per Begin, in input order; a resource it didn't
+// begin gets the zero BuildBegun, and a resource given twice the same one
+// twice.
+func (s *Store) BeginBuilds(ctx context.Context, mode core.BeginMode, begins []core.Begin) ([]core.BuildBegun, error) {
+	switch mode {
+	case core.BeginExisting:
+		for _, b := range begins {
+			if b.Token != 0 {
+				return nil, fmt.Errorf("begin %s/%s: token %d given to BeginExisting, which owns nothing", b.Type, b.Id, b.Token)
+			}
+		}
+	case core.BeginInsert:
+	default:
+		return nil, fmt.Errorf("begin builds: unknown mode %d", mode)
+	}
+	if len(begins) == 0 {
 		return nil, nil
 	}
-	types := make([]string, len(resources))
-	ids := make([]string, len(resources))
-	for i, r := range resources {
-		types[i], ids[i] = r.Type, r.Id
+	var rows pgx.Rows
+	var err error
+	if mode == core.BeginExisting {
+		types := make([]string, len(begins))
+		ids := make([]string, len(begins))
+		for i, b := range begins {
+			types[i], ids[i] = b.Type, b.Id
+		}
+		rows, err = s.pool.Query(ctx,
+			`WITH `+lockedInput+`
+			 UPDATE resources r SET build_idx = nextval('change_sequence')
+			 FROM (SELECT DISTINCT t, i FROM unnest($1::text[], $2::text[]) AS u(t, i)) AS x
+			 CROSS JOIN (SELECT count(*) FROM locked) AS l
+			 WHERE r.type = x.t AND r.id = x.i AND NOT r.deleted
+			 RETURNING r.type, r.id, r.build_idx, r.stale_seq, r.metadata`,
+			types, ids,
+		)
+	} else {
+		// Each resource once with its token: an INSERT … ON CONFLICT DO
+		// UPDATE fails on a row it would write twice.
+		tokens := make(map[model.Resource]int64, len(begins))
+		var types, ids []string
+		var toks []int64
+		for _, b := range begins {
+			if tok, dup := tokens[b.Resource]; dup {
+				if tok != b.Token {
+					return nil, fmt.Errorf("begin %s/%s: given with tokens %d and %d", b.Type, b.Id, tok, b.Token)
+				}
+				continue
+			}
+			tokens[b.Resource] = b.Token
+			types, ids, toks = append(types, b.Type), append(ids, b.Id), append(toks, b.Token)
+		}
+		// EXCLUDED holds table columns only, and the insert sets no owner,
+		// so the update reads each row's token from the input.
+		rows, err = s.pool.Query(ctx,
+			`WITH `+lockedInput+`
+			 INSERT INTO resources AS r (type, id, build_idx)
+			 SELECT x.t, x.i, nextval('change_sequence')
+			 FROM unnest($1::text[], $2::text[]) AS x(t, i)
+			 CROSS JOIN (SELECT count(*) FROM locked) AS l
+			 ORDER BY x.t, x.i
+			 ON CONFLICT (type, id) DO UPDATE
+			 SET build_idx = CASE
+			         WHEN EXCLUDED.build_idx > GREATEST(r.build_idx, r.stale_seq, r.change_seq, COALESCE(r.owner_seq, 0))
+			         THEN EXCLUDED.build_idx ELSE nextval('change_sequence') END,
+			     owner_since = CASE WHEN r.owner_seq = (
+			             SELECT u.token FROM unnest($1::text[], $2::text[], $3::bigint[]) AS u(t, i, token)
+			             WHERE u.t = r.type AND u.i = r.id AND u.token <> 0)
+			         THEN now() ELSE r.owner_since END
+			 RETURNING r.type, r.id, r.build_idx, r.stale_seq, r.metadata`,
+			types, ids, toks,
+		)
 	}
-	rows, err := s.pool.Query(ctx,
-		`WITH `+lockedInput+`
-		 UPDATE resources r SET build_idx = nextval('change_sequence')
-		 FROM (SELECT DISTINCT t, i FROM unnest($1::text[], $2::text[]) AS u(t, i)) AS x
-		 CROSS JOIN (SELECT count(*) FROM locked) AS l
-		 WHERE r.type = x.t AND r.id = x.i AND NOT r.deleted
-		 RETURNING r.type, r.id, r.build_idx, r.stale_seq, r.metadata`,
-		types, ids,
-	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	begun := make(map[model.Resource]core.BuildBegun, len(resources))
+	begun := make(map[model.Resource]core.BuildBegun, len(begins))
 	for rows.Next() {
 		var r model.Resource
 		var b core.BuildBegun
@@ -1154,9 +1219,9 @@ func (s *Store) BeginBuilds(ctx context.Context, resources []model.Resource) ([]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := make([]core.BuildBegun, len(resources))
-	for i, r := range resources {
-		out[i] = begun[r]
+	out := make([]core.BuildBegun, len(begins))
+	for i, b := range begins {
+		out[i] = begun[b.Resource]
 	}
 	return out, nil
 }
