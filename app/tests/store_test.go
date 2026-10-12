@@ -11,11 +11,12 @@ import (
 
 // suiteStore is the Store every Indexer the suite builds runs on: the suite's
 // *postgres.Store, counting each resource's begun builds — the BeginBuild
-// calls that succeeded, and each resource a BeginBuilds call began. A row's build_idx is a Build Sequence value, not a
-// count of its builds, so this count is what a test asserts on when it means
-// "how many builds of this resource began". The count spans the whole test
-// and every Indexer the suite built, and survives a row's delete and
-// recreate; reset clears it between tests.
+// calls that succeeded, and each resource a BeginBuilds call began. A row's
+// build_idx is a Build Sequence value, not a count of its builds, so this
+// count is what a test asserts on when it means "how many builds of this
+// resource began". The count spans the whole test and every Indexer the suite
+// built, and survives a row's delete and recreate; reset clears it between
+// tests.
 type suiteStore struct {
 	*postgres.Store
 

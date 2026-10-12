@@ -683,11 +683,12 @@ func (t *TestSuite) resourceVersion(resourceType, resourceID string) int64 {
 }
 
 // resourceRebuildCounter returns how many builds of the resource have begun
-// in this test: the successful BeginBuild calls the suite's Store counted,
-// across every Indexer the suite built. It does not read resources.build_idx:
-// that column is the Build Sequence, the ES external_gte version, whose values
-// need only grow — they are not a count of the row's builds. Unlike build_idx,
-// the count does not restart when the row is deleted and recreated.
+// in this test: the successful BeginBuild calls, and each resource a
+// BeginBuilds call began, that the suite's Store counted, across every
+// Indexer the suite built. It does not read resources.build_idx: that column
+// is the Build Sequence, the ES external_gte version, whose values need only
+// grow — they are not a count of the row's builds. Unlike build_idx, the
+// count does not restart when the row is deleted and recreated.
 func (t *TestSuite) resourceRebuildCounter(resourceType, resourceID string) int64 {
 	return t.store.beganBuilds(model.Resource{Type: resourceType, Id: resourceID})
 }
