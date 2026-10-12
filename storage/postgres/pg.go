@@ -278,10 +278,12 @@ func (s *Store) ReplaceEdges(ctx context.Context, resource model.Resource, build
 // deadlock it, and it then returns core.ErrRegistrationAborted (seams S4).
 // The item upsert's WHERE is the stale-version check: a delete or a
 // version-0 item is always accepted, a versioned one only when strictly
-// newer. Parents are found from
-// the accepted items only, so a stale item marks nothing; accepted in-batch
-// items are excluded from the Parent mark because one statement may modify a
-// row only once, and their own row already carries the mark.
+// newer. Parents are found from the accepted items only, so a stale item
+// marks nothing. They are read from the statement's snapshot, so an edge
+// committed while the statement runs is missed; core's second fanout
+// (ParentsOf) reads it after the commit. Accepted in-batch items are
+// excluded from the Parent mark because one statement may modify a row only
+// once, and their own row already carries the mark.
 //
 // Only the item upsert writes metadata, the item's own, replacing what its
 // row holds. A Parent mark bumps stale_seq and claims, and leaves the
@@ -437,6 +439,37 @@ func (s *Store) RegisterChanges(ctx context.Context, items []core.Registration, 
 		return core.Registered{}, abortedRegistration(err)
 	}
 	return out, nil
+}
+
+// ParentsOf reads, in one query on idx_related_resource and with no lock,
+// every Parent the relations of children name, across every Schema Version,
+// each once, in (type, id) order. It reads no resources row: whether a Parent
+// was marked since a change doesn't say whether the build serving the mark
+// fetched after it.
+func (s *Store) ParentsOf(ctx context.Context, children []model.Resource) ([]model.Resource, error) {
+	if len(children) == 0 {
+		return nil, nil
+	}
+	types := make([]string, len(children))
+	ids := make([]string, len(children))
+	for i, c := range children {
+		types[i], ids[i] = c.Type, c.Id
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT DISTINCT rel.resource, rel.resource_id
+		 FROM unnest($1::text[], $2::text[]) AS x(t, i)
+		 JOIN relations rel ON rel.related_resource = x.t AND rel.related_resource_id = x.i
+		 ORDER BY rel.resource, rel.resource_id`,
+		types, ids,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Resource, error) {
+		var res model.Resource
+		err := row.Scan(&res.Type, &res.Id)
+		return res, err
+	})
 }
 
 // abortedRegistration wraps a deadlock abort (SQLSTATE 40P01) as
@@ -790,7 +823,10 @@ func (s *Store) NextChangeSeq(ctx context.Context) (int64, error) {
 // AnyChangedSince reports whether any checked resource's change_seq exceeds
 // its check's Start, all checks in one query. A resource without a row has
 // never changed. It takes no row locks: a registration numbered above a
-// start but not yet committed is not seen (seams S6).
+// start but not yet committed is not seen. Its second fanout (ParentsOf,
+// after its commit) reaches such a build's Parent instead, unless it doesn't
+// run: the process stops between the commit and that read, or the read or
+// its mark fails (seams S6).
 func (s *Store) AnyChangedSince(ctx context.Context, checks []core.ChangeCheck) (bool, error) {
 	if len(checks) == 0 {
 		return false, nil

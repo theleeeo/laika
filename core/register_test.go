@@ -62,6 +62,16 @@ type recordingStore struct {
 	stale         map[model.Resource]bool
 	registerErr   error
 	registrations [][]Registration
+	// ParentsOf returns, each once, the parentsOf of every Child it is given
+	// and then lateParents — Parents whose edge committed while the
+	// statement ran, which only this read finds — or fails with
+	// parentsOfErr; parentsOfReads records every Children list it received.
+	lateParents    []model.Resource
+	parentsOfErr   error
+	parentsOfReads [][]model.Resource
+	// onRegistered, when set, runs as RegisterChanges returns, outside the
+	// lock: a test can cancel the caller's ctx right after the commit.
+	onRegistered func()
 
 	// beginErr fails every BeginBuild, beginDeleteErr every BeginDelete,
 	// removeErr every RemoveResource, finishErr every FinishOwned and
@@ -99,9 +109,12 @@ type recordingStore struct {
 	replaceErr error
 	onReplace  func(edgeReplace)
 	// markErr fails every MarkStale after recording it. marks records the
-	// resources of every MarkStale call, in order.
-	markErr error
-	marks   [][]model.Resource
+	// resources of every MarkStale call, in order. onMarkStale, when set,
+	// runs at the start of every MarkStale, outside the lock: a test can see
+	// what had been submitted by the time of the mark.
+	markErr     error
+	marks       [][]model.Resource
+	onMarkStale func()
 	// begun records every BuildBegun BeginBuild and BeginBuilds handed out,
 	// per resource, in order.
 	begun map[model.Resource][]BuildBegun
@@ -294,6 +307,9 @@ func (s *recordingStore) followUpLocked(res model.Resource, r *memRow, token int
 func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, lease time.Duration) ([]Owned, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if s.onMarkStale != nil {
+		s.onMarkStale()
 	}
 	s.mu.Lock()
 	s.recordLocked("MarkStale:%d", len(rs))
@@ -713,7 +729,49 @@ func (s *recordingStore) RegisterChanges(_ context.Context, items []Registration
 	}
 	s.mu.Unlock()
 	s.signalMarked()
+	if s.onRegistered != nil {
+		s.onRegistered()
+	}
 	return out, nil
+}
+
+// ParentsOf records the Children it was given and returns, each once, their
+// parentsOf and then lateParents, or parentsOfErr; on a done ctx it fails, as
+// a real store's query would, after recording the call.
+func (s *recordingStore) ParentsOf(ctx context.Context, children []model.Resource) ([]model.Resource, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordLocked("ParentsOf:%d", len(children))
+	s.parentsOfReads = append(s.parentsOfReads, slices.Clone(children))
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if s.parentsOfErr != nil {
+		return nil, s.parentsOfErr
+	}
+	var out []model.Resource
+	seen := make(map[model.Resource]bool)
+	add := func(p model.Resource) {
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, c := range children {
+		for _, p := range s.parentsOf[c] {
+			add(p)
+		}
+	}
+	for _, p := range s.lateParents {
+		add(p)
+	}
+	return out, nil
+}
+
+func (s *recordingStore) parentsOfReadsSnapshot() [][]model.Resource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.parentsOfReads)
 }
 
 func newHotPathIndexer(st Store, poolSize, queueSize int) *Indexer {
@@ -1430,4 +1488,225 @@ func asks(req projection.BuildRequest, id string) bool {
 		return len(req.ResourceIDs) == 0
 	}
 	return slices.Contains(req.ResourceIDs, id)
+}
+
+// The second fanout reads the Parents of every accepted item — the delete's
+// included — and of no rejected one, after the statement.
+func TestRegisterChanges_ReadsTheParentsOfEveryAcceptedItem(t *testing.T) {
+	st := &recordingStore{stale: map[model.Resource]bool{product("2"): true}}
+	idx, _ := newRecordingIndexer(st, 4, 8)
+
+	if _, err := idx.RegisterChanges(t.Context(), []Notification{
+		{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated, Version: 5},
+		{ResourceType: "product", ResourceID: "2", Kind: ChangeUpdated, Version: 3},
+		{ResourceType: "product", ResourceID: "3", Kind: ChangeDeleted},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := [][]model.Resource{{product("1"), product("3")}}
+	if got := st.parentsOfReadsSnapshot(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("ParentsOf read %v, want %v", got, want)
+	}
+	if reg, read := st.indexOf("RegisterChanges"), st.indexOf("ParentsOf"); read < reg {
+		t.Fatalf("the read must follow the statement: %v", st.callsSnapshot())
+	}
+}
+
+// What the read returns is marked through scheduleBuild, less the Parents
+// the statement marked and the batch's accepted items, which carry their own
+// marks: one MarkStale, before any item or Parent submission, and a build of
+// each Parent the mark claimed. A rejected item carries no mark of its own,
+// so it is marked as the statement's fanout marks one.
+func TestRegisterChanges_MarksTheParentsTheStatementMissedAndBuildsTheClaimedOnes(t *testing.T) {
+	st := &recordingStore{
+		stale: map[model.Resource]bool{product("2"): true},
+		// The statement marks sp as item 1's Parent; the read finds it too.
+		parentsOf:   map[model.Resource][]model.Resource{product("1"): {product("sp")}},
+		lateParents: []model.Resource{product("p"), product("1"), product("2"), product("q")},
+	}
+	// q has a live owner, whose follow-up carries the change: it is marked,
+	// not built.
+	st.mu.Lock()
+	r := st.markLocked(product("q"), nil)
+	claimLocked(r)
+	qOwner := r.owner
+	st.mu.Unlock()
+	idx, _ := newRecordingIndexer(st, 1, 8)
+
+	// The pool's one worker is held, so every submission stays queued and
+	// the queue's length counts the submissions made so far.
+	block, started := make(chan struct{}), make(chan struct{})
+	if !idx.pool.trySubmit(func(context.Context) { close(started); <-block }) {
+		t.Fatal("failed to occupy the pool")
+	}
+	<-started
+	queuedAtMark := -1
+	st.onMarkStale = func() { queuedAtMark = len(idx.pool.queue) }
+
+	statuses, err := idx.RegisterChanges(t.Context(), []Notification{
+		{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
+		{ResourceType: "product", ResourceID: "2", Kind: ChangeUpdated, Version: 3},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Submitted: the second fanout's claimed p and 2, one task for their
+	// type, then item 1 and the statement's Parent sp; q is owned, so not
+	// submitted.
+	queuedAfter := len(idx.pool.queue)
+	close(block)
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if queuedAtMark != 0 || queuedAfter != 3 {
+		t.Fatalf("%d submissions queued at the mark and %d after the call; want the mark before all 3", queuedAtMark, queuedAfter)
+	}
+	if want := []RegisterStatus{RegisterAccepted, RegisterStale}; fmt.Sprint(statuses) != fmt.Sprint(want) {
+		t.Fatalf("statuses %v, want %v", statuses, want)
+	}
+
+	want := [][]model.Resource{{product("p"), product("2"), product("q")}}
+	if got := st.marksSnapshot(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("MarkStale calls %v, want one of p, 2 and q: neither the statement's Parent sp nor the accepted item 1", got)
+	}
+	if o := st.owner(product("q")); o != qOwner {
+		t.Fatalf("q's owner %d, want its live owner %d kept", o, qOwner)
+	}
+	for _, res := range []model.Resource{product("1"), product("p"), product("2"), product("sp")} {
+		if len(st.begunOf(res)) != 1 {
+			t.Fatalf("%v begun %d times, want one build: %v", res, len(st.begunOf(res)), st.callsSnapshot())
+		}
+	}
+	if n := len(st.begunOf(product("q"))); n != 0 {
+		t.Fatalf("q has a live owner and must not be built, begun %d times", n)
+	}
+}
+
+func TestRegisterChanges_NoAcceptedItem_ReadsAndMarksNothing(t *testing.T) {
+	st := &recordingStore{
+		stale:       map[model.Resource]bool{product("1"): true, product("2"): true},
+		lateParents: []model.Resource{product("p")},
+	}
+	idx := newHotPathIndexer(st, 2, 4)
+
+	if _, err := idx.RegisterChanges(t.Context(), []Notification{
+		{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated, Version: 1},
+		{ResourceType: "product", ResourceID: "2", Kind: ChangeUpdated, Version: 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st.count("ParentsOf") != 0 || st.count("MarkStale") != 0 {
+		t.Fatalf("nothing was accepted, so nothing is read or marked: %v", st.callsSnapshot())
+	}
+}
+
+// A failed read or mark after the commit is logged at Warn with the ids it
+// concerns — the changed resources, or the Parents — so an operator can
+// rebuild them: the batch is committed, so the statuses return with a nil
+// error and the items are still built.
+func TestRegisterChanges_SecondFanoutFailure_IsLoggedWithItsIDsAndTheStatusesReturned(t *testing.T) {
+	cases := map[string]struct {
+		setup func(*recordingStore)
+		ids   string
+	}{
+		"read": {func(st *recordingStore) { st.parentsOfErr = errors.New("db down") }, "[product/1]"},
+		"mark": {func(st *recordingStore) {
+			st.lateParents = []model.Resource{product("p")}
+			st.markErr = errors.New("db down")
+		}, "[product/p]"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &recordingStore{}
+			tc.setup(st)
+			idx := newHotPathIndexer(st, 2, 4)
+
+			statuses, err := idx.RegisterChanges(t.Context(), []Notification{
+				{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
+			})
+			if err != nil {
+				t.Fatalf("a committed batch must not fail: %v", err)
+			}
+			if want := []RegisterStatus{RegisterAccepted}; fmt.Sprint(statuses) != fmt.Sprint(want) {
+				t.Fatalf("statuses %v, want %v", statuses, want)
+			}
+			if err := idx.WaitForIdle(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if len(st.begunOf(product("1"))) == 0 {
+				t.Fatalf("the item must still be built: %v", st.callsSnapshot())
+			}
+			var warns int
+			for _, rec := range logs.records(t) {
+				if rec["level"] != "WARN" || rec["error"] == nil {
+					continue
+				}
+				warns++
+				if !strings.Contains(fmt.Sprint(rec["error"]), "db down") {
+					t.Fatalf("the warning must carry the failure: %v", rec)
+				}
+				if got := fmt.Sprint(rec["ids"]); got != tc.ids {
+					t.Fatalf("the warning names ids %s, want %s: %v", got, tc.ids, rec)
+				}
+			}
+			if warns != 1 {
+				t.Fatalf("want the failure logged once at Warn, got %d: %v", warns, logs.records(t))
+			}
+		})
+	}
+}
+
+// A caller that cancels right after the commit doesn't skip the second
+// fanout: its read and mark run on a context detached from the caller's
+// cancellation.
+func TestRegisterChanges_CallerCancelledAfterTheCommit_StillRunsTheSecondFanout(t *testing.T) {
+	logs := captureDefaultLogs(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	st := &recordingStore{lateParents: []model.Resource{product("p")}, onRegistered: cancel}
+	idx := newHotPathIndexer(st, 2, 4)
+
+	if _, err := idx.RegisterChanges(ctx, []Notification{
+		{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if st.count("ParentsOf") != 1 || st.count("MarkStale") != 1 {
+		t.Fatalf("want one read and one mark: %v", st.callsSnapshot())
+	}
+	if len(st.begunOf(product("p"))) != 1 {
+		t.Fatalf("p's mark claimed it, so it must be built: %v", st.callsSnapshot())
+	}
+	for _, rec := range logs.records(t) {
+		if rec["level"] == "WARN" && rec["error"] != nil {
+			t.Fatalf("the second fanout failed on the cancelled ctx: %v", rec)
+		}
+	}
+}
+
+// The ids a second fanout's warning names are capped at loggedIDsCap, with
+// how many were left out.
+func TestLoggedIDs_CapsTheList(t *testing.T) {
+	rs := make([]model.Resource, loggedIDsCap+2)
+	for i := range rs {
+		rs[i] = product(fmt.Sprint(i))
+	}
+	ids, omitted := loggedIDs(rs)
+	if len(ids) != loggedIDsCap || ids[0] != "product/0" || omitted != 2 {
+		t.Fatalf("got %d ids starting %q, %d omitted; want %d, product/0, 2", len(ids), ids[0], omitted, loggedIDsCap)
+	}
+	if ids, omitted := loggedIDs(rs[:1]); fmt.Sprint(ids) != "[product/0]" || omitted != 0 {
+		t.Fatalf("got %v, %d", ids, omitted)
+	}
 }

@@ -3085,6 +3085,10 @@ func (s *rebuildRecordingStore) RegisterChanges(context.Context, []Registration,
 	panic("RegisterChanges: not implemented")
 }
 
+func (s *rebuildRecordingStore) ParentsOf(context.Context, []model.Resource) ([]model.Resource, error) {
+	panic("ParentsOf: not implemented")
+}
+
 // A flush whose edge replace fails because the walk's context ended — here
 // the last flush of a checkpointing single-plan walk, where no salvage
 // follows — still marks the resource stale, on a context detached from the

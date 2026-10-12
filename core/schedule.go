@@ -193,6 +193,12 @@ func (idx *Indexer) submit(ctx context.Context, wait bool, task func(context.Con
 // for the lease to expire, and the lease is the backstop.
 const ownerReleaseTimeout = 5 * time.Second
 
+// secondFanoutTimeout bounds a registration's second fanout
+// (markMissedParents), its read and its mark, which run on a context
+// detached from the caller's cancellation: the batch has committed, so the
+// fanout runs even when the caller gives up. Both are one short statement.
+const secondFanoutTimeout = 5 * time.Second
+
 // renewOwners renews the leases of owned and returns the ownerships still
 // held; its caller works only on those. An ownership it lost — after the
 // lease lapsed, another owner claimed the row under a newer mark, or a clear

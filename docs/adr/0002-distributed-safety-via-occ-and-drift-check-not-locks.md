@@ -1,5 +1,47 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-12, runbook step L1.9):** a registration **fans out a
+> second time after it commits**. `RegisterChanges`' statement reads
+> `relations` from the snapshot it starts with, and the drift check
+> (`AnyChangedSince`) can't see a registration that hasn't committed. So a
+> registration of a Child that started before a Parent build's edge to it
+> committed, and committed after that build's drift check, escaped both: the
+> fanout missed the edge and the check missed the change. Now, once the
+> statement has committed, `Indexer.RegisterChanges` reads every Parent the
+> stored edges of its accepted items name, deletes included
+> (`Store.ParentsOf`), drops the Parents the statement marked and the
+> batch's accepted items, which carry their own marks, and marks the rest
+> through `scheduleBuild`, before it submits the items' and Parents' builds.
+>
+> Why it closes the window: take any build of a Parent that started below
+> the registration's value and stored an edge to the Child. If its drift
+> check runs after the registration commits, it sees the change and re-marks
+> the Parent. If it ran before, the build had already written its document
+> and committed its edge, so the read after the commit sees the edge, and
+> the mark from it brings a build that begins after it: its Build Sequence is
+> above the earlier build's, and its fetch follows the change. A build that
+> started above the value fetched after the change. The argument rests on
+> when the drift check and the edge commit happen, not on the earlier
+> build's numbers, so it covers rebuild walks, which take a document's Build
+> Sequence after its page was fetched. For the same reason the read filters
+> nothing by mark: a Parent marked since the change may be served by a build
+> that fetched before it — a walk numbers its write after its fetch — so a
+> mark since the change proves nothing. Outside the race the second fanout
+> marks nothing, or a Parent whose edge committed just after the
+> registration, a harmless duplicate of that build's own drift re-mark. The
+> read takes no lock, and the mark is `MarkStale`'s own statement, which
+> locks in (type, id) order (the L1.7 note) and holds nothing else.
+>
+> What it leaves open: the second fanout runs in the registering process
+> after the commit, so a process that stops between the commit and the
+> second fanout leaves the window open for that batch, as does a failed read
+> or mark, which is logged with the ids it concerns and doesn't fail the
+> committed registration. A caller that gives up after the commit doesn't
+> skip it: it runs on a context detached from the caller's cancellation,
+> bounded by a timeout. The next change to the Child or the Parent repairs
+> it. A deleted Child hard-deleted before the drift check is still unseen by
+> it (seams S6 in laika-dev's `docs/seams.md`).
+
 > **Note (2026-10-12, runbook step L5.6):** the legs hold per id in a batched
 > build ([ADR 0014](./0014-builds-run-in-per-type-batches.md)). `Build` and
 > `rebuildByIDs` begin a batch of ids in one `Store.BeginBuilds`, which draws

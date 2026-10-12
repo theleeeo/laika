@@ -61,6 +61,15 @@ type Store interface {
 	// same update when it has no owner or its owner's lease (lease, measured
 	// from owner_since) has expired; the outcome reports each claim's token.
 	RegisterChanges(ctx context.Context, items []Registration, lease time.Duration) (Registered, error)
+	// ParentsOf returns, each once, every Parent the stored edges of
+	// children name, across every Schema Version: a registration's second
+	// fanout, read once its RegisterChanges has committed. RegisterChanges'
+	// fanout reads the edges from its statement's snapshot, so it misses an
+	// edge that committed while the statement ran; this read, after the
+	// commit, sees it (ADR 0002). It filters nothing by mark: a Parent marked
+	// since the change may be served by a build that fetched before it, as a
+	// rebuild walk's is. It takes no lock, and no children reads nothing.
+	ParentsOf(ctx context.Context, children []model.Resource) ([]model.Resource, error)
 
 	// MarkStale durably records build intent for the given resources. It
 	// leaves each row's metadata alone: a resource's metadata is written only

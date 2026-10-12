@@ -160,6 +160,10 @@ func (s *cancellingStore) RegisterChanges(context.Context, []Registration, time.
 	panic("RegisterChanges: not implemented")
 }
 
+func (s *cancellingStore) ParentsOf(context.Context, []model.Resource) ([]model.Resource, error) {
+	panic("ParentsOf: not implemented")
+}
+
 func (s *cancellingStore) ListUncovered(context.Context, string, int, map[string]string, string, int) ([]ListedResource, error) {
 	return nil, nil
 }
