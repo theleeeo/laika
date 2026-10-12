@@ -1,5 +1,29 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-12, runbook step L5.7):** inline tasks and the sweep
+> serve **per-type batches** ([ADR 0014](0014-builds-run-in-per-type-batches.md)).
+> After its commit, `RegisterChanges` submits the builds its statement
+> claimed — the accepted items first, then the marked Parents — per type in
+> tasks of at most the type's batch size (`submitBuildBatches`,
+> `ownedBatches`), and each claimed delete as a task of its own, so the L1.2
+> correction's "each accepted item and each marked Parent is submitted as its
+> own build" no longer holds. `WaitForSlot` applies to each task. A cascade's
+> claimed roots (`scheduleBuild`) and a `Build` call's build follow-ups,
+> submitted together when the call returns (the L5.6 note), are cut the same
+> way, no longer one task per type, and never wait; a finish's delete follow-up is still one task
+> (`submitFollowUp`). The pool's `PoolSize`, `QueueSize` and `QueueHighWater`
+> count tasks, as they did, and a task now holds a batch. A batch the pool
+> refuses releases its ownership, as a shed build did, and is logged once
+> with its type and count. A `StaleSweep` pass finishes its tombstones first,
+> one `deleteOne` each in list order, then builds its build entries in
+> per-type batches of the type's batch size, one `Build` per batch. Each
+> tombstone renews its ownership when the pass reaches it, and each batch
+> renews as a whole: a batch with nothing still held is skipped, and the
+> held ids are built together in list order. A failed renewal releases the
+> tombstone's or the whole batch's ownership without a backoff. A batch that
+> fails as a whole is logged once, by `Build` (ADR 0014), so a sweep that
+> retries a failed batch logs its rows at Debug.
+
 > **Note (2026-10-12, runbook step L5.6):** a build runs a **batch**
 > ([ADR 0014](0014-builds-run-in-per-type-batches.md)). `Indexer.Build` cuts
 > its ids into chunks of the type's batch size (`Config.BuildBatchSize`, 100

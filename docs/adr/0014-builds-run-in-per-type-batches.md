@@ -2,6 +2,25 @@
 
 _Accepted, 2026-10-08. Built by runbook steps L5.1–L5.7._
 
+> **Note (2026-10-12, runbook step L5.7):** submissions group by type as
+> decided, and two lines of the L5.6 note below no longer hold.
+>
+> - **Every submission is cut into batches.** A registration's builds — its
+>   accepted items first, then its Parents —, a cascade's claimed roots and a
+>   call's build follow-ups go to the pool per type in tasks of at most the
+>   type's batch size (`submitBuildBatches`, `ownedBatches`); a `StaleSweep`
+>   pass builds its build entries the same way, one `Build` per batch, after
+>   its tombstones. Deletes, and a finish's delete follow-up, stay one task
+>   each. A call's follow-ups still wait for its end (seams S63 in
+>   laika-dev's `docs/seams.md`), but no longer go as one build of the type.
+> - **A batch of one id is no longer every sweep build.** A sweep pass and a
+>   registration's page build batches of several ids, so a sweep-retried
+>   batch that fails as a whole logs the batch's one Error line, its rows at
+>   Debug with their attempt counts; a row stuck in such a batch no longer
+>   gets a line of its own at Error from its fifth attempt (seams S64). A
+>   batch of one id — a single notification, a lone follow-up, a type with
+>   one id in a pass — still fails as that id.
+
 > **Note (2026-10-12, runbook step L5.6):** as built, six details refine
 > the decision.
 >

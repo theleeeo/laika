@@ -82,8 +82,9 @@ sweep:
   backoff_max: "24h"
 
 # Bounded in-process pool for inline builds. size is the number of persistent
-# workers; queue_size bounds accepted-but-not-yet-running builds — a full
-# queue sheds new submissions to the sweep. queue_high_water is the queued-build
+# workers; queue_size bounds accepted-but-not-yet-running tasks, each a batch
+# of one type's builds up to its build batch size, or one delete — a full
+# queue sheds new submissions to the sweep. queue_high_water is the queued-task
 # count at or above which the pool is under pressure; 0 means 80% of queue_size.
 # Only WaitForSlot registrations pace on it, and the app's RPCs never wait
 # (ADR 0008), so it has no effect here yet. owner_lease is how long an inline
