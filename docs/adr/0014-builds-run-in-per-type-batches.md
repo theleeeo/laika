@@ -2,7 +2,7 @@
 
 _Accepted, 2026-10-08. Built by runbook steps L5.1–L5.7._
 
-> **Note (2026-10-12, runbook step L5.6):** as built, four details refine
+> **Note (2026-10-12, runbook step L5.6):** as built, six details refine
 > the decision.
 >
 > - **A call's follow-ups go out together.** An owned `Build` collects the
@@ -10,20 +10,28 @@ _Accepted, 2026-10-08. Built by runbook steps L5.1–L5.7._
 >   them as one owned build of the type (`submitOwnedBuilds`) when the call
 >   returns; a delete follow-up is submitted as its finish hands it on. A
 >   follow-up re-claimed early in a long call waits for its end, its new
->   lease not renewed meanwhile (seams S62 in laika-dev's `docs/seams.md`).
+>   lease not renewed meanwhile (seams S63 in laika-dev's `docs/seams.md`).
 > - **A batch of one id fails as that id.** Its failure is logged as a single
 >   build's: per row, with its attempt count, at Error from the fifth attempt
->   in a row, not as a batch's line. Until runbook step L5.7 the sweep builds
->   one entry per `Build` call, so most of its failed builds are such batches
->   (seams S63).
+>   in a row, not as a batch's line. Until runbook step L5.7 every sweep
+>   build, like every registration's, is a batch of one id (seams S64).
 > - **A failure after the plans is logged per id.** Only a failed
 >   `BeginBuilds` or plan call gets the batch's one Error line. A failed
 >   `BulkUpsert` request, Parent mark or drift check fails each id it
->   reaches with that id's own line (seams S63).
+>   reaches with that id's own line (seams S64).
 > - **A failed drift check fails every unfinished id.** The batch's Parent
 >   mark and drift check are one call each; when either fails, every id of
 >   the batch not yet finished fails, as a single build's failed check
 >   failed it.
+> - **An unconfirmed drift hit re-marks every checked root.** The drift
+>   check is one `AnyChangedSince` over the batch, narrowed per id on a hit.
+>   A hit that no narrowing query confirms re-marks every root it checked,
+>   rather than none, in `Build` and in the rebuild flusher's `checkDrift`.
+> - **A batch that ctx's end failed is not a failed batch.** When the
+>   call's context ended before or during a batch's `BeginBuilds` or plan
+>   call, its owned ids are released without a backoff, logged at Info, as
+>   the ids a cancelled build left unreached are, and `Build` returns ctx's
+>   error.
 
 Every build path builds one resource at a time. `projection.BuildRequest` carries one
 `ResourceID`, `Indexer.Build` begins, executes and finishes one id after another, a registration

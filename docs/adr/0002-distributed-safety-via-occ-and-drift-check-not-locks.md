@@ -10,7 +10,8 @@
 > it (leg 2). A build's drift check (leg 3) is one `AnyChangedSince` over
 > every id's fetched children, each measured from its own id's start, and
 > narrows to each id on a hit, so only the drifted roots are re-scheduled,
-> as the rebuild flusher's check of a chunk does. A Rebuild
+> as the rebuild flusher's check of a chunk does; a hit that no narrowing
+> query confirms re-schedules every checked root, in both. A Rebuild
 > walk still begins each root with `BeginBuild`. `BeginBuilds` locks its rows
 > in (type, id) order for its one statement (the L1.7 note), never across a
 > fetch.
