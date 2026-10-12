@@ -38,11 +38,23 @@ func (idx *Indexer) scheduleBuild(ctx context.Context, roots []model.Resource) e
 	return nil
 }
 
-// submitOwnedBuilds is scheduleBuild's opportunistic half: one inline build
-// per resource type of the claimed roots, each id carrying its owner token. A
-// shed build releases the ownership of its batch.
+// submitOwnedBuilds is scheduleBuild's opportunistic half, and how a Build
+// call hands on its build follow-ups: it chunks the claimed roots per type
+// into batches of at most the type's batch size and submits each batch as
+// one inline build task, never waiting (see submitBuildBatches).
 func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned) {
-	for resourceType, batch := range groupOwnedByType(owned) {
+	idx.submitBuildBatches(ctx, false, owned)
+}
+
+// submitBuildBatches submits the claimed owned as owned inline builds, one
+// task per batch of ownedBatches — a type's ids, up to its batch size — each
+// id carrying its owner token; an entry without a token was not claimed and
+// is not submitted. Each task waits for a slot when wait is set. A batch the
+// pool refuses releases its ownership and is logged once, with its type and
+// count.
+func (idx *Indexer) submitBuildBatches(ctx context.Context, wait bool, owned []Owned) {
+	for _, batch := range idx.ownedBatches(owned) {
+		resourceType := batch[0].Type
 		args := BuildArgs{
 			ResourceType: resourceType,
 			ResourceIds:  make([]string, len(batch)),
@@ -52,8 +64,8 @@ func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned) {
 			args.ResourceIds[i] = o.Id
 			args.OwnerTokens[o.Id] = o.Token
 		}
-		if !idx.submitOwned(ctx, false, batch, idx.buildTask(args)) {
-			slog.Info(notSubmittedMsg(false, "resources left stale for sweep"),
+		if !idx.submitOwned(ctx, wait, batch, idx.buildTask(args)) {
+			slog.Info(notSubmittedMsg(wait, "resources left stale for sweep"),
 				slog.String("type", resourceType),
 				slog.Int("count", len(batch)),
 			)
@@ -62,10 +74,11 @@ func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned) {
 }
 
 // submitBuild submits one owned inline build of res, already marked stale,
-// if the mark claimed it (token != 0); the build fetches with res's metadata
-// as its BeginBuilds returns it. An unclaimed res has a live owner, whose
-// follow-up carries the change, so nothing is submitted.
-func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, token int64, wait bool) {
+// if the mark claimed it (token != 0), never waiting; the build fetches with
+// res's metadata as its BeginBuilds returns it. An unclaimed res has a live
+// owner, whose follow-up carries the change, so nothing is submitted. It is
+// the build branch of submitFollowUp.
+func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, token int64) {
 	if token == 0 {
 		return
 	}
@@ -74,8 +87,8 @@ func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, token i
 		ResourceIds:  []string{res.Id},
 		OwnerTokens:  map[string]int64{res.Id: token},
 	}
-	if !idx.submitOwned(ctx, wait, []Owned{{Resource: res, Token: token}}, idx.buildTask(args)) {
-		slog.Info(notSubmittedMsg(wait, "resource left stale for sweep"),
+	if !idx.submitOwned(ctx, false, []Owned{{Resource: res, Token: token}}, idx.buildTask(args)) {
+		slog.Info(notSubmittedMsg(false, "resource left stale for sweep"),
 			slog.String("type", res.Type), slog.String("id", res.Id))
 	}
 }
@@ -108,7 +121,7 @@ func (idx *Indexer) submitFollowUp(ctx context.Context, res model.Resource, fu F
 		idx.submitDelete(ctx, res, fu.Token, fu.Token, false)
 		return
 	}
-	idx.submitBuild(ctx, res, fu.Token, false)
+	idx.submitBuild(ctx, res, fu.Token)
 }
 
 // buildTask is the pool task of an owned inline build. It builds only the ids
@@ -329,17 +342,4 @@ func notSubmittedMsg(wait bool, outcome string) string {
 		return "wait for a build slot ended by cancellation or shutdown; " + outcome
 	}
 	return "build pool saturated; " + outcome
-}
-
-// groupOwnedByType groups claimed resources by type; an entry without a
-// token was not claimed and is dropped.
-func groupOwnedByType(owned []Owned) map[string][]Owned {
-	byType := make(map[string][]Owned, len(owned))
-	for _, o := range owned {
-		if o.Token == 0 {
-			continue
-		}
-		byType[o.Type] = append(byType[o.Type], o)
-	}
-	return byType
 }

@@ -277,13 +277,15 @@ func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 	}
 }
 
-// WaitForSlot applies to every submit of a batch: the items' builds, the
-// delete and the Parents' builds all wait for pressure to clear, then run.
+// WaitForSlot applies to every task of a batch, not to each id: the items'
+// and the Parent's builds, one task of their type, and the delete, a task of
+// its own, each wait for pressure to clear, then run.
 func TestRegisterChanges_WaitForSlot_EverySubmitWaitsThenRuns(t *testing.T) {
 	st := &recordingStore{
 		marked:  make(chan struct{}, 8),
 		parents: []MarkedParent{{Resource: model.Resource{Type: "product", Id: "p"}}},
 	}
+	tasks := recordTasks(st)
 	idx, ex := newRecordingIndexer(st, 1, 1)
 	release := make(chan struct{})
 	holdPoolFull(t, idx, func(context.Context) { <-release })
@@ -293,6 +295,7 @@ func TestRegisterChanges_WaitForSlot_EverySubmitWaitsThenRuns(t *testing.T) {
 		_, err := idx.RegisterChanges(t.Context(), []Notification{
 			{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
 			{ResourceType: "product", ResourceID: "2", Kind: ChangeDeleted},
+			{ResourceType: "product", ResourceID: "3", Kind: ChangeUpdated},
 		}, WaitForSlot())
 		errc <- err
 	}()
@@ -306,12 +309,15 @@ func TestRegisterChanges_WaitForSlot_EverySubmitWaitsThenRuns(t *testing.T) {
 	if err := idx.WaitForIdle(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	built := ex.metadataByID()
-	if _, ok := built["1"]; !ok {
-		t.Fatalf("the item's waited-for build must run: %v", built)
+	want := [][]string{{"product/1", "product/3", "product/p"}, {"product/2"}}
+	if got := sortedTasks(tasks()); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the batch must wait for and run %d tasks, got %v", len(want), got)
 	}
-	if _, ok := built["p"]; !ok {
-		t.Fatalf("the Parent's waited-for build must run: %v", built)
+	built := ex.metadataByID()
+	for _, id := range []string{"1", "3", "p"} {
+		if _, ok := built[id]; !ok {
+			t.Fatalf("the waited-for build of %s must run: %v", id, built)
+		}
 	}
 	if st.indexOf("DeleteResourceIfSeq:product/2:2:2") == -1 {
 		t.Fatalf("the waited-for delete must run: %v", st.callsSnapshot())

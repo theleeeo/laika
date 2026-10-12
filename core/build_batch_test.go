@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/theleeeo/laika/model"
+	"github.com/theleeeo/laika/projection"
 )
 
 func TestNew_BuildBatchSizes(t *testing.T) {
@@ -69,4 +70,39 @@ func TestOwnedBatches_ChunksPerTypeInOrderAndDropsUnclaimed(t *testing.T) {
 	if got := idx.ownedBatches([]Owned{owned("product", "p1", 0)}); len(got) != 0 {
 		t.Errorf("ownedBatches of only unclaimed entries = %v, want none", got)
 	}
+}
+
+// A cascade submits the roots its mark claimed per type in tasks of at most
+// the type's batch size, and skips a root with a live owner: five products
+// claimed in batches of two are three tasks. Build's follow-ups go out
+// through the same submitOwnedBuilds, so they are cut the same way.
+func TestScheduleBuild_SubmitsOneTaskPerTypeAndChunk(t *testing.T) {
+	st := &recordingStore{}
+	tasks := recordTasks(st)
+	ex := &recordingExecuter{}
+	idx := mustNew(Config{
+		Resources:      testResources(),
+		Plans:          map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+		ES:             &fakeBackend{},
+		Store:          st,
+		PoolSize:       1,
+		QueueSize:      16,
+		BuildBatchSize: 2,
+	})
+	// 0 has a live owner: the cascade marks it but submits nothing for it.
+	claim(t, st, "0")
+
+	roots := []model.Resource{product("1"), product("0"), product("2"), product("3"), product("4"), product("5")}
+	if err := idx.scheduleBuild(t.Context(), roots); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := [][]string{{"product/1", "product/2"}, {"product/3", "product/4"}, {"product/5"}}
+	if got := tasks(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the cascade must submit one task per chunk of the batch size: got %v, want %v", got, want)
+	}
+	askedOnce(t, "the cascade's builds", ex, []string{"1", "2", "3", "4", "5"})
 }

@@ -56,20 +56,24 @@ type Config struct {
 	// Store is the PostgreSQL relation-graph store.
 	Store Store
 
-	// PoolSize bounds the number of concurrent inline builds. Default 10.
+	// PoolSize bounds the number of concurrent inline build tasks. A build
+	// task holds a batch — one type's ids, up to its batch size (see
+	// BuildBatchSize) — and a delete task one id. Default 10.
 	PoolSize int
 
 	// QueueSize bounds the number of accepted-but-not-yet-running inline
-	// builds. By default submission never blocks: a full queue sheds at once,
-	// leaving the resource stale for the sweep — except a RegisterChanges
-	// called with WaitForSlot, which waits for the queue to drop below
+	// tasks, each a batch of builds or one delete, as PoolSize counts them.
+	// By default submission never blocks: a full queue sheds a task at once,
+	// leaving its resources stale for the sweep — except a RegisterChanges
+	// called with WaitForSlot, whose tasks wait for the queue to drop below
 	// QueueHighWater. Default 10 × PoolSize.
 	QueueSize int
 
 	// QueueHighWater is the queued-task count at or above which the pool is
-	// under pressure: WaitForSlot registrations wait until the queue drops
-	// below it. 0 means the default, 80% of QueueSize and at least 1; any
-	// other value outside [1, QueueSize] makes New fail.
+	// under pressure: a WaitForSlot registration's tasks wait until the queue
+	// drops below it. It counts tasks, as QueueSize does, not ids. 0 means
+	// the default, 80% of QueueSize and at least 1; any other value outside
+	// [1, QueueSize] makes New fail.
 	QueueHighWater int
 
 	// RebuildChunkSize bounds the number of documents per bulk write during

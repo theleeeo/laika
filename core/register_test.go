@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/theleeeo/laika/aggregation"
+	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
 )
@@ -1086,6 +1088,50 @@ func newRecordingIndexer(st Store, poolSize, queueSize int) (*Indexer, *recordin
 
 func product(id string) model.Resource { return model.Resource{Type: "product", Id: id} }
 
+// productAndOrderResources is testResources plus an "order" type configured
+// as product is, for tests that register two types.
+func productAndOrderResources() resource.Configs {
+	cfgs := testResources()
+	order := &resource.Config{
+		Resource: "order",
+		Versions: []resource.VersionConfig{{Version: 1, Fields: []resource.FieldConfig{{Name: "title", Type: "text"}}}},
+	}
+	order.ApplyDefaults()
+	return append(cfgs, order)
+}
+
+// recordTasks records the ownerships of every RenewOwners call st sees as
+// "type/id" lists, in call order, and returns a snapshot func. An owned pool
+// task makes one such call at its dequeue; a running Build renews only every
+// third of the lease, which a unit test's builds never reach, so each list is
+// one task's ownerships.
+func recordTasks(st *recordingStore) func() [][]string {
+	var mu sync.Mutex
+	var tasks [][]string
+	st.onRenew = func(owned []Owned) {
+		names := make([]string, len(owned))
+		for i, o := range owned {
+			names[i] = o.Type + "/" + o.Id
+		}
+		mu.Lock()
+		tasks = append(tasks, names)
+		mu.Unlock()
+	}
+	return func() [][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(tasks)
+	}
+}
+
+// sortedTasks is tasks in a fixed order, for a test that doesn't care in
+// which order its tasks were submitted.
+func sortedTasks(tasks [][]string) [][]string {
+	out := slices.Clone(tasks)
+	slices.SortFunc(out, func(a, b []string) int { return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)) })
+	return out
+}
+
 func TestRegisterChanges_InvalidBatch_FailsBeforeAnyStoreCall(t *testing.T) {
 	cases := map[string]struct {
 		ns   []Notification
@@ -1148,11 +1194,15 @@ func TestRegisterChanges_StoreError_ReturnsErrorAndSubmitsNothing(t *testing.T) 
 	}
 }
 
+// After its one statement, a registration submits its accepted non-delete
+// items and its Parents as one build task per type and batch, and each
+// accepted delete as a task of its own; a stale item is neither.
 func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *testing.T) {
 	st := &recordingStore{
 		stale:   map[model.Resource]bool{product("2"): true},
 		parents: []MarkedParent{{Resource: product("p")}},
 	}
+	tasks := recordTasks(st)
 	// The Parent holds metadata of its own, which its mark leaves.
 	st.seedMetadata(product("p"), map[string]string{"m": "p"})
 	idx, ex := newRecordingIndexer(st, 4, 8)
@@ -1162,6 +1212,7 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 		{ResourceType: "product", ResourceID: "2", Kind: ChangeUpdated, Version: 3, Metadata: map[string]string{"m": "2"}},
 		{ResourceType: "product", ResourceID: "3", Kind: ChangeDeleted, Metadata: map[string]string{"m": "3"}},
 		{ResourceType: "product", ResourceID: "4", Kind: ChangeCreated, Metadata: map[string]string{"m": "4"}},
+		{ResourceType: "product", ResourceID: "5", Kind: ChangeDeleted},
 	}
 	statuses, err := idx.RegisterChanges(t.Context(), ns)
 	if err != nil {
@@ -1171,7 +1222,7 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 		t.Fatal(err)
 	}
 
-	want := []RegisterStatus{RegisterAccepted, RegisterStale, RegisterAccepted, RegisterAccepted}
+	want := []RegisterStatus{RegisterAccepted, RegisterStale, RegisterAccepted, RegisterAccepted, RegisterAccepted}
 	if fmt.Sprint(statuses) != fmt.Sprint(want) {
 		t.Fatalf("statuses %v, want %v", statuses, want)
 	}
@@ -1185,39 +1236,44 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 		{Resource: product("2"), Version: 3, Metadata: ns[1].Metadata},
 		{Resource: product("3"), Deleted: true, Metadata: ns[2].Metadata},
 		{Resource: product("4"), Metadata: ns[3].Metadata},
+		{Resource: product("5"), Deleted: true},
 	}
 	if fmt.Sprint(got) != fmt.Sprint(wantItems) {
 		t.Fatalf("registrations %v, want %v", got, wantItems)
 	}
 
+	// The builds of the items and the Parent are one task, each delete a
+	// task of its own.
+	wantTasks := [][]string{{"product/1", "product/4", "product/p"}, {"product/3"}, {"product/5"}}
+	if got := sortedTasks(tasks()); fmt.Sprint(got) != fmt.Sprint(wantTasks) {
+		t.Fatalf("tasks %v, want %v", got, wantTasks)
+	}
+
 	// Each accepted non-delete item and each Parent is built as itself with
 	// its own metadata — an item's the registration stored, the Parent's
-	// what its row held — and the stale item and the delete are not built.
+	// what its row held — and the stale item and the deletes are not built.
 	wantBuilt := map[string]map[string]string{
 		"1": {"m": "1"}, "4": {"m": "4"}, "p": {"m": "p"},
 	}
 	if built := ex.metadataByID(); fmt.Sprint(built) != fmt.Sprint(wantBuilt) {
 		t.Fatalf("built %v, want %v", built, wantBuilt)
 	}
+	askedOnce(t, "the registration's builds", ex, []string{"1", "4", "p"})
 	if r, _ := st.row(product("p")); !maps.Equal(r.metadata, map[string]string{"m": "p"}) {
 		t.Fatalf("the Parent's mark must leave its metadata, it holds %v", r.metadata)
 	}
-	// The delete runs with the StaleSeq and Token the store returned for it:
-	// the second mark of the batch (item 2 is stale and marks nothing).
-	if st.indexOf("DeleteResourceIfSeq:product/3:2:2") == -1 {
-		t.Fatalf("the delete must be submitted with its own stale seq: %v", st.callsSnapshot())
-	}
-
-	ex.mu.Lock()
-	nBuilds := len(ex.reqs)
-	ex.mu.Unlock()
-	if nBuilds != len(wantBuilt) {
-		t.Fatalf("each root is built once, got %d builds", nBuilds)
+	// Each delete runs with the StaleSeq and Token the store returned for
+	// it: the second and fourth marks of the batch (item 2 is stale and
+	// marks nothing).
+	for _, call := range []string{"DeleteResourceIfSeq:product/3:2:2", "DeleteResourceIfSeq:product/5:4:4"} {
+		if st.indexOf(call) == -1 {
+			t.Fatalf("each delete must be submitted with its own stale seq (%s): %v", call, st.callsSnapshot())
+		}
 	}
 
 	// The statement is the registration's only mark and comes before every
 	// submit.
-	if calls := st.callsSnapshot(); calls[0] != "RegisterChanges:4" {
+	if calls := st.callsSnapshot(); calls[0] != "RegisterChanges:5" {
 		t.Fatalf("the statement must come first: %v", calls)
 	}
 	if st.count("MarkStale") != 0 {
@@ -1225,26 +1281,66 @@ func TestRegisterChanges_SubmitsEachAcceptedItemAndParentAfterTheStatement(t *te
 	}
 }
 
-// Builds are submitted per id: two items with the same metadata are two pool
-// tasks and build in parallel, not one BuildArgs walked in sequence.
-func TestRegisterChanges_SubmitsOneBuildPerID(t *testing.T) {
-	st := &recordingStore{}
-	idx, ex := newRecordingIndexer(st, 2, 4)
-	ex.arrived = make(chan string, 2)
-	ex.proceed = make(chan struct{})
+// A registration's builds go to the pool per type in tasks of at most the
+// type's batch size, the items first and then the Parents, so a Parent rides
+// in its type's last task rather than one of its own: 150 products, 100
+// orders and one Parent of each make four tasks, each begun in one
+// BeginBuilds and each id asked about once.
+func TestRegisterChanges_SubmitsOneTaskPerTypeAndChunk_ParentsRideInTheirTypesTasks(t *testing.T) {
+	st := &recordingStore{parents: []MarkedParent{
+		{Resource: model.Resource{Type: "order", Id: "q"}},
+		{Resource: product("p")},
+	}}
+	tasks := recordTasks(st)
+	ex := &recordingExecuter{}
+	idx := mustNew(Config{
+		Resources: productAndOrderResources(),
+		Plans: map[string][]projection.Plan{
+			"product": {{Version: 1, Executer: ex}},
+			"order":   {{Version: 1, Executer: ex}},
+		},
+		ES:        &fakeBackend{},
+		Store:     st,
+		PoolSize:  1,
+		QueueSize: 16,
+	})
 
-	if _, err := idx.RegisterChanges(t.Context(), []Notification{
-		{ResourceType: "product", ResourceID: "1", Kind: ChangeUpdated},
-		{ResourceType: "product", ResourceID: "2", Kind: ChangeUpdated},
-	}); err != nil {
+	var ns []Notification
+	var products, orders []string
+	for i := 1; i <= 150; i++ {
+		id := strconv.Itoa(i)
+		products = append(products, "product/"+id)
+		ns = append(ns, Notification{ResourceType: "product", ResourceID: id, Kind: ChangeUpdated})
+	}
+	for i := 1; i <= 100; i++ {
+		id := "o" + strconv.Itoa(i)
+		orders = append(orders, "order/"+id)
+		ns = append(ns, Notification{ResourceType: "order", ResourceID: id, Kind: ChangeUpdated})
+	}
+	if _, err := idx.RegisterChanges(t.Context(), ns); err != nil {
 		t.Fatal(err)
 	}
-	within(t, ex.arrived, "the first build")
-	within(t, ex.arrived, "the second build, while the first is still running")
-	close(ex.proceed)
 	if err := idx.WaitForIdle(t.Context()); err != nil {
 		t.Fatal(err)
 	}
+
+	want := [][]string{
+		products[:100],
+		append(slices.Clone(products[100:]), "product/p"),
+		orders,
+		{"order/q"},
+	}
+	if got := tasks(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("the registration must submit %d tasks, one per type and chunk, the Parents in their type's last; got %d: %v", len(want), len(got), got)
+	}
+	if n := st.count("BeginBuilds"); n != len(want) {
+		t.Fatalf("each task is one batch, begun in one BeginBuilds: got %d", n)
+	}
+	var all []string
+	for _, id := range append(slices.Clone(products), orders...) {
+		all = append(all, id[strings.Index(id, "/")+1:])
+	}
+	askedOnce(t, "the registration's builds", ex, append(all, "p", "q"))
 }
 
 func TestRegisterChange_StaleItem_ReturnsErrStaleVersionAndSchedulesNothing(t *testing.T) {

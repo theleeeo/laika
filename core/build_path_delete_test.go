@@ -68,13 +68,14 @@ func TestBuildPathDelete_TombstoneClaimedByAParentMark_RemovesTheRow(t *testing.
 	mustRegister(t, idx, notify("C", ChangeUpdated, nil))
 	waitIdle(t, idx)
 
-	begins := callsWithPrefix(st, "BeginBuilds:product/P:")
+	// C and its Parent P are one product batch, C first: one BeginBuilds.
+	begins := callsWithPrefix(st, "BeginBuilds:product/C:")
 	if len(begins) != 1 || st.count("BeginDelete:product/P") != 0 {
-		t.Fatalf("the Parent mark must claim P and submit one build of it, not a delete: %v", st.callsSnapshot())
+		t.Fatalf("the Parent mark must claim P and submit one build of it, beside C's, not a delete: %v", st.callsSnapshot())
 	}
-	var tok int64
-	if _, err := fmt.Sscanf(begins[0], "BeginBuilds:product/P:%d", &tok); err != nil || tok == 0 {
-		t.Fatalf("P's build must be owned, got %q", begins[0])
+	var cTok, tok int64
+	if _, err := fmt.Sscanf(begins[0], "BeginBuilds:product/C:%d,product/P:%d", &cTok, &tok); err != nil || tok == 0 {
+		t.Fatalf("P's build must be owned and begun with C's, got %q", begins[0])
 	}
 	// C's build begins first (42); P's at 43.
 	if got := deletesOf(be, "P"); !slices.Equal(got, bothVersionsAt("P", 43)) {

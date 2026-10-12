@@ -8,11 +8,13 @@ type registerOptions struct {
 	waitForSlot bool
 }
 
-// WaitForSlot makes RegisterChanges' own submissions — each accepted item's
-// build or delete and its affected Parents' builds that the statement claimed
-// — wait while the build queue is at or above its high-water mark, instead
-// of shedding them to the sweep. It is backpressure for in-process pull
-// producers (pollers, CDC watchers) that would otherwise outrun the pool.
+// WaitForSlot makes RegisterChanges' own submissions — the build tasks of
+// the accepted items and affected Parents the statement claimed, each a
+// batch of one type's ids up to its batch size, and each accepted delete's
+// task — wait while the build queue is at or above its high-water mark,
+// instead of shedding them to the sweep. Each task waits for a slot, not
+// each id. It is backpressure for in-process pull producers (pollers, CDC
+// watchers) that would otherwise outrun the pool.
 // Push producers behind an RPC never wait: a spike sheds to the sweep, which
 // coalesces repeated changes into one build (ADR 0008).
 //

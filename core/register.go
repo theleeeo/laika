@@ -38,10 +38,12 @@ const (
 // marks of their Parents, which leave the Parents' metadata, commit in one
 // statement or not at all. A non-nil
 // error means nothing was committed and the whole batch may be retried.
-// After the commit, a delete or build is submitted per id the statement
-// claimed (WaitForSlot applies to them); an item or Parent with a live owner
-// is only marked, and its owner's follow-up carries the change. The statuses
-// are index-aligned with ns.
+// After the commit, what the statement claimed is submitted to the inline
+// build pool: each accepted delete as a task of its own, and the builds of
+// the accepted items and the Parents per type, the items first, in tasks of
+// at most the type's batch size (WaitForSlot applies to each task); an item
+// or Parent with a live owner is only marked, and its owner's follow-up
+// carries the change. The statuses are index-aligned with ns.
 //
 // The batch is validated before any statement: an unknown resource or two
 // notifications naming the same resource fail the call.
@@ -81,6 +83,7 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 	)
 
 	wait := newRegisterOptions(opts).waitForSlot
+	var builds []Owned
 	for i, it := range reg.Items {
 		if !it.Accepted {
 			continue
@@ -89,11 +92,14 @@ func (idx *Indexer) RegisterChanges(ctx context.Context, ns []Notification, opts
 			idx.submitDelete(ctx, items[i].Resource, it.StaleSeq, it.Token, wait)
 			continue
 		}
-		idx.submitBuild(ctx, items[i].Resource, it.Token, wait)
+		builds = append(builds, Owned{Resource: items[i].Resource, Token: it.Token})
 	}
+	// The Parents never repeat an item (Registered), so no id is given two
+	// tokens in one batch.
 	for _, p := range reg.Parents {
-		idx.submitBuild(ctx, p.Resource, p.Token, wait)
+		builds = append(builds, Owned{Resource: p.Resource, Token: p.Token})
 	}
+	idx.submitBuildBatches(ctx, wait, builds)
 	return statuses, nil
 }
 
