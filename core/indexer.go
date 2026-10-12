@@ -91,7 +91,7 @@ type Config struct {
 
 	// OwnerLease is how long a claimed build owner holds its resource
 	// without renewing: a mark of a row whose owner renewed (claim, a pool
-	// task's dequeue, the sweep reaching its entry, BeginBuild, BeginDelete,
+	// task's dequeue, the sweep reaching its entry, BeginBuilds, BeginDelete,
 	// and an owned build every third of it while it runs) within it doesn't
 	// submit another inline build. A holder whose renewal at dequeue or at
 	// its sweep entry finds the ownership lost — the lease lapsed and another

@@ -1231,13 +1231,13 @@ func (t *TestSuite) Test_ConcurrentRequests_RelatedParent_ConcurrentChildUpdates
 
 // Test_RaceCondition_ChildUpdatedDuringParentBuild forces a child change
 // accepted while a parent build is in flight: c's build has taken its start
-// from the Change Sequence (BeginBuild) and fetched a/1's old data when a/1's
+// from the Change Sequence (BeginBuilds) and fetched a/1's old data when a/1's
 // change registers, stamping a/1's change_seq above that start. Released, the
 // build writes its stale document (or loses it on OCC to a newer build), and
-// the drift check in buildOne finds a/1's change_seq above its start and
+// the drift check in Build finds a/1's change_seq above its start and
 // re-schedules c, so c converges to the new data.
 //
-// c's c->a edge still exists while the build fetches — buildOne replaces its
+// c's c->a edge still exists while the build fetches — Build replaces its
 // edges only after its plans ran — so a/1's notification also fans out to c,
 // and either path alone would converge. The path where the drift check is the
 // only one, a child with no edge yet, is pinned by
