@@ -494,7 +494,9 @@ func runRebuildFailingBegins(t *testing.T, markErrs map[string]int) error {
 		markErrs:  markErrs,
 	}
 	exec := &staticExecuter{byID: map[string][]projection.BuildDoc{"3": {productDoc("3")}}}
-	idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {{Version: 1, Executer: exec}}}, 0)
+	// Batches of 2: 1 and 2 begin together, so their failed begin fails them
+	// both, and 3 builds apart.
+	idx := newBatchedRebuildIndexer(st, &captureBackend{}, 2, exec)
 
 	var ts testsuite.WorkflowTestSuite
 	env := ts.NewTestActivityEnvironment()

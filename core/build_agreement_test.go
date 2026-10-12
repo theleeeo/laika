@@ -378,7 +378,7 @@ func TestRebuildByIDs_AllPlansNil_DeletesAtThatIDsSequence(t *testing.T) {
 	}
 
 	// Ids begin in order: 1 at 42, 2 at 43.
-	if got := st.count("BeginBuild:product/"); got != 2 {
+	if calls := st.callsSnapshot(); len(begunIn(calls, "1")) != 1 || len(begunIn(calls, "2")) != 1 {
 		t.Fatalf("setup: each id begins once: %v", st.callsSnapshot())
 	}
 	assertDeletedAt(t, st, es, "2", 43)

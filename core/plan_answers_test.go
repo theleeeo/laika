@@ -324,25 +324,35 @@ func TestExecutePlan_ABrokenAnswerStopsThePlan(t *testing.T) {
 }
 
 // A by-ids rebuild fails an id its plan answers with an error of its own
-// where the plan's error fails it: marked at once, before the next id
-// begins — not left unsettled for finish to mark — counted once, and none
-// of the other plan's document for it written. The next id completes.
+// where the plan's error fails it, and only that id: its batch is begun and
+// asked once, the id is marked at once — before the batch's other id
+// completes, not left unsettled for finish to mark — counted once, and none
+// of the other plan's document for it written. The other id completes.
 func TestRebuildByIDs_AnIDsOwnError_FailsItAsAPlanError(t *testing.T) {
 	st := &rebuildRecordingStore{}
 	es := &captureBackend{}
-	err := rebuildSelected(t, st, es, 0, twoVersionResources(),
-		ResourceSelector{ResourceType: "product", ResourceIDs: []string{"X", "1"}},
-		&staticExecuter{docs: []projection.BuildDoc{productDoc("1")}, byID: map[string][]projection.BuildDoc{"X": {errDoc("X", errors.New("X failed at source"))}}},
-		&staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}})
+	v1 := &requestLog{exec: &staticExecuter{docs: []projection.BuildDoc{productDoc("1")}, byID: map[string][]projection.BuildDoc{"X": {errDoc("X", errors.New("X failed at source"))}}}}
+	v2 := &requestLog{exec: &staticExecuter{docs: []projection.BuildDoc{productDoc("1"), productDoc("X")}}}
+	idx := newBatchedRebuildIndexer(st, es, 0, v1, v2)
+
+	err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"X", "1"}}})
+	if werr := idx.WaitForIdle(t.Context()); werr != nil {
+		t.Fatal(werr)
+	}
 
 	assertFailedOnce(t, st, err, "X")
 	calls := st.callsSnapshot()
-	if n := countPrefix(calls, "BeginBuild:product/X"); n != 1 {
-		t.Fatalf("X must be begun once, got %d: %v", n, calls)
+	if begins := beginBuildsCalls(st); len(begins) != 1 || !slices.Equal(begins[0], []string{"X", "1"}) {
+		t.Fatalf("X and 1 must be begun together, once: %v", calls)
 	}
-	marked, next := callIndexes(calls, "MarkStale:product/X"), callIndexes(calls, "BeginBuild:product/1")
-	if len(marked) != 1 || len(next) != 1 || marked[0] > next[0] {
-		t.Fatalf("X must be failed, and marked, before 1 begins: %v", calls)
+	for v, log := range map[int]*requestLog{1: v1, 2: v2} {
+		if len(log.reqs) != 1 || !slices.Equal(log.reqs[0].ResourceIDs, []string{"X", "1"}) {
+			t.Fatalf("v%d must be asked about the batch once, got %+v", v, log.reqs)
+		}
+	}
+	marked, done := callIndexes(calls, "MarkStale:product/X"), slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, "ClearStale:product/1:") })
+	if len(marked) != 1 || done == -1 || marked[0] > done {
+		t.Fatalf("X must be failed, and marked, before 1 completes: %v", calls)
 	}
 	for _, chunk := range es.bulkCalls {
 		for _, it := range chunk {

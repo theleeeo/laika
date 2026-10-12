@@ -712,7 +712,7 @@ func TestRebuildByIDs_RepeatedID_IsBuiltOnce(t *testing.T) {
 		t.Fatalf("the rebuild must report one failed resource, got %v", err)
 	}
 	calls := st.callsSnapshot()
-	if st.count("BeginBuild:product/X") != 1 || countPrefix(calls, "MarkStale:product/X") != 1 {
+	if len(begunIn(calls, "X")) != 1 || countPrefix(calls, "MarkStale:product/X") != 1 {
 		t.Fatalf("X must be begun once and marked once: %v", calls)
 	}
 }
@@ -2260,11 +2260,11 @@ func TestRebuildByIDs_DriftHit_NarrowsAndReschedulesOnlyTheChangedRoot(t *testin
 	if !slices.Equal(narrowed, want) {
 		t.Fatalf("each narrowed query carries one root's checks with its start, got %v want %v", narrowed, want)
 	}
-	begins := callIndexes(calls, "BeginBuild:product/1")
+	begins := begunIn(calls, "1")
 	if len(begins) != 2 || begins[1] < marks[0] {
 		t.Fatalf("the re-mark must precede the root's re-build: %v", calls)
 	}
-	if len(callIndexes(calls, "BeginBuild:product/2")) != 1 {
+	if len(begunIn(calls, "2")) != 1 {
 		t.Fatalf("the unchanged root must not be re-built: %v", calls)
 	}
 }
@@ -2278,7 +2278,7 @@ func TestRebuildByIDs_DriftQueryError_ReschedulesTheRoot(t *testing.T) {
 
 	calls := st.callsSnapshot()
 	marks := callIndexes(calls, "MarkStale:product/1")
-	begins := callIndexes(calls, "BeginBuild:product/1")
+	begins := begunIn(calls, "1")
 	if len(marks) != 1 || len(begins) != 2 || begins[1] < marks[0] {
 		t.Fatalf("a failed drift query must re-mark and re-build the root: %v", calls)
 	}
@@ -3238,10 +3238,9 @@ func TestRebuild_FailuresAllMarked_ReturnsRebuildMarkedFailuresError(t *testing.
 					docs: []projection.BuildDoc{productDoc("1"), productDoc("2"), productDoc("3")},
 					byID: map[string][]projection.BuildDoc{"1": {productDoc("1")}, "2": {productDoc("2")}, "3": {productDoc("3")}},
 				}
-				idx := newRebuildIndexer(st, &captureBackend{}, map[string][]projection.Plan{"product": {
-					{Version: 1, Executer: exec},
-					{Version: 2, Executer: exec},
-				}}, 0)
+				// Batches of 2: a targeted rebuild begins 1 and 2 together,
+				// so their failed begin fails them both, and 3 apart.
+				idx := newBatchedRebuildIndexer(st, &captureBackend{}, 2, exec, exec)
 				err := idx.RebuildNowResumable(t.Context(), sel, nil, nil)
 				if werr := idx.WaitForIdle(t.Context()); werr != nil {
 					t.Fatal(werr)

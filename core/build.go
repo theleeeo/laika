@@ -536,6 +536,11 @@ func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebu
 	return idx.rebuildAll(ctx, params, resume)
 }
 
+// rebuildByIDs builds the selected ids onto a rebuild flusher, a batch of
+// the type's batch size at a time: each batch is begun in one BeginBuilds in
+// BeginInsert, every token 0, and each selected plan is asked about it once.
+// A batch whose BeginBuilds or plan call fails fails each of its ids, logged
+// once for the batch.
 func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
@@ -545,77 +550,94 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 	}
 	expected := countActive(plans)
 
-	// Each id is served once, however often the selector lists it: a repeat
-	// would begin it again over its flusher entry, so a failed id could be
-	// re-begun, counted and marked again.
-	ids := make([]string, 0, len(params.ResourceIDs))
-	seen := make(map[string]bool, len(params.ResourceIDs))
-	for _, id := range params.ResourceIDs {
-		if !seen[id] {
-			seen[id] = true
-			ids = append(ids, id)
-		}
-	}
-
 	fl := newRebuildFlusher(idx, params.ResourceType)
 	fl.mayDelete = idx.runsEveryActivePlan(params.ResourceType, plans)
 
-	for _, id := range ids {
+	// failBatch fails each id of a batch the store or a plan call failed as
+	// a whole, in one log line rather than one per id.
+	failBatch := func(msg string, ids []string, err error) {
+		logger.Error(msg,
+			slog.Int("count", len(ids)),
+			slog.Any("ids", ids[:min(len(ids), 10)]),
+			slog.String("error", err.Error()))
+		for _, id := range ids {
+			fl.fail(ctx, id)
+		}
+	}
+
+	// Each id is served once, however often the selector lists it (idBatches
+	// drops a repeat): a repeat would begin it again over its flusher entry,
+	// so a failed id could be re-begun, counted and marked again.
+	total := 0
+	for _, ids := range idBatches(params.ResourceIDs, idx.batchSize(params.ResourceType)) {
 		if ctx.Err() != nil {
 			fl.salvage(ctx)
 			return ctx.Err()
 		}
+		total += len(ids)
 
-		root := model.Resource{Type: params.ResourceType, Id: id}
-
-		begun, err := idx.st.BeginBuild(ctx, root, 0)
+		begins := make([]Begin, len(ids))
+		for i, id := range ids {
+			begins[i] = Begin{Resource: model.Resource{Type: params.ResourceType, Id: id}}
+		}
+		begun, err := idx.st.BeginBuilds(ctx, BeginInsert, begins)
+		if err == nil && len(begun) != len(ids) {
+			err = fmt.Errorf("the store returned %d begun builds for %d ids", len(begun), len(ids))
+		}
 		if err != nil {
-			logger.Warn("failed to begin build", slog.String("id", id), slog.String("error", err.Error()))
-			fl.fail(ctx, id)
+			failBatch("failed to begin a batch of builds", ids, err)
 			continue
 		}
-		// BeginBuild precedes this root's fetch, so its start covers the
-		// root: only its children are checked.
-		fl.begin(id, begun, driftBase{start: begun.Start}, expected, false)
+		// BeginBuilds precedes the batch's fetch, so each id's start covers
+		// the id itself: only its children are checked.
+		for i, id := range ids {
+			fl.begin(id, begun[i], driftBase{start: begun[i].Start}, expected, false)
+		}
 
 		// Same existence rule as the live path (buildOne, ADR 0013): every
-		// selected plan runs first, and each plan's outcome is its own
-		// version's — a nil deletes that version's document and empties its
-		// edge set, never another version's.
-		outcomes, planErr := executeAllPlans(ctx, plans, projection.BuildRequest{
+		// selected plan runs for the batch first, and each plan's outcome is
+		// its own version's — a nil deletes that version's document and
+		// empties its edge set, never another version's. An id no plan
+		// answered gets no outcome, never a nil, and finish marks it.
+		outcomes, err := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
-			ResourceIDs:  []string{id},
+			ResourceIDs:  ids,
 			Metadata:     params.Metadata,
 		})
-		if planErr == nil {
-			planErr = outcomes[id].err
-		}
-		if planErr != nil {
-			logger.Warn("plan execution failed", slog.String("id", id), slog.String("error", planErr.Error()))
-			fl.fail(ctx, id)
+		if err != nil {
+			failBatch("plan execution failed for a batch", ids, err)
 			continue
 		}
-		docs, missing := outcomes[id].docs, outcomes[id].missing
 
-		// The nils count first, each its own version's outcome
-		// (rebuildFlusher.gone), so the id settles when its documents flush,
-		// with the nils applied (dropNils). Every selected plan nil settles
-		// it at once: a rebuild running every plan with an Executer deletes
-		// it from all versions, and the row with them (removeGone); one that
-		// selected fewer versions deletes their documents and leaves it
-		// marked for the sweep, whose build runs every plan (leaveGone).
-		for _, v := range missing {
-			fl.gone(ctx, id, v)
-		}
-		for _, vd := range docs {
-			if err := fl.add(ctx, BulkItem{
-				Index:   IndexName(params.ResourceType, vd.version),
-				ID:      id,
-				Doc:     vd.doc.Doc,
-				Version: begun.BuildIdx,
-			}, vd.version, vd.doc.Relations, vd.doc.ResourceMetadata); err != nil {
-				fl.salvage(ctx)
-				return err
+		for i, id := range ids {
+			outcome := outcomes[id]
+			if outcome.err != nil {
+				logger.Warn("plan execution failed", slog.String("id", id), slog.String("error", outcome.err.Error()))
+				fl.fail(ctx, id)
+				continue
+			}
+
+			// The nils count first, each its own version's outcome
+			// (rebuildFlusher.gone), so the id settles when its documents
+			// flush, with the nils applied (dropNils). Every selected plan nil
+			// settles it at once: a rebuild running every plan with an
+			// Executer deletes it from all versions, and the row with them
+			// (removeGone); one that selected fewer versions deletes their
+			// documents and leaves it marked for the sweep, whose build runs
+			// every plan (leaveGone).
+			for _, v := range outcome.missing {
+				fl.gone(ctx, id, v)
+			}
+			for _, vd := range outcome.docs {
+				if err := fl.add(ctx, BulkItem{
+					Index:   IndexName(params.ResourceType, vd.version),
+					ID:      id,
+					Doc:     vd.doc.Doc,
+					Version: begun[i].BuildIdx,
+				}, vd.version, vd.doc.Relations, vd.doc.ResourceMetadata); err != nil {
+					fl.salvage(ctx)
+					return err
+				}
 			}
 		}
 	}
@@ -625,7 +647,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		return err
 	}
 
-	logger.Info("targeted rebuild complete", slog.Int("total", len(ids)), slog.Int("failed", fl.failed))
+	logger.Info("targeted rebuild complete", slog.Int("total", total), slog.Int("failed", fl.failed))
 	return fl.errorIfFailed()
 }
 

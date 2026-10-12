@@ -596,7 +596,7 @@ func TestRebuild_ProbePass_RunsOnlyAfterAWholeVersionSelectedWalk(t *testing.T) 
 			}
 			// The fake's listing is blind to ctx, so a pass that started —
 			// even after the walk's cancellation — records a ListUncovered.
-			if calls := st.callsSnapshot(); countPrefix(calls, "ListUncovered:") != 0 || countPrefix(calls, "BeginBuilds:") != 0 {
+			if calls := st.callsSnapshot(); countPrefix(calls, "ListUncovered:") != 0 || countPrefix(calls, "BeginBuilds:product/X") != 0 {
 				t.Fatalf("no pass may run: %v", calls)
 			}
 			for v, p := range ps {

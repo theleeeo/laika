@@ -494,7 +494,7 @@ func TestRebuild_UnpacedWalkAndTargetedRebuildArentPaced(t *testing.T) {
 		t.Fatal("no back-off may be made")
 	default:
 	}
-	if st.count("BeginBuild:product/6") != 1 || st.count("BeginBuild:product/9") != 1 {
+	if st.count("BeginBuild:product/6") != 1 || len(begunIn(st.callsSnapshot(), "9")) != 1 {
 		t.Fatalf("both rebuilds must build: %v", st.callsSnapshot())
 	}
 }

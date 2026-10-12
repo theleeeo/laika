@@ -141,7 +141,7 @@ func TestBuildPathDelete_RebuildOfAnIDWithoutARow_LeavesNoRow(t *testing.T) {
 		if got := deletesOf(be, "X"); !slices.Equal(got, bothVersionsAt("X", 42)) {
 			t.Fatalf("X's documents must be deleted at its BeginBuild's sequence: got %v", got)
 		}
-		inOrder(t, st, "BeginBuild:product/X:0", "RemoveResource:product/X:42", "DeleteResourceIfSeq:product/X:0:0")
+		inOrder(t, st, "BeginBuilds:product/X:0", "RemoveResource:product/X:42", "DeleteResourceIfSeq:product/X:0:0")
 		if r, ok := st.row(product("X")); ok {
 			t.Fatalf("the rebuild must leave no row for X, got %+v", r)
 		}
@@ -261,7 +261,7 @@ func TestBuildPathDelete_RebuildRowDeleteFails_FailsTheResource(t *testing.T) {
 			if del == -1 || mark < del || st.count("MarkStale:product/2") != 1 {
 				t.Fatalf("the failed row delete must be followed by one stale mark: %v", calls)
 			}
-			if st.count("BeginBuild:product/2") != 1 {
+			if len(begunIn(calls, "2")) != 1 {
 				t.Fatalf("the failed resource must not be begun again: %v", calls)
 			}
 			if name == "walk" {
