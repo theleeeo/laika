@@ -209,10 +209,11 @@ func TestBuild_Owned_RenewsItsLeasesEveryThirdOfTheLeaseWhileItBuilds(t *testing
 	}
 }
 
-// Renewals that fail are logged at Warn with the count and the error and
-// retried at the next tick with the same set: nothing is released, no work is
-// skipped, and both ids — the parked one and the one waiting for its turn —
-// build and finish. Once the Store answers again, the renewals hold.
+// Renewals that fail are logged at Warn with the type, the count and the
+// error and retried at the next tick with the same set: nothing is released,
+// no work is skipped, and both ids — the parked one and the one waiting for
+// its turn — build and finish. Once the Store answers again, the renewals
+// hold.
 func TestBuild_Owned_KeepsRenewingThroughFailedRenewals(t *testing.T) {
 	logs := captureDefaultLogs(t)
 	st := &recordingStore{renewErr: fmt.Errorf("db down")}
@@ -276,8 +277,8 @@ func TestBuild_Owned_KeepsRenewingThroughFailedRenewals(t *testing.T) {
 			continue
 		}
 		warns++
-		if rec["level"] != "WARN" || rec["count"] != float64(2) || rec["error"] != "db down" {
-			t.Fatalf("a failed renewal is logged at Warn with its count and error: %v", rec)
+		if rec["level"] != "WARN" || rec["type"] != "product" || rec["count"] != float64(2) || rec["error"] != "db down" {
+			t.Fatalf("a failed renewal is logged at Warn with its type, count and error: %v", rec)
 		}
 	}
 	if warns != 3 {

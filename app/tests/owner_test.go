@@ -369,8 +369,8 @@ func (t *TestSuite) Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired() {
 }
 
 // Test_Owner_SlowOwnedBuild_KeepsItsOwnership_SoADeleteWaitsForItsWrite: X
-// runs with a one-second OwnerLease, so its owned build renews every third of
-// a second, and a/1's index forgets a deleted document's version after one
+// runs with a three-second OwnerLease, so its owned build renews every
+// second, and a/1's index forgets a deleted document's version after one
 // second (index.gc_deletes). The interleaving, forced through the provider's
 // FetchRelated gate:
 //
@@ -394,7 +394,7 @@ func (t *TestSuite) Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired() {
 func (t *TestSuite) Test_Owner_SlowOwnedBuild_KeepsItsOwnership_SoADeleteWaitsForItsWrite() {
 	t.setResourceConfig(DefaultResourceConfig)
 	ctx := t.T().Context()
-	const lease, gcDeletes = time.Second, time.Second
+	const lease, gcDeletes = 3 * time.Second, time.Second
 
 	res, err := t.esClient.Indices.PutSettings(
 		strings.NewReader(fmt.Sprintf(`{"index":{"gc_deletes":"%dms"}}`, gcDeletes.Milliseconds())),

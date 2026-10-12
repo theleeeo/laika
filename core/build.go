@@ -263,7 +263,8 @@ func (r *buildRenewal) renew(ctx context.Context) {
 	held, err := r.idx.st.RenewOwners(ctx, owned)
 	if err != nil {
 		if ctx.Err() == nil {
-			slog.Warn(renewDuringBuildFailedMsg, slog.Int("count", len(owned)), slog.String("error", err.Error()))
+			slog.Warn(renewDuringBuildFailedMsg, slog.String("type", owned[0].Type),
+				slog.Int("count", len(owned)), slog.String("error", err.Error()))
 		}
 		return
 	}
