@@ -704,7 +704,13 @@ func (t *TestSuite) BeforeTest(suiteName, testName string) {
 func (t *TestSuite) AfterTest(suiteName, testName string) {
 	// Clear fake provider data between tests.
 	t.fakeProvider.Clear()
+	t.wipeStores()
+}
 
+// wipeStores deletes every Elasticsearch index and empties every Postgres
+// table, leaving the fake provider's data alone: the state between two tests,
+// or between two runs of one scenario within a test.
+func (t *TestSuite) wipeStores() {
 	// ES 8.x disallows _all / wildcard deletes by default.
 	// List concrete index names first, then delete each one.
 	catRes, err := t.esClient.Cat.Indices(
