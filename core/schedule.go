@@ -20,7 +20,7 @@ import (
 //
 // The mark leaves each root's metadata alone, and the build it submits
 // carries none: an owned build fetches with the root's own metadata as its
-// BeginBuild returns it.
+// BeginBuilds returns it.
 //
 // It is the cascade path, whose submissions shed on a full queue and never
 // wait: build Parents and drift re-builds run inside pool tasks, where a task
@@ -63,7 +63,7 @@ func (idx *Indexer) submitOwnedBuilds(ctx context.Context, owned []Owned) {
 
 // submitBuild submits one owned inline build of res, already marked stale,
 // if the mark claimed it (token != 0); the build fetches with res's metadata
-// as its BeginBuild returns it. An unclaimed res has a live owner, whose
+// as its BeginBuilds returns it. An unclaimed res has a live owner, whose
 // follow-up carries the change, so nothing is submitted.
 func (idx *Indexer) submitBuild(ctx context.Context, res model.Resource, token int64, wait bool) {
 	if token == 0 {
@@ -96,7 +96,7 @@ func (idx *Indexer) submitDelete(ctx context.Context, res model.Resource, staleS
 
 // submitFollowUp submits the follow-up an owned build or delete finished
 // with, if one is due: a build, which fetches with the row's metadata as its
-// BeginBuild returns it, or a delete when the row is a tombstone. It runs
+// BeginBuilds returns it, or a delete when the row is a tombstone. It runs
 // inside the finishing task (or the synchronous sweep), so it never waits; a
 // shed follow-up releases the re-claimed ownership and leaves the mark to the
 // sweep.

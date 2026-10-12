@@ -75,7 +75,11 @@ type RebuildArgs struct {
 // batch whose BeginBuilds or plan call fails fails every id in it: one Error
 // line names the type, the metadata, the count, the first ten ids and the
 // error, and its owned ids are released with a backoff, their per-row lines
-// at Debug; a batch of one id fails as that id alone. Every owned id left unfinished when ctx ends, and one whose
+// at Debug. A batch of one id fails as that id alone, its line carrying its
+// attempt count and logged at Error from the fifth attempt in a row, as any
+// single failure's is. A failure after the plans — the bulk request, the
+// Parent mark, the drift check — fails each id it reaches with that id's own
+// line. Every owned id left unfinished when ctx ends, and one whose
 // failure the ending caused, is released without a backoff, and Build
 // returns ctx's error. Build logs every failure of an owned id itself; the
 // error it returns — the type unconfigured or without plans, or ctx's end —
@@ -866,7 +870,7 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			fl.begin(id, begun[i], driftBase{start: begun[i].Start}, expected, false)
 		}
 
-		// Same existence rule as the live path (buildOne, ADR 0013): every
+		// Same existence rule as the live path (Build, ADR 0013): every
 		// selected plan runs for the batch first, and each plan's outcome is
 		// its own version's — a nil deletes that version's document and
 		// empties its edge set, never another version's. An id a plan left
