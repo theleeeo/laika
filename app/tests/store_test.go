@@ -11,7 +11,7 @@ import (
 
 // suiteStore is the Store every Indexer the suite builds runs on: the suite's
 // *postgres.Store, counting each resource's begun builds — the BeginBuild
-// calls that succeeded. A row's build_idx is a Build Sequence value, not a
+// calls that succeeded, and each resource a BeginBuilds call began. A row's build_idx is a Build Sequence value, not a
 // count of its builds, so this count is what a test asserts on when it means
 // "how many builds of this resource began". The count spans the whole test
 // and every Indexer the suite built, and survives a row's delete and
@@ -38,6 +38,27 @@ func (s *suiteStore) BeginBuild(ctx context.Context, res model.Resource, token i
 	}
 	s.mu.Lock()
 	s.builds[res]++
+	s.mu.Unlock()
+	return begun, nil
+}
+
+// BeginBuilds delegates to the Postgres store and, on success, counts a begun
+// build of each resource it began: once per resource, however often the call
+// gives it, and none for one it didn't begin (BuildIdx 0).
+func (s *suiteStore) BeginBuilds(ctx context.Context, mode core.BeginMode, begins []core.Begin) ([]core.BuildBegun, error) {
+	begun, err := s.Store.BeginBuilds(ctx, mode, begins)
+	if err != nil {
+		return begun, err
+	}
+	counted := make(map[model.Resource]bool, len(begins))
+	s.mu.Lock()
+	for i, b := range begun {
+		if b.BuildIdx == 0 || counted[begins[i].Resource] {
+			continue
+		}
+		counted[begins[i].Resource] = true
+		s.builds[begins[i].Resource]++
+	}
 	s.mu.Unlock()
 	return begun, nil
 }
