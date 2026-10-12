@@ -207,7 +207,9 @@ func (b *batchBuild) buildBatch(ctx context.Context, ids []string) {
 		err = fmt.Errorf("store answered %d of %d begins", len(begun), len(begins))
 	}
 	if err != nil {
-		b.failBatch(ctx, ids, nil, false, fmt.Errorf("begin build: %w", err))
+		// The metadata is known only when every id owns nothing: then it is
+		// the caller's.
+		b.failBatch(ctx, ids, b.params.Metadata, len(b.params.owned(ids)) == 0, fmt.Errorf("begin build: %w", err))
 		return
 	}
 
@@ -318,11 +320,13 @@ func (b *batchBuild) buildOn(ctx context.Context, entries []*batchEntry) {
 		failures, err := b.idx.es.BulkUpsert(ctx, items)
 		if err != nil {
 			// A request-level failure: nothing can be assumed written.
+			var written []*batchEntry
 			for _, e := range standing {
 				if len(e.outcome.docs) > 0 {
-					b.fail(ctx, e, "build failed", fmt.Errorf("bulk upsert of %s/%s: %w", resourceType, e.id, err))
+					written = append(written, e)
 				}
 			}
+			b.failMany(ctx, written, fmt.Errorf("bulk upsert: %w", err))
 		}
 		rejected := make(map[string]BulkFailure, len(failures))
 		for _, f := range failures {
@@ -412,11 +416,11 @@ func (b *batchBuild) buildOn(ctx context.Context, entries []*batchEntry) {
 		}
 	}
 	if err := b.idx.scheduleBuild(ctx, parents); err != nil {
-		b.failAll(ctx, standing, err)
+		b.failMany(ctx, standing, err)
 		return
 	}
 	if err := b.checkDrift(ctx, standing); err != nil {
-		b.failAll(ctx, standing, err)
+		b.failMany(ctx, standing, err)
 		return
 	}
 
@@ -434,7 +438,8 @@ func (b *batchBuild) buildOn(ctx context.Context, entries []*batchEntry) {
 // child only this build found, whose fanout ran before this build stored its
 // edge and so could not reach the root. On a hit the check narrows with one
 // query per id, as the rebuild flusher's does, and the drifted roots are
-// re-scheduled (mark first) in one scheduleBuild to converge. An owned build
+// re-scheduled (mark first) in one scheduleBuild to converge; a hit no
+// narrowing query confirms re-schedules every checked root. An owned build
 // is its root's live owner, so its re-mark submits nothing and its
 // FinishOwned runs the follow-up; an unowned one claims the root and submits
 // it, unless another build owns it. A root is not checked: its begin
@@ -468,7 +473,7 @@ func (b *batchBuild) checkDrift(ctx context.Context, standing []*batchEntry) err
 	if !drift {
 		return nil
 	}
-	var drifted []model.Resource
+	var drifted []*batchEntry
 	for _, e := range checked {
 		hit := true
 		if len(checked) > 1 {
@@ -477,11 +482,21 @@ func (b *batchBuild) checkDrift(ctx context.Context, standing []*batchEntry) err
 			}
 		}
 		if hit {
-			b.logger.Info("child drift detected, re-enqueueing build", slog.String("id", e.id))
-			drifted = append(drifted, e.res)
+			drifted = append(drifted, e)
 		}
 	}
-	if err := b.idx.scheduleBuild(ctx, drifted); err != nil {
+	// A hit no narrowing query confirms — a checked row gone between the
+	// queries reads as unchanged — re-marks every checked root: a redundant
+	// rebuild is safe, a missed one isn't.
+	if len(drifted) == 0 {
+		drifted = checked
+	}
+	roots := make([]model.Resource, len(drifted))
+	for i, e := range drifted {
+		b.logger.Info("child drift detected, re-enqueueing build", slog.String("id", e.id))
+		roots[i] = e.res
+	}
+	if err := b.idx.scheduleBuild(ctx, roots); err != nil {
 		return fmt.Errorf("re-schedule after drift: %w", err)
 	}
 	return nil
@@ -563,23 +578,37 @@ func (b *batchBuild) fail(ctx context.Context, e *batchEntry, msg string, err er
 	b.idx.releaseFailed(ctx, "build", []Owned{{Resource: e.res, Token: e.token}}, err)
 }
 
-// failAll fails every entry of standing after err, one id at a time.
-func (b *batchBuild) failAll(ctx context.Context, standing []*batchEntry, err error) {
-	for _, e := range standing {
-		b.fail(ctx, e, "build failed", err)
+// failMany fails entries after one err, each logged on its own line as fail
+// does, their owned ids released in one releaseFailed.
+func (b *batchBuild) failMany(ctx context.Context, entries []*batchEntry, err error) {
+	var owned []Owned
+	for _, e := range entries {
+		e.done = true
+		b.failed++
+		b.renewal.finished(e.id)
+		if e.token == 0 {
+			b.logger.Warn("build failed", slog.String("id", e.id), slog.String("error", err.Error()))
+			continue
+		}
+		owned = append(owned, Owned{Resource: e.res, Token: e.token})
 	}
+	if ctx.Err() != nil {
+		b.cancelled = true
+	}
+	b.idx.releaseFailed(ctx, "build", owned, err)
 }
 
 // failBatch fails every id of a batch whose BeginBuilds or plan call failed
 // with err. Once ctx has ended the failure is not the batch's: its owned ids
 // are released without a backoff, logged once at Info. Otherwise one Error
-// line names the type, the metadata (when the batch got as far as grouping
-// by it), the count, the first ids and the error, and the owned ids are
+// line names the type, the metadata when it is known (knownMetadata: a
+// plan call's group, or a failed begin of ids that all own nothing), the
+// count, the first ids and the error, and the owned ids are
 // released with a backoff, their per-row lines at Debug.
 //
 // A batch of one id fails as that id alone (fail), its line naming its
 // attempt count as any single failure's does.
-func (b *batchBuild) failBatch(ctx context.Context, ids []string, metadata map[string]string, grouped bool, err error) {
+func (b *batchBuild) failBatch(ctx context.Context, ids []string, metadata map[string]string, knownMetadata bool, err error) {
 	if len(ids) == 1 {
 		res := model.Resource{Type: b.params.ResourceType, Id: ids[0]}
 		b.fail(ctx, &batchEntry{id: ids[0], res: res, token: b.params.OwnerTokens[ids[0]]}, "build failed", err)
@@ -591,7 +620,7 @@ func (b *batchBuild) failBatch(ctx context.Context, ids []string, metadata map[s
 	}
 	owned := b.params.owned(ids)
 	attrs := []any{slog.Int("count", len(ids)), slog.Any("ids", ids[:min(len(ids), failedBatchLogIDs)])}
-	if grouped {
+	if knownMetadata {
 		attrs = append(attrs, slog.Any("metadata", metadata))
 	}
 	attrs = append(attrs, slog.String("error", err.Error()))
@@ -637,7 +666,7 @@ type buildRenewal struct {
 }
 
 // startBuildRenewal starts renewing owned in a goroutine of its own, every
-// third of the OwnerLease, the first one interval from now (BeginBuild renews
+// third of the OwnerLease, the first one interval from now (BeginBuilds renews
 // each id as it begins), until ctx ends or stop. It returns nil, starting
 // nothing, when owned is empty.
 func (idx *Indexer) startBuildRenewal(ctx context.Context, owned []Owned) *buildRenewal {

@@ -910,17 +910,16 @@ func TestBuild_DriftHit_ReschedulesTheRootMarkFirst(t *testing.T) {
 	}
 
 	calls := st.callsSnapshot()
-	var check, mark, begins []int
+	var check, mark []int
 	for i, c := range calls {
 		switch c {
 		case "AnyChangedSince:1":
 			check = append(check, i)
 		case "MarkStale:product/1":
 			mark = append(mark, i)
-		case "BeginBuilds:product/1":
-			begins = append(begins, i)
 		}
 	}
+	begins := begunIn(calls, "1")
 	if len(check) != 2 || len(mark) != 1 || len(begins) != 2 {
 		t.Fatalf("a hit must re-mark once and re-build (checks=%d marks=%d begins=%d): %v",
 			len(check), len(mark), len(begins), calls)

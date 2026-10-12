@@ -47,6 +47,7 @@ func beginBuildsCalls(st *rebuildRecordingStore) [][]string {
 		}
 		var ids []string
 		for _, r := range strings.Split(rest, ",") {
+			r, _, _ = strings.Cut(r, ":") // a BeginInsert's token
 			ids = append(ids, strings.TrimPrefix(r, "product/"))
 		}
 		out = append(out, ids)
@@ -77,6 +78,17 @@ func TestRebuildByIDs_250IDs_BeginsAndAsksInThreeBatches(t *testing.T) {
 	}
 	if n := st.count("BeginBuild:"); n != 0 {
 		t.Fatalf("a batched rebuild begins no id on its own, got %d BeginBuild calls", n)
+	}
+	for _, c := range st.callsSnapshot() {
+		list, ok := strings.CutPrefix(c, "BeginBuilds:")
+		if !ok {
+			continue
+		}
+		for _, b := range strings.Split(list, ",") {
+			if !strings.HasSuffix(b, ":0") {
+				t.Fatalf("a rebuild owns nothing: every token must be 0, got %s", b)
+			}
+		}
 	}
 	for v, log := range map[int]*requestLog{1: v1, 2: v2} {
 		var asked [][]string

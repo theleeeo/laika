@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"time"
 
@@ -800,7 +801,8 @@ func (f *rebuildFlusher) flush(ctx context.Context) error {
 //
 // One batched query serves the common no-drift case; a hit narrows with one
 // query per root, and each changed root is re-marked and re-built via the
-// mark-first primitive. The re-mark leaves the root's metadata alone, and the
+// mark-first primitive. A hit no narrowing query confirms re-marks every
+// checked root. The re-mark leaves the root's metadata alone, and the
 // re-build it claims is owned and fetches with the root's own metadata, not
 // the rebuild's — none when the row has none. A root whose re-mark fails
 // is failed instead: clearing it would leave its possibly outdated document
@@ -820,6 +822,8 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		return
 	}
 
+	var remark []string
+	confirmed := false
 	for id, checks := range driftCheck {
 		perResource, perErr := drifted, err
 		if len(driftCheck) > 1 {
@@ -828,10 +832,20 @@ func (f *rebuildFlusher) checkDrift(ctx context.Context, driftCheck map[string][
 		// On a drift-check error, re-mark rather than risk a silent
 		// convergence gap: a redundant rebuild is safe, a missed one is not.
 		if perErr != nil || perResource {
-			if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}); err != nil {
-				slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
-				f.fail(ctx, id)
-			}
+			remark = append(remark, id)
+		}
+		confirmed = confirmed || (perErr == nil && perResource)
+	}
+	// A batched hit no narrowing query confirms — a checked row gone between
+	// the queries reads as unchanged — re-marks every checked root, for the
+	// same reason.
+	if drifted && !confirmed {
+		remark = slices.Collect(maps.Keys(driftCheck))
+	}
+	for _, id := range remark {
+		if err := f.idx.scheduleBuild(ctx, []model.Resource{f.root(id)}); err != nil {
+			slog.Warn("drift re-schedule failed; failing the resource", slog.String("id", id), slog.String("error", err.Error()))
+			f.fail(ctx, id)
 		}
 	}
 }

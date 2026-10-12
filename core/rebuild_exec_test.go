@@ -2291,6 +2291,26 @@ func TestRebuildByIDs_DriftQueryError_ReschedulesTheRoot(t *testing.T) {
 	}
 }
 
+// R9: a batched hit that no narrowing query confirms — a checked row gone
+// between the queries reads as unchanged — re-marks every checked root: a
+// redundant rebuild is safe, a missed one isn't.
+func TestRebuildByIDs_DriftHitUnconfirmedByNarrowing_RemarksEveryCheckedRoot(t *testing.T) {
+	// Budget 1: only the batched query hits.
+	st := &rebuildRecordingStore{driftChildren: map[string]bool{"c1": true}}
+	st.driftBudget.Store(1)
+	rebuildIDs(t, st, childDocs(map[string][]string{"1": {"c1"}, "2": {"c2"}, "3": nil}), "1", "2", "3")
+
+	calls := st.callsSnapshot()
+	for _, id := range []string{"1", "2"} {
+		if n := len(callIndexes(calls, "MarkStale:product/"+id)); n != 1 {
+			t.Fatalf("checked root %s must be re-marked once, got %d: %v", id, n, calls)
+		}
+	}
+	if n := len(callIndexes(calls, "MarkStale:product/3")); n != 0 {
+		t.Fatalf("a root with nothing to check is not re-marked: %v", calls)
+	}
+}
+
 // The narrowing query's error re-schedules its own root only.
 func TestRebuildByIDs_NarrowDriftQueryError_ReschedulesThatRoot(t *testing.T) {
 	// Budget 2: the batched query and root 1's narrow query fail.
@@ -3339,14 +3359,16 @@ func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType st
 	return out, nil
 }
 
-// BeginBuilds records the call — "BeginBuilds:<type>/<id>,…" — and begins
-// each resource as BeginBuild does, one Build Sequence each in input order.
+// BeginBuilds records the call — "BeginBuilds:<type>/<id>,…" in
+// BeginExisting, "BeginBuilds:<type>/<id>:<token>,…" in BeginInsert, so a
+// test sees which tokens a begin carried — and begins each resource as
+// BeginBuild does, one Build Sequence each in input order.
 // In BeginExisting it answers those whose id notBegun names with the zero
 // BuildBegun, as the store does a row gone or tombstoned since its listing,
 // and creates no row. In BeginInsert it begins every resource, creating its
 // row, and a beginErrs entry for any of them fails the whole call, as one
-// statement fails. BeginExisting fails a non-zero token; BeginInsert ignores
-// it, as BeginBuild does: this store owns nothing. beginBuildsErr fails the
+// statement fails. BeginExisting fails a non-zero token; BeginInsert records
+// it and otherwise ignores it, as BeginBuild does: this store owns nothing. beginBuildsErr fails the
 // whole call.
 func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
 	if mode != BeginExisting && mode != BeginInsert {
@@ -3393,7 +3415,7 @@ func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, b
 func (s *rebuildRecordingStore) beginInsert(begins []Begin) ([]BuildBegun, error) {
 	names := make([]string, len(begins))
 	for i, b := range begins {
-		names[i] = b.Type + "/" + b.Id
+		names[i] = fmt.Sprintf("%s/%s:%d", b.Type, b.Id, b.Token)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -497,6 +497,9 @@ func TestBuild_BulkRejection_FailsOnlyTheRejectedID_ARequestErrorEveryWrittenID(
 			if n := len(tc.be.bulkCalls); n != 1 {
 				t.Fatalf("one bulk write per batch, got %d", n)
 			}
+			if n := len(st.failedBackoffsSnapshot()); n != 1 {
+				t.Fatalf("one failure releases its ids in one ReleaseFailed, got %d", n)
+			}
 			for _, id := range []string{"1", "2", "3"} {
 				failed := slices.Contains(tc.failed, id)
 				released := st.indexOf(fmt.Sprintf("ReleaseFailed:product/%s:%d", id, tokens[id])) != -1
@@ -512,11 +515,11 @@ func TestBuild_BulkRejection_FailsOnlyTheRejectedID_ARequestErrorEveryWrittenID(
 
 // A Build may mix owned and unowned ids: an owned id fetches with its row's
 // metadata, an unowned one with the caller's, and ids whose metadata is
-// equal by content — nil equal to empty — are asked about together.
+// equal by content are asked about together — a row with none (nil) and a
+// caller's empty map included.
 func TestBuild_MixedOwnership_GroupsByEachIDsMetadataByContent(t *testing.T) {
 	st := &recordingStore{}
 	st.seedMetadata(product("1"), map[string]string{"actor": "a"})
-	st.seedMetadata(product("2"), map[string]string{})
 	tokens := claim(t, st, "1", "2")
 	ex := &recordingExecuter{}
 	idx := mustNew(Config{
@@ -526,17 +529,20 @@ func TestBuild_MixedOwnership_GroupsByEachIDsMetadataByContent(t *testing.T) {
 		Store:     st,
 	})
 
-	// 3 owns nothing and fetches with the caller's metadata, equal to 1's
-	// row's; 2's row holds none.
+	// 2's row holds no metadata, which its begin returns as nil; 3 owns
+	// nothing and fetches with the caller's empty map.
 	if err := idx.Build(t.Context(), BuildArgs{
 		ResourceType: "product", ResourceIds: []string{"1", "2", "3"}, OwnerTokens: tokens,
-		Metadata: map[string]string{"actor": "a"},
+		Metadata: map[string]string{},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
 	if n := st.count("BeginBuilds:"); n != 1 {
 		t.Fatalf("one batch, one BeginBuilds, got %d", n)
+	}
+	if bb := st.begunOf(product("2")); len(bb) != 1 || bb[0].Metadata != nil {
+		t.Fatalf("setup: 2's begin must return nil metadata, got %+v", bb)
 	}
 	want := fmt.Sprintf("BeginBuilds:product/1:%d,product/2:%d,product/3:0", tokens["1"], tokens["2"])
 	if st.indexOf(want) == -1 {
@@ -550,54 +556,170 @@ func TestBuild_MixedOwnership_GroupsByEachIDsMetadataByContent(t *testing.T) {
 	for _, r := range reqs {
 		got[strings.Join(r.ResourceIDs, ",")] = r.Metadata
 	}
-	if md, ok := got["1,3"]; !ok || !maps.Equal(md, map[string]string{"actor": "a"}) {
-		t.Fatalf("1 and 3 fetch together with actor a, got %v", got)
+	if md, ok := got["1"]; !ok || !maps.Equal(md, map[string]string{"actor": "a"}) {
+		t.Fatalf("1 fetches alone with its row's actor a, got %v", got)
 	}
-	if md, ok := got["2"]; !ok || len(md) != 0 {
-		t.Fatalf("2 fetches alone with none, got %v", got)
+	if md, ok := got["2,3"]; !ok || len(md) != 0 {
+		t.Fatalf("2 (nil) and 3 (empty) fetch together with none, got %v", got)
 	}
 	if st.indexOf("ClearStale:product/3:") == -1 || st.indexOf("FinishOwned:product/1:") == -1 || st.indexOf("FinishOwned:product/2:") == -1 {
 		t.Fatalf("an unowned id clears, an owned one finishes owned: %v", st.callsSnapshot())
 	}
 }
 
-// A batch whose BeginBuilds fails fails every id in it: one Error line, with
-// no metadata since the batch never grouped, and each owned id released with
-// a backoff.
+// A batch whose BeginBuilds fails fails every id in it: one Error line, and
+// each owned id released with a backoff. The line names the metadata when
+// it is known — every id owns nothing, so it is the caller's — and none when
+// an owned id's would have come from its row.
 func TestBuild_FailingBeginBuilds_FailsTheBatch_LogsOneErrorLine(t *testing.T) {
-	logs := captureDefaultLogs(t)
+	for name, owned := range map[string]bool{"owned": true, "unowned": false} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &recordingStore{}
+			tokens := claim(t, st, "1", "2", "3")
+			if !owned {
+				tokens = nil
+			}
+			st.beginErr = errors.New("deadlock detected")
+			ex := &recordingExecuter{}
+			idx := mustNew(Config{
+				Resources: testResources(),
+				Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+				ES:        &captureBackend{},
+				Store:     st,
+			})
+
+			if err := idx.Build(t.Context(), BuildArgs{
+				ResourceType: "product", ResourceIds: []string{"1", "2", "3"}, OwnerTokens: tokens,
+				Metadata: map[string]string{"actor": "x"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			wantReleased := 0
+			if owned {
+				wantReleased = 3
+			}
+			if len(ex.requests()) != 0 || st.count("ReleaseFailed:") != wantReleased {
+				t.Fatalf("nothing is fetched, every owned id is released with a backoff: %v", st.callsSnapshot())
+			}
+			var errLines int
+			for _, rec := range logs.records(t) {
+				if rec["level"] == "ERROR" {
+					errLines++
+					if e, _ := rec["error"].(string); rec["count"] != float64(3) || !strings.Contains(e, "deadlock detected") {
+						t.Fatalf("the Error line names the count and the error: %v", rec)
+					}
+					md, has := rec["metadata"]
+					if owned && has {
+						t.Fatalf("an owned batch's metadata isn't known before its begin: %v", rec)
+					}
+					if !owned && fmt.Sprint(md) != fmt.Sprint(map[string]any{"actor": "x"}) {
+						t.Fatalf("an unowned batch's line names the caller's metadata: %v", rec)
+					}
+				}
+				if _, perRow := rec["id"]; perRow && rec["level"] != "DEBUG" {
+					t.Fatalf("no per-row line above Debug: %v", rec)
+				}
+			}
+			if errLines != 1 {
+				t.Fatalf("want one Error line, got %d", errLines)
+			}
+		})
+	}
+}
+
+// R7, R8: a multi-id batch whose Parent mark or drift query fails fails
+// every id still standing: each is released with a backoff, in one
+// ReleaseFailed, none finishes, and each is logged on its own line, not the
+// batch's Error line.
+func TestBuild_FailingParentMarkOrDriftQuery_FailsEveryStandingIDWithItsOwnLine(t *testing.T) {
+	for name, fail := range map[string]func(*recordingStore){
+		"parent mark": func(st *recordingStore) { st.markErr = errors.New("mark failed") },
+		"drift query": func(st *recordingStore) { st.driftErr = errors.New("drift query failed") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &recordingStore{}
+			tokens := claim(t, st, "1", "2", "3")
+			fail(st)
+			ex := &recordingExecuter{
+				relations: map[string][]model.Resource{"1": {product("c1")}, "2": {product("c2")}, "3": {product("c3")}},
+				parents:   map[string][]model.Resource{"1": {product("p1")}},
+			}
+			idx := mustNew(Config{
+				Resources: testResources(),
+				Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+				ES:        &captureBackend{},
+				Store:     st,
+			})
+
+			if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1", "2", "3"}, OwnerTokens: tokens}); err != nil {
+				t.Fatal(err)
+			}
+
+			for _, id := range []string{"1", "2", "3"} {
+				if st.indexOf(fmt.Sprintf("ReleaseFailed:product/%s:%d", id, tokens[id])) == -1 {
+					t.Fatalf("%s must be released with a backoff: %v", id, st.callsSnapshot())
+				}
+			}
+			if st.count("FinishOwned") != 0 || st.count("ClearStale") != 0 {
+				t.Fatalf("no id finishes: %v", st.callsSnapshot())
+			}
+			if n := len(st.failedBackoffsSnapshot()); n != 1 {
+				t.Fatalf("one failure releases its ids in one ReleaseFailed, got %d", n)
+			}
+			rows := map[any]bool{}
+			for _, rec := range logs.records(t) {
+				if rec["level"] == "ERROR" {
+					t.Fatalf("a failure after the plans takes no batch Error line: %v", rec)
+				}
+				if rec["level"] == "WARN" && rec["attempts"] != nil {
+					rows[rec["id"]] = true
+				}
+			}
+			if len(rows) != 3 {
+				t.Fatalf("each id is logged on its own line with its attempts, got %v", rows)
+			}
+		})
+	}
+}
+
+// R9: a batched drift hit that no narrowing query confirms — a checked row
+// gone between the queries reads as unchanged — re-marks every checked root,
+// in one call: a redundant rebuild is safe, a missed one isn't.
+func TestBuild_DriftHitUnconfirmedByNarrowing_RemarksEveryCheckedRoot(t *testing.T) {
 	st := &recordingStore{}
 	tokens := claim(t, st, "1", "2", "3")
-	st.beginErr = errors.New("deadlock detected")
-	ex := &recordingExecuter{}
+	st.drift.Store(true) // the batched query hits; no row changed, so no narrowing does
+	ex := &recordingExecuter{relations: map[string][]model.Resource{"1": {product("c1")}, "2": {product("c2")}}}
 	idx := mustNew(Config{
 		Resources: testResources(),
 		Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
 		ES:        &captureBackend{},
 		Store:     st,
+		PoolSize:  1,
+		QueueSize: 16,
 	})
+	release := occupyPool(t, idx)
+	defer release()
+	marksBefore := len(st.marksSnapshot())
 
 	if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1", "2", "3"}, OwnerTokens: tokens}); err != nil {
 		t.Fatal(err)
 	}
+	marks := st.marksSnapshot()[marksBefore:]
+	checks := st.checksSnapshot()
+	release()
+	if err := idx.WaitForIdle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
 
-	if len(ex.requests()) != 0 || st.count("ReleaseFailed:") != 3 {
-		t.Fatalf("nothing is fetched, every id is released with a backoff: %v", st.callsSnapshot())
+	if len(checks) != 3 {
+		t.Fatalf("setup: the batched query, then one per checked root, got %v", checks)
 	}
-	var errLines int
-	for _, rec := range logs.records(t) {
-		if rec["level"] == "ERROR" {
-			errLines++
-			if e, _ := rec["error"].(string); rec["count"] != float64(3) || !strings.Contains(e, "deadlock detected") {
-				t.Fatalf("the Error line names the count and the error: %v", rec)
-			}
-		}
-		if _, perRow := rec["id"]; perRow && rec["level"] != "DEBUG" {
-			t.Fatalf("no per-row line above Debug: %v", rec)
-		}
-	}
-	if errLines != 1 {
-		t.Fatalf("want one Error line, got %d", errLines)
+	if len(marks) != 1 || fmt.Sprint(marks[0]) != fmt.Sprint([]model.Resource{product("1"), product("2")}) {
+		t.Fatalf("every checked root, and only those, is re-marked in one call, got %v", marks)
 	}
 }
 
