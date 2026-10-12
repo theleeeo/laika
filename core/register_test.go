@@ -1555,15 +1555,15 @@ func TestRegisterChanges_MarksTheParentsTheStatementMissedAndBuildsTheClaimedOne
 		t.Fatal(err)
 	}
 	// Submitted: the second fanout's claimed p and 2, one task for their
-	// type, then item 1 and the statement's Parent sp; q is owned, so not
-	// submitted.
+	// type, then item 1 and the statement's Parent sp, one task for theirs
+	// (submitBuildBatches); q is owned, so not submitted.
 	queuedAfter := len(idx.pool.queue)
 	close(block)
 	if err := idx.WaitForIdle(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if queuedAtMark != 0 || queuedAfter != 3 {
-		t.Fatalf("%d submissions queued at the mark and %d after the call; want the mark before all 3", queuedAtMark, queuedAfter)
+	if queuedAtMark != 0 || queuedAfter != 2 {
+		t.Fatalf("%d submissions queued at the mark and %d after the call; want the mark before both", queuedAtMark, queuedAfter)
 	}
 	if want := []RegisterStatus{RegisterAccepted, RegisterStale}; fmt.Sprint(statuses) != fmt.Sprint(want) {
 		t.Fatalf("statuses %v, want %v", statuses, want)
