@@ -39,8 +39,9 @@
 > committed registration. A caller that gives up after the commit doesn't
 > skip it: it runs on a context detached from the caller's cancellation,
 > bounded by a timeout. The next change to the Child or the Parent repairs
-> it. A deleted Child hard-deleted before the drift check is still unseen by
-> it (seams S6 in laika-dev's `docs/seams.md`).
+> it (seams S6 in laika-dev's `docs/seams.md`). A deleted Child hard-deleted
+> before the drift check is still unseen by it; keeping its row for a grace
+> period is deferred (deferral D16 in laika-dev's `docs/deferrals.md`).
 
 > **Note (2026-10-12, runbook step L5.6):** the legs hold per id in a batched
 > build ([ADR 0014](./0014-builds-run-in-per-type-batches.md)). `Build` and
@@ -266,7 +267,7 @@
 > the build started. What the check still misses — a registration numbered
 > above the start that is uncommitted when the drift query runs, and a deleted
 > Child whose row is hard-deleted before it — is seam S6 there; its design pass
-> is open point Q14.
+> is open point Q14 (at e1dc955).
 >
 > A Rebuild walk takes one start per plan walk (`Store.NextChangeSeq`) before
 > the plan executes: the aggregation pipeline fetches pages ahead of the roots'

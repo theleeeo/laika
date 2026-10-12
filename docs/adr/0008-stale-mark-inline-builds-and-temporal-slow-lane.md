@@ -194,8 +194,8 @@
 > `ClearStale`, with the owner's follow-up when a change moved the mark, and
 > the rebuild paths, which own nothing, after their delete — a walk after its
 > root's drift check, so a root that check re-marked keeps its row. The row's
-> `change_seq` goes with it, as with a notified delete (seams S6 in
-> laika-dev's `docs/seams.md`).
+> `change_seq` goes with it, as with a notified delete (seams S67 and
+> deferral D16 in laika-dev's `docs/seams.md` and `docs/deferrals.md`).
 
 > **Note (2026-10-05, runbook step L2.1):** the numbers a mark and a build
 > capture come from the **Change Sequence**, and the L1.4 note's exception for
