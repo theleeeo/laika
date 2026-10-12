@@ -315,6 +315,12 @@ func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, token i
 	if s.beginErr != nil {
 		return BuildBegun{}, s.beginErr
 	}
+	return s.beginLocked(r), nil
+}
+
+// beginLocked begins r as BeginBuild does: the next Build Sequence, a row
+// inserted unmarked when r has none, and the row's metadata.
+func (s *recordingStore) beginLocked(r model.Resource) BuildBegun {
 	s.buildIdx++
 	// Like the real store, BeginBuild inserts a row, unmarked, for an id
 	// without one.
@@ -330,7 +336,7 @@ func (s *recordingStore) BeginBuild(_ context.Context, r model.Resource, token i
 	if len(row.metadata) > 0 {
 		md = maps.Clone(row.metadata)
 	}
-	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start + s.changes, Metadata: md}, nil
+	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start + s.changes, Metadata: md}
 }
 func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
@@ -1016,13 +1022,13 @@ func (e *recordingExecuter) Execute(_ context.Context, req projection.BuildReque
 	return ch
 }
 
-// requestsFor is every request for id, in arrival order.
+// requestsFor is every request that asks about id, in arrival order.
 func (e *recordingExecuter) requestsFor(id string) []projection.BuildRequest {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []projection.BuildRequest
 	for _, r := range e.reqs {
-		if firstID(r) == id {
+		if asks(r, id) {
 			out = append(out, r)
 		}
 	}
@@ -1035,7 +1041,9 @@ func (e *recordingExecuter) metadataByID() map[string]map[string]string {
 	defer e.mu.Unlock()
 	out := make(map[string]map[string]string, len(e.reqs))
 	for _, r := range e.reqs {
-		out[firstID(r)] = r.Metadata
+		for _, id := range r.ResourceIDs {
+			out[id] = r.Metadata
+		}
 	}
 	return out
 }
@@ -1250,8 +1258,41 @@ func (s *recordingStore) ListUncovered(context.Context, string, int, map[string]
 	return nil, nil
 }
 
-func (s *recordingStore) BeginBuilds(context.Context, BeginMode, []Begin) ([]BuildBegun, error) {
-	return nil, errors.New("BeginBuilds: not implemented")
+// BeginBuilds fakes BeginInsert only: it records the call —
+// "BeginBuilds:<type>/<id>:<token>,…" — and begins each resource as
+// BeginBuild does, one Build Sequence each in input order, a resource given
+// twice once and answered the same both times. beginErr fails the whole
+// call, as do two tokens for one resource.
+func (s *recordingStore) BeginBuilds(_ context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
+	if mode != BeginInsert {
+		return nil, fmt.Errorf("BeginBuilds: mode %d not faked", mode)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, len(begins))
+	tokens := make(map[model.Resource]int64, len(begins))
+	for i, b := range begins {
+		names[i] = fmt.Sprintf("%s/%s:%d", b.Type, b.Id, b.Token)
+		if t, ok := tokens[b.Resource]; ok && t != b.Token {
+			return nil, fmt.Errorf("BeginBuilds: %s/%s given tokens %d and %d", b.Type, b.Id, t, b.Token)
+		}
+		tokens[b.Resource] = b.Token
+	}
+	s.recordLocked("BeginBuilds:%s", strings.Join(names, ","))
+	if s.beginErr != nil {
+		return nil, s.beginErr
+	}
+	out := make([]BuildBegun, len(begins))
+	begun := make(map[model.Resource]BuildBegun, len(begins))
+	for i, b := range begins {
+		bb, ok := begun[b.Resource]
+		if !ok {
+			bb = s.beginLocked(b.Resource)
+			begun[b.Resource] = bb
+		}
+		out[i] = bb
+	}
+	return out, nil
 }
 
 // firstID is a request's first asked id, or "" for an all-of-type walk.
@@ -1260,4 +1301,13 @@ func firstID(req projection.BuildRequest) string {
 		return ""
 	}
 	return req.ResourceIDs[0]
+}
+
+// asks reports whether req asks about id; "" asks whether it is an
+// all-of-type walk, which asks about no id.
+func asks(req projection.BuildRequest, id string) bool {
+	if id == "" {
+		return len(req.ResourceIDs) == 0
+	}
+	return slices.Contains(req.ResourceIDs, id)
 }

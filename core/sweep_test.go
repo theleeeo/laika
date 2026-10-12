@@ -133,7 +133,9 @@ func TestSweepStale_BuildsEachEntryWithItsRowsMetadata(t *testing.T) {
 
 	got := make(map[string]map[string]string, len(exec.requests))
 	for _, req := range exec.requests {
-		got[firstID(req)] = req.Metadata
+		for _, id := range req.ResourceIDs {
+			got[id] = req.Metadata
+		}
 	}
 	want := map[string]map[string]string{
 		"1": {"fiber_operator_id": "op-1"},

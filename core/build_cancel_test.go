@@ -164,6 +164,9 @@ func (s *cancellingStore) ListUncovered(context.Context, string, int, map[string
 	return nil, nil
 }
 
+// BeginBuilds cancels as BeginBuild does, counted as one begin call.
 func (s *cancellingStore) BeginBuilds(context.Context, BeginMode, []Begin) ([]BuildBegun, error) {
-	return nil, errors.New("BeginBuilds: not implemented")
+	s.beginCalls++
+	s.cancel()
+	return nil, context.Canceled
 }

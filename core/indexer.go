@@ -77,6 +77,18 @@ type Config struct {
 	// requests instead of one unbounded payload. Default 500.
 	RebuildChunkSize int
 
+	// BuildBatchSize is how many ids a build asks a plan about at once: Build
+	// and a by-ids rebuild cut their ids into batches of at most this many,
+	// each begun in one Store statement and read by each plan in one request
+	// per metadata (ADR 0014). A source's own read limit is the plan's to
+	// chunk to, not this. Default 100; New rejects a negative one.
+	BuildBatchSize int
+	// BuildBatchSizes overrides BuildBatchSize per resource type, since
+	// sources differ in the batches they serve. An entry of 0 takes
+	// BuildBatchSize. New rejects an entry for a type Resources doesn't
+	// configure, and a negative one.
+	BuildBatchSizes map[string]int
+
 	// OwnerLease is how long a claimed build owner holds its resource
 	// without renewing: a mark of a row whose owner renewed (claim, a pool
 	// task's dequeue, the sweep reaching its entry, BeginBuild, BeginDelete,
@@ -166,6 +178,12 @@ type Indexer struct {
 
 	rebuildChunkSize int
 
+	// buildBatchSize is Config.BuildBatchSize with its default applied, and
+	// buildBatchSizes Config.BuildBatchSizes' non-zero entries; read them
+	// through batchSize.
+	buildBatchSize  int
+	buildBatchSizes map[string]int
+
 	ownerLease time.Duration
 	// renewTicker starts the ticker an owned Build renews its leases on,
 	// every third of ownerLease, and returns its channel and its stop; tests
@@ -213,6 +231,7 @@ type Indexer struct {
 const (
 	defaultPoolSize         = 10
 	defaultRebuildChunkSize = 500
+	defaultBuildBatchSize   = 100
 	defaultOwnerLease       = 30 * time.Second
 	defaultSweepBackoff     = 5 * time.Minute
 	defaultSweepBackoffMax  = 24 * time.Hour
@@ -258,6 +277,10 @@ func New(cfg Config) (*Indexer, error) {
 	idx.rebuildChunkSize = cfg.RebuildChunkSize
 	if idx.rebuildChunkSize <= 0 {
 		idx.rebuildChunkSize = defaultRebuildChunkSize
+	}
+
+	if err := idx.setBuildBatchSizes(cfg.BuildBatchSize, cfg.BuildBatchSizes, cfg.Resources); err != nil {
+		return nil, err
 	}
 
 	idx.ownerLease = cfg.OwnerLease

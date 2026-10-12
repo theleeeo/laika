@@ -89,13 +89,13 @@ func (e *sweepExecuter) Execute(_ context.Context, req projection.BuildRequest) 
 	return ch
 }
 
-// requestsFor is every request for id, in arrival order.
+// requestsFor is every request that asks about id, in arrival order.
 func (e *sweepExecuter) requestsFor(id string) []projection.BuildRequest {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var out []projection.BuildRequest
 	for _, r := range e.reqs {
-		if firstID(r) == id {
+		if asks(r, id) {
 			out = append(out, r)
 		}
 	}

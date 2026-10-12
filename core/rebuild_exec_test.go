@@ -3334,14 +3334,19 @@ func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType st
 }
 
 // BeginBuilds records the call — "BeginBuilds:<type>/<id>,…" — and begins
-// each resource as BeginBuild does, one Build Sequence each in input order,
-// but those whose id notBegun names: it answers them with the zero
-// BuildBegun, as the store does a row gone or tombstoned since its listing.
-// It creates no row, so it fakes BeginExisting only and fails any other mode
-// or a non-zero token. beginBuildsErr fails the whole call.
+// each resource as BeginBuild does, one Build Sequence each in input order.
+// In BeginExisting it answers those whose id notBegun names with the zero
+// BuildBegun, as the store does a row gone or tombstoned since its listing,
+// and creates no row. In BeginInsert it begins every resource, creating its
+// row, and a beginErrs entry for any of them fails the whole call, as one
+// statement fails. Either mode fails a non-zero token: this store owns
+// nothing. beginBuildsErr fails the whole call.
 func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
-	if mode != BeginExisting {
+	if mode != BeginExisting && mode != BeginInsert {
 		return nil, fmt.Errorf("BeginBuilds: mode %d not faked", mode)
+	}
+	if mode == BeginInsert {
+		return s.beginInsert(begins)
 	}
 	rs := make([]model.Resource, len(begins))
 	names := make([]string, len(begins))
@@ -3369,6 +3374,46 @@ func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, b
 			md = maps.Clone(row.metadata)
 		}
 		out[i] = BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42, Start: 100 + s.buildIdx, Metadata: md}
+	}
+	return out, nil
+}
+
+// beginInsert is BeginBuilds in BeginInsert: each resource begun as
+// BeginBuild begins it, its row created, a resource given twice begun once.
+func (s *rebuildRecordingStore) beginInsert(begins []Begin) ([]BuildBegun, error) {
+	names := make([]string, len(begins))
+	for i, b := range begins {
+		if b.Token != 0 {
+			return nil, fmt.Errorf("BeginBuilds: token %d not faked", b.Token)
+		}
+		names[i] = b.Type + "/" + b.Id
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls = append(s.calls, "BeginBuilds:"+strings.Join(names, ","))
+	if s.beginBuildsErr != nil {
+		return nil, s.beginBuildsErr
+	}
+	for _, b := range begins {
+		if err := s.beginErrs[b.Id]; err != nil {
+			return nil, err
+		}
+	}
+	out := make([]BuildBegun, len(begins))
+	begun := make(map[model.Resource]BuildBegun, len(begins))
+	for i, b := range begins {
+		bb, ok := begun[b.Resource]
+		if !ok {
+			row := s.rowLocked(b.Resource)
+			s.buildIdx++
+			var md map[string]string
+			if len(row.metadata) > 0 {
+				md = maps.Clone(row.metadata)
+			}
+			bb = BuildBegun{BuildIdx: s.buildIdx, StaleSeq: 42, Start: 100 + s.buildIdx, Metadata: md}
+			begun[b.Resource] = bb
+		}
+		out[i] = bb
 	}
 	return out, nil
 }

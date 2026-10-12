@@ -36,13 +36,14 @@ func (l *requestLog) Execute(ctx context.Context, req projection.BuildRequest) <
 	return l.exec.Execute(ctx, req)
 }
 
-// requestsFor is every request for id, in arrival order; "" is the walk's.
+// requestsFor is every request that asks about id, in arrival order; "" is
+// the walk's.
 func (l *requestLog) requestsFor(id string) []projection.BuildRequest {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var out []projection.BuildRequest
 	for _, r := range l.reqs {
-		if firstID(r) == id {
+		if asks(r, id) {
 			out = append(out, r)
 		}
 	}
