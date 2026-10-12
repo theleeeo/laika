@@ -160,6 +160,8 @@ func (t *TestSuite) runBatchScenario(size int, ids []string) batchRun {
 
 	var run batchRun
 	t.Require().NoError(x.RebuildNow(ctx, []core.ResourceSelector{{ResourceType: "a", ResourceIDs: ids}}))
+	// Nothing the rebuild scheduled may still run into the cascade's requests.
+	t.Require().NoError(x.WaitForIdle(ctx))
 	run.rebuild = t.snapshotA(ids)
 	run.rebuildReqs = reqs.take("a", 1)
 
