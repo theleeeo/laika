@@ -149,9 +149,12 @@ func (t *TestSuite) Test_SweepStale_FinishesTombstone() {
 	t.Require().NoError(err)
 	t.Require().Equal(1, t.resourceRowCount("a", "1"), "tombstone must leave the row present until swept")
 
-	// The crashed owner's lease expires.
+	// The crashed owner's lease expires, and its mark is old. A fresh mark
+	// would race the sweep's cutoff: stale_since is stamped on Postgres's
+	// clock, the threshold-0 cutoff is the host's time.Now(), and a container
+	// clock a millisecond ahead would hide the row.
 	_, err = t.pool.Exec(t.T().Context(),
-		`UPDATE resources SET owner_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
+		`UPDATE resources SET owner_since = now() - interval '1 hour', stale_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
 	t.Require().NoError(err)
 
 	n, err := t.idx.SweepStale(t.T().Context(), 0, 100)
