@@ -652,7 +652,13 @@ func TestBuild_FailingParentMarkOrDriftQuery_FailsEveryStandingIDWithItsOwnLine(
 				Plans:     map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
 				ES:        &captureBackend{},
 				Store:     st,
+				PoolSize:  1,
+				QueueSize: 16,
 			})
+			// The Parent build a successful mark submits waits, so its own
+			// failure can't reach the assertions.
+			release := occupyPool(t, idx)
+			defer release()
 
 			if err := idx.Build(t.Context(), BuildArgs{ResourceType: "product", ResourceIds: []string{"1", "2", "3"}, OwnerTokens: tokens}); err != nil {
 				t.Fatal(err)
@@ -680,6 +686,10 @@ func TestBuild_FailingParentMarkOrDriftQuery_FailsEveryStandingIDWithItsOwnLine(
 			}
 			if len(rows) != 3 {
 				t.Fatalf("each id is logged on its own line with its attempts, got %v", rows)
+			}
+			release()
+			if err := idx.WaitForIdle(t.Context()); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
