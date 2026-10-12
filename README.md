@@ -102,7 +102,7 @@ resource_config_path: "resources.yml"
 
 Every key maps directly to an environment variable by uppercasing and replacing `.` with `_` — for example, `es.addrs` → `ES_ADDRS` (comma-separated). The config file path itself is overridden with `APP_CONFIG_PATH`.
 
-The exception is `forward_walks` (the scheduled forward walks, see `example.indexer.yml`): it is a list, so it has no environment variables and is read only from the file.
+There are two exceptions, both read only from the file and with no environment variables: `forward_walks` (the scheduled forward walks, see `example.indexer.yml`), a list, and `build_batch_sizes` (the build batch size per resource type, overriding `build_batch_size`, which is `BUILD_BATCH_SIZE`), a map by resource type whose keys keep their case.
 
 ### Resource DSL (`resources.yml`)
 

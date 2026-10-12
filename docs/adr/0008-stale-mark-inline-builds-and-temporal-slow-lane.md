@@ -1,5 +1,28 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-12, runbook step L5.6):** a build runs a **batch**
+> ([ADR 0014](0014-builds-run-in-per-type-batches.md)). `Indexer.Build` cuts
+> its ids into chunks of the type's batch size (`Config.BuildBatchSize`, 100
+> by default, overridden per type by `Config.BuildBatchSizes`) and begins
+> each chunk in one `Store.BeginBuilds` in `BeginInsert`, in place of a
+> `BeginBuild` per id. Each id passes its owner token, or 0 for an id the
+> call doesn't own, so the begin still renews a matching lease, inserts a
+> missing row and begins a tombstone as `BeginBuild` did, and returns the
+> row's metadata, which an owned id fetches with. Each plan is asked once per
+> batch and metadata group. Each id keeps its own Build Sequence, write (one
+> `BulkUpsert` per batch), edge set and finish — `FinishOwned`, `ClearStale`
+> or `DeleteResourceIfSeq`, guarded by its own captured `stale_seq` — so the
+> race-safe clear is unchanged. The batch's Parents are marked in one
+> `scheduleBuild`, and its drifted roots in another, mark-first as before.
+> The build follow-ups a call's finishes hand on are submitted together, as
+> one owned build, when the call returns; a delete follow-up is submitted as
+> its finish hands it on. A batch whose `BeginBuilds` or plan call fails
+> fails every id in it: each owned id is released with backoff through
+> `ReleaseFailed`, as any failed owned build is, and the batch is logged in
+> one Error line (a batch of one id is logged as that id, ADR 0014's L5.6
+> note). A by-ids rebuild begins its chunks the same way, owning nothing, and
+> marks each id of a chunk that fails so for the sweep.
+
 > **Note (2026-10-12, runbook step L5.5):** an owned build also renews its
 > leases **while it builds** ([ADR 0014](0014-builds-run-in-per-type-batches.md)):
 > from the start of an owned `Build` call, `RenewOwners` runs every third of

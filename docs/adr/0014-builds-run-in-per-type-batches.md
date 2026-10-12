@@ -2,6 +2,29 @@
 
 _Accepted, 2026-10-08. Built by runbook steps L5.1–L5.7._
 
+> **Note (2026-10-12, runbook step L5.6):** as built, four details refine
+> the decision.
+>
+> - **A call's follow-ups go out together.** An owned `Build` collects the
+>   build follow-ups its finishes hand on, across its batches, and submits
+>   them as one owned build of the type (`submitOwnedBuilds`) when the call
+>   returns; a delete follow-up is submitted as its finish hands it on. A
+>   follow-up re-claimed early in a long call waits for its end, its new
+>   lease not renewed meanwhile (seams S62 in laika-dev's `docs/seams.md`).
+> - **A batch of one id fails as that id.** Its failure is logged as a single
+>   build's: per row, with its attempt count, at Error from the fifth attempt
+>   in a row, not as a batch's line. Until runbook step L5.7 the sweep builds
+>   one entry per `Build` call, so most of its failed builds are such batches
+>   (seams S63).
+> - **A failure after the plans is logged per id.** Only a failed
+>   `BeginBuilds` or plan call gets the batch's one Error line. A failed
+>   `BulkUpsert` request, Parent mark or drift check fails each id it
+>   reaches with that id's own line (seams S63).
+> - **A failed drift check fails every unfinished id.** The batch's Parent
+>   mark and drift check are one call each; when either fails, every id of
+>   the batch not yet finished fails, as a single build's failed check
+>   failed it.
+
 Every build path builds one resource at a time. `projection.BuildRequest` carries one
 `ResourceID`, `Indexer.Build` begins, executes and finishes one id after another, a registration
 submits one pool task per id, and the stale sweep calls `Build` once per entry. Each version's

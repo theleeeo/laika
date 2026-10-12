@@ -1,5 +1,20 @@
 # Distributed safety via OCC and drift-check, not locks
 
+> **Note (2026-10-12, runbook step L5.6):** the legs hold per id in a batched
+> build ([ADR 0014](./0014-builds-run-in-per-type-batches.md)). `Build` and
+> `rebuildByIDs` begin a batch of ids in one `Store.BeginBuilds`, which draws
+> each id its own value, both its Build Sequence and its start, where the
+> L1.3 note names a `BeginBuild` per id and the L1.5 note the live build
+> `buildOne`, which is gone. Each id's documents carry its own Build Sequence
+> in the batch's one `BulkUpsert` (leg 1), and its edge sets are replaced at
+> it (leg 2). A build's drift check (leg 3) is one `AnyChangedSince` over
+> every id's fetched children, each measured from its own id's start, and
+> narrows to each id on a hit, so only the drifted roots are re-scheduled,
+> as the rebuild flusher's check of a chunk does. A Rebuild
+> walk still begins each root with `BeginBuild`. `BeginBuilds` locks its rows
+> in (type, id) order for its one statement (the L1.7 note), never across a
+> fetch.
+
 > **Note (2026-10-07, runbook step L2.9):** [ADR
 > 0013](./0013-each-schema-version-decides-its-documents-existence.md)
 > supersedes the existence rule of the L2.6 and L2.7 notes below: a plan's
