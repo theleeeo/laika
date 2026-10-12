@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/theleeeo/laika/aggregation"
+	"github.com/theleeeo/laika/core/resource"
 	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
 )
@@ -528,22 +529,43 @@ func TestSweepStale_FailedBuild_ChangeRegisteredMeanwhile_IsNotBackedOff(t *test
 }
 
 // A pass serves its tombstones first, each on its own, and then its build
-// entries in per-type batches of the type's batch size, one Build each: 250
-// build entries at the default batch size of 100 are three Builds of 100, 100
-// and 50 ids, each begun in one BeginBuilds under its entries' listed tokens,
-// in list order. Each batch renews its ownership when the pass reaches it,
-// not before the batch ahead of it has run.
+// entries in per-type batches of the type's batch size, one Build each, the
+// types in the order of their first entry: 250 product entries at the default
+// batch size of 100 are three Builds of 100, 100 and 50 ids, and three variant
+// entries listed among them are a Build of their own, each begun in one
+// BeginBuilds under its entries' listed tokens, in list order. Each batch
+// renews its ownership when the pass reaches it, once the batch ahead of it
+// has finished.
 func TestSweepStale_BuildsItsEntriesInBatchesOfTheTypesBatchSize(t *testing.T) {
 	ids := productIDs(250)
+	variants := map[int]string{50: "v50", 120: "v120", 220: "v220"}
 	var entries []StaleResource
 	for i, id := range ids {
 		if i == 0 || i == 150 {
 			entries = append(entries, StaleResource{Resource: product(fmt.Sprintf("gone%d", i)), StaleSeq: int64(5000 + i), Token: int64(6000 + i), Deleted: true})
 		}
+		if v, ok := variants[i]; ok {
+			entries = append(entries, StaleResource{Resource: model.Resource{Type: "variant", Id: v}, StaleSeq: int64(7000 + i), Token: int64(8000 + i)})
+		}
 		entries = append(entries, StaleResource{Resource: product(id), StaleSeq: int64(1 + i), Token: int64(1000 + i)})
 	}
 	st := &staleListingStore{entries: entries}
-	idx, ex, _ := newCaptureIndexer(st, 2, 4)
+	resources := append(testResources(), &resource.Config{Resource: "variant", Versions: []resource.VersionConfig{{
+		Version: 1, Fields: []resource.FieldConfig{{Name: "title", Type: "text"}},
+	}}})
+	resources[len(resources)-1].ApplyDefaults()
+	exP, exV := &recordingExecuter{}, &recordingExecuter{}
+	idx := mustNew(Config{
+		Resources: resources,
+		Plans: map[string][]projection.Plan{
+			"product": {{Version: 1, Executer: exP}},
+			"variant": {{Version: 1, Executer: exV}},
+		},
+		ES:        &captureBackend{},
+		Store:     st,
+		PoolSize:  2,
+		QueueSize: 4,
+	})
 
 	n, err := idx.SweepStale(t.Context(), 5*time.Minute, 1000)
 	if err != nil {
@@ -551,15 +573,15 @@ func TestSweepStale_BuildsItsEntriesInBatchesOfTheTypesBatchSize(t *testing.T) {
 	}
 	waitIdle(t, idx)
 
-	if n != 252 {
-		t.Fatalf("swept count: got %d want 252", n)
+	if n != 255 {
+		t.Fatalf("swept count: got %d want 255", n)
 	}
 	if got := callsWithPrefix(&st.recordingStore, "BeginDelete:"); !slices.Equal(got, []string{"BeginDelete:product/gone0:6000", "BeginDelete:product/gone150:6150"}) {
 		t.Fatalf("each tombstone must be deleted once under its token, in list order, got %v", got)
 	}
 	begins := callsWithPrefix(&st.recordingStore, "BeginBuilds:")
-	if len(begins) != 3 {
-		t.Fatalf("want three Builds, each begun in one BeginBuilds, got %d: %v", len(begins), begins)
+	if len(begins) != 4 {
+		t.Fatalf("want three product Builds and one variant Build, each begun in one BeginBuilds, got %d: %v", len(begins), begins)
 	}
 	for b, want := range [][2]int{{0, 100}, {100, 200}, {200, 250}} {
 		names := make([]string, 0, want[1]-want[0])
@@ -567,11 +589,17 @@ func TestSweepStale_BuildsItsEntriesInBatchesOfTheTypesBatchSize(t *testing.T) {
 			names = append(names, fmt.Sprintf("product/%s:%d", ids[i], 1000+i))
 		}
 		if got := "BeginBuilds:" + strings.Join(names, ","); begins[b] != got {
-			t.Fatalf("batch %d must begin ids %d..%d under their tokens, got %s", b, want[0], want[1]-1, begins[b])
+			t.Fatalf("product batch %d must begin ids %d..%d under their tokens, got %s", b, want[0], want[1]-1, begins[b])
 		}
 	}
-	if reqs := ex.requests(); len(reqs) != 3 {
-		t.Fatalf("the plan must be asked once per batch, got %d requests", len(reqs))
+	if want := "BeginBuilds:variant/v50:8050,variant/v120:8120,variant/v220:8220"; begins[3] != want {
+		t.Fatalf("the variant entries must be one batch of their own, after product's, got %s", begins[3])
+	}
+	if reqs := exP.requests(); len(reqs) != 3 {
+		t.Fatalf("product's plan must be asked once per batch, got %d requests", len(reqs))
+	}
+	if reqs := exV.requests(); len(reqs) != 1 || reqs[0].ResourceType != "variant" || !slices.Equal(reqs[0].ResourceIDs, []string{"v50", "v120", "v220"}) {
+		t.Fatalf("variant's plan must be asked once, about its three ids, got %+v", reqs)
 	}
 	calls := st.callsSnapshot()
 	firstBuild := st.indexOf("BeginBuilds:")
@@ -580,15 +608,26 @@ func TestSweepStale_BuildsItsEntriesInBatchesOfTheTypesBatchSize(t *testing.T) {
 			t.Fatalf("the tombstones must be finished before the first batch is built, %s at %d, first BeginBuilds at %d: %v", d, at, firstBuild, calls)
 		}
 	}
-	for b, first := range []int{100, 200} {
-		renew := st.indexOf(fmt.Sprintf("RenewOwners:product/%s:%d", ids[first], 1000+first))
-		if prev := slices.Index(calls, begins[b]); renew < prev {
-			t.Fatalf("batch %d must renew after batch %d has begun (renew at %d, its BeginBuilds at %d)", b+1, b, renew, prev)
+	// Each batch's first renewal comes after the last finish of the batch
+	// ahead of it.
+	for _, c := range []struct{ renew, prevFinish string }{
+		{fmt.Sprintf("RenewOwners:product/%s:%d", ids[100], 1100), fmt.Sprintf("FinishOwned:product/%s:%d:%d", ids[99], 100, 1099)},
+		{fmt.Sprintf("RenewOwners:product/%s:%d", ids[200], 1200), fmt.Sprintf("FinishOwned:product/%s:%d:%d", ids[199], 200, 1199)},
+		{"RenewOwners:variant/v50:8050", fmt.Sprintf("FinishOwned:product/%s:%d:%d", ids[249], 250, 1249)},
+	} {
+		renew, prev := st.indexOf(c.renew), st.indexOf(c.prevFinish)
+		if renew == -1 || prev == -1 || renew < prev {
+			t.Fatalf("%s must come after %s (at %d and %d)", c.renew, c.prevFinish, renew, prev)
 		}
 	}
 	for _, id := range ids {
 		if r, _ := st.row(product(id)); r.stale || r.owner != 0 {
 			t.Fatalf("product/%s must be built, its mark and ownership cleared: %+v", id, r)
+		}
+	}
+	for _, v := range variants {
+		if r, _ := st.row(model.Resource{Type: "variant", Id: v}); r.stale || r.owner != 0 {
+			t.Fatalf("variant/%s must be built, its mark and ownership cleared: %+v", v, r)
 		}
 	}
 }

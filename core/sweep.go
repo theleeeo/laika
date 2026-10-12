@@ -16,11 +16,12 @@ import (
 // one Build per batch. An entry whose ownership was lost by the time the pass
 // reaches it is skipped: its new owner or a clean row covers it. It returns
 // the number of stale entries it listed. Per-resource failures are logged,
-// not returned: the mark or tombstone survives, and a failed build or delete
-// releases its ownership through Store.ReleaseFailed, which backs the row
-// off, so a later sweep retries it once the backoff has passed (ListStale
-// skips it until then) and a row that keeps failing never holds the head of
-// the backlog. A failed renewal releases the ownership of the tombstone or
+// not returned (a batch that fails as a whole is logged once, by Build, ADR
+// 0014, its rows at Debug): the mark or tombstone survives, and a failed
+// build or delete releases its ownership through Store.ReleaseFailed, which
+// backs the row off, so a later sweep retries it once the backoff has passed
+// (ListStale skips it until then) and a row that keeps failing never holds
+// the head of the backlog. A failed renewal releases the ownership of the tombstone or
 // whole batch it covered without a backoff, and the next sweep retries them.
 //
 // This is the safety net behind the inline build pool (ADR 0008). It runs as
