@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+
+	"github.com/theleeeo/laika/model"
 )
 
 func TestNew_BuildBatchSizes(t *testing.T) {
@@ -40,5 +42,31 @@ func TestIDBatches_ChunksInOrderAndDeduplicates(t *testing.T) {
 	}
 	if got := idBatches(nil, 3); len(got) != 0 {
 		t.Errorf("idBatches(nil) = %v, want none", got)
+	}
+}
+
+func TestOwnedBatches_ChunksPerTypeInOrderAndDropsUnclaimed(t *testing.T) {
+	idx := mustNew(Config{Resources: testResources(), BuildBatchSize: 2})
+	owned := func(typ, id string, token int64) Owned {
+		return Owned{Resource: model.Resource{Type: typ, Id: id}, Token: token}
+	}
+	got := idx.ownedBatches([]Owned{
+		owned("product", "p1", 1),
+		owned("category", "c1", 2),
+		owned("product", "p2", 3),
+		owned("product", "p3", 0),
+		owned("product", "p4", 4),
+		owned("product", "p5", 5),
+	})
+	want := [][]Owned{
+		{owned("product", "p1", 1), owned("product", "p2", 3)},
+		{owned("product", "p4", 4), owned("product", "p5", 5)},
+		{owned("category", "c1", 2)},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("ownedBatches = %v, want %v", got, want)
+	}
+	if got := idx.ownedBatches([]Owned{owned("product", "p1", 0)}); len(got) != 0 {
+		t.Errorf("ownedBatches of only unclaimed entries = %v, want none", got)
 	}
 }
