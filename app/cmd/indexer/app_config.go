@@ -138,9 +138,10 @@ type poolConfig struct {
 	// OwnerLease is how long an inline build's ownership of its resource
 	// holds without renewing (core.Config.OwnerLease): while it is live, a
 	// change to the resource on any instance submits no second build, and the
-	// owner runs one follow-up for it. 0 means core's default, 30s. Size it
-	// above a build's or delete's queue wait plus its run; core.Config's
-	// OwnerLease says what a shorter one costs.
+	// owner runs one follow-up for it. 0 means core's default, 30s. A
+	// running build renews it, so size it above a build's or delete's queue
+	// wait and a delete's run; core.Config's OwnerLease says what a shorter
+	// one costs.
 	OwnerLease time.Duration `mapstructure:"owner_lease"`
 }
 

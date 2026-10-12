@@ -1,5 +1,19 @@
 # Stale-mark durability, inline builds, and a Temporal slow lane
 
+> **Note (2026-10-12, runbook step L5.5):** an owned build also renews its
+> leases **while it builds** ([ADR 0014](0014-builds-run-in-per-type-batches.md)):
+> from the start of an owned `Build` call, `RenewOwners` runs every third of
+> `Config.OwnerLease` for each of the call's ids it hasn't finished, those
+> still waiting for their turn included. A delete registered meanwhile finds
+> the lease live, so it only marks the row, and the owner's follow-up deletes
+> after the write at a higher Build Sequence: a slow owned build no longer
+> brings a deleted document back past `index.gc_deletes`. Unlike the renewal
+> at dequeue or at a sweep entry, a failed renewal here is logged and retried
+> at the next tick, releasing nothing and skipping no work, and an id it finds
+> lost is built on: its finish matches nothing, and the new owner's build
+> serves it. A notified delete still renews only at its dequeue and its
+> `BeginDelete`.
+
 > **Note (2026-10-07, runbook step L2.8):** the backoff as built
 > (`Store.ReleaseFailed`) refines the note below in two ways.
 > - A failure reached once the build's or delete's context has ended was
