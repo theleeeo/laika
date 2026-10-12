@@ -209,7 +209,7 @@ func TestRegisterChange_WaitForSlot_Shutdown_ReturnsNilWithMarkInPlace(t *testin
 //     producer submit.
 func TestCascades_ShedWhileAProducerWaits(t *testing.T) {
 	cascades := map[string]func(t *testing.T, idx *Indexer, st *recordingStore){
-		// ADR 0006 parent schedule and the drift re-build, both in buildOne:
+		// ADR 0006 parent schedule and the drift re-build, both in Build's batch:
 		// the plan emits a Parent and a drifted Relation for product/2 only,
 		// so the builds that run once the pool drains settle.
 		"build parents and drift": func(t *testing.T, idx *Indexer, st *recordingStore) {

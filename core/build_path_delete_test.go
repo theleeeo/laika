@@ -68,12 +68,12 @@ func TestBuildPathDelete_TombstoneClaimedByAParentMark_RemovesTheRow(t *testing.
 	mustRegister(t, idx, notify("C", ChangeUpdated, nil))
 	waitIdle(t, idx)
 
-	begins := callsWithPrefix(st, "BeginBuild:product/P:")
+	begins := callsWithPrefix(st, "BeginBuilds:product/P:")
 	if len(begins) != 1 || st.count("BeginDelete:product/P") != 0 {
 		t.Fatalf("the Parent mark must claim P and submit one build of it, not a delete: %v", st.callsSnapshot())
 	}
 	var tok int64
-	if _, err := fmt.Sscanf(begins[0], "BeginBuild:product/P:%d", &tok); err != nil || tok == 0 {
+	if _, err := fmt.Sscanf(begins[0], "BeginBuilds:product/P:%d", &tok); err != nil || tok == 0 {
 		t.Fatalf("P's build must be owned, got %q", begins[0])
 	}
 	// C's build begins first (42); P's at 43.
@@ -117,7 +117,7 @@ func TestBuildPathDelete_ChangeDuringTheBuild_KeepsTheRowForTheFollowUp(t *testi
 	tok := fus[0].Token
 	inOrder(t, st,
 		"DeleteResourceIfSeq:product/R:1:1",
-		fmt.Sprintf("BeginBuild:product/R:%d", tok),
+		fmt.Sprintf("BeginBuilds:product/R:%d", tok),
 		fmt.Sprintf("DeleteResourceIfSeq:product/R:%d:%d", tok, tok))
 	if r, ok := st.row(R); ok {
 		t.Fatalf("the follow-up must remove R's row, got %+v", r)

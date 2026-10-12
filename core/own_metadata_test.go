@@ -83,7 +83,7 @@ func TestOwnMetadata_RegistrationBetweenEdgeWriteAndDriftRemark_FollowUpRunsWith
 	if edge == -1 || reg == -1 || remark == -1 {
 		t.Fatalf("setup: want R's edge write, then md1's registration, then R's drift re-mark: %v", calls)
 	}
-	if begins := callsWithPrefix(st, "BeginBuild:product/R:"); len(begins) != 2 {
+	if begins := callsWithPrefix(st, "BeginBuilds:product/R:"); len(begins) != 2 {
 		t.Fatalf("R must be built twice — its build and one follow-up; md1's registration claims nothing: %v", calls)
 	}
 	if fus := st.followUpsOf(R); len(fus) != 1 {

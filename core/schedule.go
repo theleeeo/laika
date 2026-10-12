@@ -245,16 +245,38 @@ const failedAttemptsErrorLevel = 5
 // neither released nor backed off, and is logged without one. The mark
 // stays either way. A failure reached once ctx has ended — a cancellation
 // or shutdown cut the work short — is not the work's, so it releases
-// through releaseOwners without a backoff. The release runs on a context detached from ctx's
-// cancellation, as releaseOwners' does; a failed one is logged per entry,
-// and each ownership expires with its lease.
+// through releaseOwners without a backoff, each row logged at Info. The
+// release runs on a context detached from ctx's cancellation, as
+// releaseOwners' does; a failed one is logged per entry, and each ownership
+// expires with its lease.
 func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned, cause error) {
+	idx.releaseFailedRows(ctx, op, owned, cause, false)
+}
+
+// releaseFailedBatch is releaseFailed for the owned ids of a batch that
+// failed as a whole, whose caller logged the failure once (ADR 0014): it
+// releases and backs off the same, but logs each row at Debug, and a failed
+// release once, at Warn.
+func (idx *Indexer) releaseFailedBatch(ctx context.Context, op string, owned []Owned, cause error) {
+	idx.releaseFailedRows(ctx, op, owned, cause, true)
+}
+
+// releaseFailedRows is releaseFailed, its per-row lines at Debug when batch
+// is set.
+func (idx *Indexer) releaseFailedRows(ctx context.Context, op string, owned []Owned, cause error, batch bool) {
 	if len(owned) == 0 {
 		return
 	}
+	// rowLevel is the level of a line about one row.
+	rowLevel := func(level slog.Level) slog.Level {
+		if batch {
+			return slog.LevelDebug
+		}
+		return level
+	}
 	if ctx.Err() != nil {
 		for _, o := range owned {
-			slog.Info("owned "+op+" ended by cancellation or shutdown; released without a backoff, its mark stays",
+			slog.Log(ctx, rowLevel(slog.LevelInfo), "owned "+op+" ended by cancellation or shutdown; released without a backoff, its mark stays",
 				slog.String("type", o.Type), slog.String("id", o.Id), slog.String("error", cause.Error()))
 		}
 		idx.releaseOwners(ctx, owned)
@@ -264,8 +286,14 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 	defer cancel()
 	backedOff, err := idx.st.ReleaseFailed(rctx, owned, idx.sweepBackoff)
 	if err != nil {
+		msg := "owned " + op + " failed, and releasing its ownership failed; it expires with its lease and the sweep retries it"
+		if batch {
+			slog.Warn(msg, slog.String("type", owned[0].Type), slog.Int("count", len(owned)),
+				slog.String("error", cause.Error()), slog.String("release_error", err.Error()))
+			return
+		}
 		for _, o := range owned {
-			slog.Warn("owned "+op+" failed, and releasing its ownership failed; it expires with its lease and the sweep retries it",
+			slog.Warn(msg,
 				slog.String("type", o.Type), slog.String("id", o.Id),
 				slog.String("error", cause.Error()), slog.String("release_error", err.Error()))
 		}
@@ -275,7 +303,7 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 	for _, b := range backedOff {
 		logged[b.Resource] = true
 		if b.Attempts == 0 {
-			slog.Warn("owned "+op+" failed, but a change to the resource was registered meanwhile; released without a backoff, left for the sweep",
+			slog.Log(rctx, rowLevel(slog.LevelWarn), "owned "+op+" failed, but a change to the resource was registered meanwhile; released without a backoff, left for the sweep",
 				slog.String("type", b.Type), slog.String("id", b.Id), slog.String("error", cause.Error()))
 			continue
 		}
@@ -283,13 +311,13 @@ func (idx *Indexer) releaseFailed(ctx context.Context, op string, owned []Owned,
 		if b.Attempts >= failedAttemptsErrorLevel {
 			level = slog.LevelError
 		}
-		slog.Log(rctx, level, "owned "+op+" failed; the stale sweep retries it after a backoff",
+		slog.Log(rctx, rowLevel(level), "owned "+op+" failed; the stale sweep retries it after a backoff",
 			slog.String("type", b.Type), slog.String("id", b.Id), slog.Int("attempts", b.Attempts),
 			slog.Time("retry_after", b.After), slog.String("error", cause.Error()))
 	}
 	for _, o := range owned {
 		if !logged[o.Resource] {
-			slog.Warn("owned "+op+" failed after its ownership was lost; its new owner or a clean row covers it",
+			slog.Log(rctx, rowLevel(slog.LevelWarn), "owned "+op+" failed after its ownership was lost; its new owner or a clean row covers it",
 				slog.String("type", o.Type), slog.String("id", o.Id), slog.String("error", cause.Error()))
 		}
 	}

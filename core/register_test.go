@@ -96,8 +96,13 @@ type recordingStore struct {
 	replaced   []edgeReplace
 	replaceErr error
 	onReplace  func(edgeReplace)
-	// markErr fails every MarkStale after recording it.
+	// markErr fails every MarkStale after recording it. marks records the
+	// resources of every MarkStale call, in order.
 	markErr error
+	marks   [][]model.Resource
+	// begun records every BuildBegun BeginBuild and BeginBuilds handed out,
+	// per resource, in order.
+	begun map[model.Resource][]BuildBegun
 	// releaseFailedErr fails every ReleaseFailed as a done ctx does;
 	// failedBackoffs records the backoff of every ReleaseFailed that ran.
 	releaseFailedErr error
@@ -290,6 +295,7 @@ func (s *recordingStore) MarkStale(ctx context.Context, rs []model.Resource, lea
 	}
 	s.mu.Lock()
 	s.recordLocked("MarkStale:%d", len(rs))
+	s.marks = append(s.marks, slices.Clone(rs))
 	if s.markErr != nil {
 		s.mu.Unlock()
 		return nil, s.markErr
@@ -336,7 +342,26 @@ func (s *recordingStore) beginLocked(r model.Resource) BuildBegun {
 	if len(row.metadata) > 0 {
 		md = maps.Clone(row.metadata)
 	}
-	return BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start + s.changes, Metadata: md}
+	bb := BuildBegun{BuildIdx: s.buildIdx, StaleSeq: row.staleSeq, Start: s.start + s.changes, Metadata: md}
+	if s.begun == nil {
+		s.begun = make(map[model.Resource][]BuildBegun)
+	}
+	s.begun[r] = append(s.begun[r], bb)
+	return bb
+}
+
+// begunOf is every BuildBegun handed out for res, in order.
+func (s *recordingStore) begunOf(res model.Resource) []BuildBegun {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.begun[res])
+}
+
+// marksSnapshot is the resources of every MarkStale call, in order.
+func (s *recordingStore) marksSnapshot() [][]model.Resource {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.marks)
 }
 func (s *recordingStore) NextChangeSeq(context.Context) (int64, error) {
 	s.record("NextChangeSeq")
@@ -722,7 +747,7 @@ func TestRegisterChange_MarksStaleBeforeBuilding_ThenClears(t *testing.T) {
 
 	// The registration's mark is stale_seq 1 and claims the row under token 1;
 	// the owned build finishes with FinishOwned, which clears mark and owner.
-	mark, begin, clear := st.indexOf("RegisterChanges"), st.indexOf("BeginBuild:product/1:1"), st.indexOf("FinishOwned:product/1:1:1")
+	mark, begin, clear := st.indexOf("RegisterChanges"), st.indexOf("BeginBuilds:product/1:1"), st.indexOf("FinishOwned:product/1:1:1")
 	if mark == -1 || begin == -1 || clear == -1 {
 		t.Fatalf("missing calls: %v", st.callsSnapshot())
 	}
@@ -892,7 +917,7 @@ func TestBuild_DriftHit_ReschedulesTheRootMarkFirst(t *testing.T) {
 			check = append(check, i)
 		case "MarkStale:product/1":
 			mark = append(mark, i)
-		case "BeginBuild:product/1":
+		case "BeginBuilds:product/1":
 			begins = append(begins, i)
 		}
 	}

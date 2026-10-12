@@ -70,13 +70,17 @@ type captureBackend struct {
 	deletes   []string // "index/id"
 	// deleteVersions is each delete's version, parallel to deletes.
 	deleteVersions []int64
-	upserts        []string        // "index/id"
-	rejectIDs      map[string]bool // BulkUpsert reports every document of these IDs as rejected
-	rejectDocs     map[string]bool // BulkUpsert reports these "index/id" documents as rejected
+	// upserts is every document written, by Upsert or as a BulkUpsert item.
+	upserts    []string        // "index/id"
+	rejectIDs  map[string]bool // BulkUpsert reports every document of these IDs as rejected
+	rejectDocs map[string]bool // BulkUpsert reports these "index/id" documents as rejected
 	// extraFailures are appended to every BulkUpsert response as they are —
 	// e.g. a failure whose Index names no document of the chunk.
-	extraFailures  []BulkFailure
-	upsertConflict map[string]bool // Upsert returns ErrVersionConflict for "index/id"
+	extraFailures []BulkFailure
+	// upsertConflict makes Upsert return ErrVersionConflict for "index/id";
+	// a BulkUpsert item it names loses its write unreported, as the contract
+	// says of a version conflict.
+	upsertConflict map[string]bool
 	// bulkErr fails the whole BulkUpsert request (no per-item failures) —
 	// the case where nothing can be assumed written.
 	bulkErr error
@@ -104,6 +108,9 @@ func (b *captureBackend) BulkUpsert(_ context.Context, items []BulkItem) ([]Bulk
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.bulkCalls = append(b.bulkCalls, append([]BulkItem(nil), items...))
+	for _, it := range items {
+		b.upserts = append(b.upserts, it.Index+"/"+it.ID)
+	}
 	if b.onBulk != nil {
 		b.onBulk()
 	}
@@ -1032,7 +1039,7 @@ func TestRebuildAll_NilDoc_DeleteIsFollowedByTheRootsDriftCheck(t *testing.T) {
 			}
 			remove := callIndexes(calls, "RemoveResource:product/2:43")
 			marks := callIndexes(calls, "MarkStale:product/2")
-			begins := callIndexes(calls, "BeginBuild:product/2")
+			begins := begunIn(calls, "2")
 			if len(remove) != 1 || len(marks) != 1 || marks[0] < remove[0] {
 				t.Fatalf("the delete must be followed by one re-mark of its root: %v", calls)
 			}
@@ -1385,7 +1392,7 @@ func TestRebuildAll_MultiPlan_AllNil_DriftHitRebuildsTheRoot(t *testing.T) {
 			calls := st.callsSnapshot()
 			remove := callIndexes(calls, "RemoveResource:product/X:42")
 			marks := callIndexes(calls, "MarkStale:product/X")
-			begins := callIndexes(calls, "BeginBuild:product/X")
+			begins := begunIn(calls, "X")
 			if len(remove) != 1 || len(marks) != 1 || marks[0] < remove[0] {
 				t.Fatalf("the delete must be followed by one re-mark of its root: %v", calls)
 			}
@@ -2419,7 +2426,7 @@ func TestRebuildAll_ChangedRoot_IsRescheduled(t *testing.T) {
 
 	calls := st.callsSnapshot()
 	marks := callIndexes(calls, "MarkStale:product/2")
-	begins := callIndexes(calls, "BeginBuild:product/2")
+	begins := begunIn(calls, "2")
 	if len(marks) != 1 || len(begins) != 2 || begins[1] < marks[0] {
 		t.Fatalf("a changed root must be re-marked, then re-built: %v", calls)
 	}
@@ -3338,8 +3345,9 @@ func (s *rebuildRecordingStore) ListUncovered(_ context.Context, resourceType st
 // BuildBegun, as the store does a row gone or tombstoned since its listing,
 // and creates no row. In BeginInsert it begins every resource, creating its
 // row, and a beginErrs entry for any of them fails the whole call, as one
-// statement fails. Either mode fails a non-zero token: this store owns
-// nothing. beginBuildsErr fails the whole call.
+// statement fails. BeginExisting fails a non-zero token; BeginInsert ignores
+// it, as BeginBuild does: this store owns nothing. beginBuildsErr fails the
+// whole call.
 func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
 	if mode != BeginExisting && mode != BeginInsert {
 		return nil, fmt.Errorf("BeginBuilds: mode %d not faked", mode)
@@ -3379,12 +3387,12 @@ func (s *rebuildRecordingStore) BeginBuilds(_ context.Context, mode BeginMode, b
 
 // beginInsert is BeginBuilds in BeginInsert: each resource begun as
 // BeginBuild begins it, its row created, a resource given twice begun once.
+// A token is ignored, as BeginBuild ignores it: this store keeps no
+// ownership state, and the owned builds a drift re-mark or a cascade submits
+// begin through it.
 func (s *rebuildRecordingStore) beginInsert(begins []Begin) ([]BuildBegun, error) {
 	names := make([]string, len(begins))
 	for i, b := range begins {
-		if b.Token != 0 {
-			return nil, fmt.Errorf("BeginBuilds: token %d not faked", b.Token)
-		}
 		names[i] = b.Type + "/" + b.Id
 	}
 	s.mu.Lock()

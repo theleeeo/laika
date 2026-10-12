@@ -220,7 +220,7 @@ func TestReverseSweep_MarksSuspectsThenBuildsThemOwned(t *testing.T) {
 	}
 
 	// The present id and the unasked one.
-	if len(callsWithPrefix(st, "BeginBuild:product/present:")) != 0 || len(ex.requestsFor("present")) != 0 {
+	if len(begunIn(st.callsSnapshot(), "present")) != 0 || len(ex.requestsFor("present")) != 0 {
 		t.Fatalf("an id the probe returned must not be built: %v", calls)
 	}
 	if r, _ := st.row(product("present")); r.stale || r.staleSeq != 0 {
@@ -231,8 +231,8 @@ func TestReverseSweep_MarksSuspectsThenBuildsThemOwned(t *testing.T) {
 	}
 
 	// The suspect that exists: an owned build with its row's metadata.
-	begins := callsWithPrefix(st, "BeginBuild:product/suspect:")
-	if len(begins) != 1 || strings.HasSuffix(begins[0], ":0") {
+	begins := begunIn(st.callsSnapshot(), "suspect")
+	if len(begins) != 1 || strings.Contains(st.callsSnapshot()[begins[0]], "product/suspect:0") {
 		t.Fatalf("the suspect must be built once, owned: %v", calls)
 	}
 	reqs := ex.requestsFor("suspect")
@@ -298,11 +298,11 @@ func TestReverseSweep_ProbeFilteringItsIDsInPlace_FindsEverySuspect(t *testing.T
 	if marks := callsWithPrefix(st, "MarkStale"); !slices.Equal(marks, []string{"MarkStale:1"}) {
 		t.Fatalf("b, the id the probe dropped, must be marked: %v", st.callsSnapshot())
 	}
-	if len(callsWithPrefix(st, "BeginBuild:product/b:")) != 1 {
+	if len(begunIn(st.callsSnapshot(), "b")) != 1 {
 		t.Fatalf("b must be built once: %v", st.callsSnapshot())
 	}
 	for _, id := range []string{"a", "c"} {
-		if len(callsWithPrefix(st, "BeginBuild:product/"+id+":")) != 0 {
+		if len(begunIn(st.callsSnapshot(), id)) != 0 {
 			t.Fatalf("%s, which the probe returned, must not be built: %v", id, st.callsSnapshot())
 		}
 	}
@@ -515,7 +515,7 @@ func TestReverseSweep_KilledMidTypeResumesFromItsCursor(t *testing.T) {
 		t.Fatalf("listing: got %v, want %v", got, want)
 	}
 	for _, id := range []string{"b", "e"} {
-		if len(callsWithPrefix(st, "BeginBuild:product/"+id+":")) != 1 {
+		if len(begunIn(st.callsSnapshot(), id)) != 1 {
 			t.Fatalf("suspect %s must be built once: %v", id, st.callsSnapshot())
 		}
 	}
@@ -699,7 +699,7 @@ func TestReverseSweep_SuspectWithALiveOwner_IsMarkedButNotBuilt(t *testing.T) {
 	if !r.stale || r.staleSeq == 0 || r.owner != liveOwner {
 		t.Fatalf("the owned suspect must be marked under a new stale_seq and keep its owner, got %+v", r)
 	}
-	if len(callsWithPrefix(st, "BeginBuild:product/owned:")) != 0 || len(ex.requestsFor("owned")) != 0 {
+	if len(begunIn(st.callsSnapshot(), "owned")) != 0 || len(ex.requestsFor("owned")) != 0 {
 		t.Fatalf("the sweep must not build a suspect its owner holds: %v", st.callsSnapshot())
 	}
 }

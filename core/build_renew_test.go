@@ -288,10 +288,12 @@ func TestBuild_Owned_KeepsRenewingThroughFailedRenewals(t *testing.T) {
 
 // The renewal set is the call's owned ids not yet finished: an id that has
 // finished is no longer renewed, an id still waiting for its turn is, and an
-// id the call doesn't own never is.
+// id the call doesn't own never is. Batches of one id give the build an id
+// finished, one building and one waiting at once.
 func TestBuild_Owned_RenewsItsUnfinishedOwnedIDsOnly(t *testing.T) {
 	st := &recordingStore{}
 	idx, ex := newRecordingIndexer(st, 2, 4)
+	idx.buildBatchSize = 1
 	ticker := installManualTicker(idx)
 	rounds := recordRenewRounds(st)
 	ex.arrived = make(chan string, 4)

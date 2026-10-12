@@ -2,9 +2,10 @@ package core
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 
@@ -18,7 +19,7 @@ type BuildArgs struct {
 	// Metadata is the fetch context of the ids that build without an owner
 	// token: a build that owns nothing fetches with its caller's metadata.
 	// An owned id ignores it and fetches with its row's metadata as
-	// BeginBuild returns it (BuildBegun.Metadata), so owned builds are
+	// BeginBuilds returns it (BuildBegun.Metadata), so owned builds are
 	// submitted without any.
 	Metadata map[string]string `json:"metadata,omitempty"`
 	// OwnerTokens holds, per id, the owner token the build was claimed
@@ -37,37 +38,50 @@ type RebuildArgs struct {
 	Pacing *WalkPacing `json:"pacing,omitempty"`
 }
 
-// Build builds each of params' ids. An id with an owner token (OwnerTokens)
-// is an owned inline build: BeginBuild renews its lease, its fetches run with
-// the row's metadata as BeginBuild returns it, and a success finishes it with
-// FinishOwned, submitting the follow-up FinishOwned hands on. While the call
+// Build builds each of params' ids, in batches (ADR 0014): it cuts them into
+// chunks of the type's batch size (batchSize), begins each chunk in one
+// BeginBuilds in BeginInsert, groups the begun ids by the metadata they fetch
+// with, and asks each plan about each group once. Each id keeps its own
+// Build Sequence, write, edge set and finish (buildBatch).
+//
+// An id with an owner token (OwnerTokens) is an owned inline build: its begin
+// renews its lease, its fetches run with the row's metadata as BeginBuilds
+// returns it, and a success finishes it with FinishOwned. While the call
 // runs, every owned id it hasn't finished — the ones still waiting for their
-// turn included — is renewed (RenewOwners) every third of the OwnerLease,
+// batch included — is renewed (RenewOwners) every third of the OwnerLease,
 // from one interval after the call starts until the id finishes, so a build
 // of any length keeps its rows (ADR 0014). A failed renewal is logged and
 // retried at the next tick, releasing nothing; an id a renewal reports lost
 // is renewed no more and built on, its finish matching nothing, as a lapsed
-// build's does. The renewal stops before Build returns. An id without
-// one owns nothing: it fetches with params.Metadata and finishes with
-// ClearStale. A plan's nil is its own Schema Version's answer (ADR 0013): an
-// id some of whose plans returned a document and others nil has those
-// documents written and, at its Build Sequence, the nil versions' documents
-// deleted and their edge sets emptied, and finishes as above, keeping its
-// row. An id whose plans all returned nil is gone at source: its
-// documents are deleted, and it finishes with DeleteResourceIfSeq instead,
-// which removes its row — owned or not, tombstone or not — and hands on the
-// follow-up when a change moved the mark. A failed owned id — a type no
-// longer configured or without plans included — keeps its mark and is
-// released through releaseFailed, which backs its row off, so the sweep
-// rebuilds it once the backoff has passed, or the next change claims it
-// first. Every owned id left unfinished when ctx ends, and one whose failure
-// the ending caused, is released without a backoff. Build logs every failure
-// of an owned id itself; the error it returns — the type unconfigured or
-// without plans, or ctx's end — is for a caller whose ids own nothing, and a
-// caller of an owned build need not log it again.
+// build's does. The renewal stops before Build returns. An id without one
+// owns nothing: it fetches with params.Metadata and finishes with
+// ClearStale. The build follow-ups the call's finishes hand on are collected
+// and submitted together, as one owned build, before Build returns; a
+// delete follow-up is submitted as its finish hands it on.
+//
+// A plan's nil is its own Schema Version's answer (ADR 0013): an id some of
+// whose plans returned a document and others nil has those documents
+// written and, at its Build Sequence, the nil versions' documents deleted
+// and their edge sets emptied, and finishes as above, keeping its row. An id
+// whose plans all returned nil is gone at source: its documents are deleted,
+// and it finishes with DeleteResourceIfSeq instead, which removes its row —
+// owned or not, tombstone or not — and hands on the follow-up when a change
+// moved the mark.
+//
+// A failed owned id — a type no longer configured or without plans included
+// — keeps its mark and is released through releaseFailed, which backs its
+// row off, so the sweep rebuilds it once the backoff has passed, or the next
+// change claims it first. A plan's error for one id fails that id alone. A
+// batch whose BeginBuilds or plan call fails fails every id in it: one Error
+// line names the type, the metadata, the count, the first ten ids and the
+// error, and its owned ids are released with a backoff, their per-row lines
+// at Debug; a batch of one id fails as that id alone. Every owned id left unfinished when ctx ends, and one whose
+// failure the ending caused, is released without a backoff, and Build
+// returns ctx's error. Build logs every failure of an owned id itself; the
+// error it returns — the type unconfigured or without plans, or ctx's end —
+// is for a caller whose ids own nothing, and a caller of an owned build need
+// not log it again.
 func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
-	logger := slog.With(slog.String("type", params.ResourceType))
-
 	cfg := idx.resources.Get(params.ResourceType)
 	if cfg == nil {
 		err := fmt.Errorf("resource type %q: %w", params.ResourceType, ErrUnknownResource)
@@ -87,98 +101,504 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 	renewal := idx.startBuildRenewal(ctx, params.owned(params.ResourceIds))
 	defer renewal.stop()
 
-	// fail ends id's build after err: an owned id is released through
-	// releaseFailed, which logs it with its attempt count; an id that owns
-	// nothing is logged here as msg.
-	fail := func(id, msg string, err error) {
-		renewal.finished(id)
-		owned := params.owned([]string{id})
-		if len(owned) == 0 {
-			logger.Warn(msg, slog.String("id", id), slog.String("error", err.Error()))
-			return
-		}
-		idx.releaseFailed(ctx, "build", owned, err)
+	b := &batchBuild{
+		idx:     idx,
+		params:  params,
+		plans:   plans,
+		renewal: renewal,
+		logger:  slog.With(slog.String("type", params.ResourceType)),
 	}
+	// The collected build follow-ups go out however the call ends: each was
+	// re-claimed by its finish, and a shed submission releases it.
+	defer func() { idx.submitOwnedBuilds(ctx, b.followUps) }()
 
-	var failed int
-	for i, id := range params.ResourceIds {
+	batches := idBatches(params.ResourceIds, idx.batchSize(params.ResourceType))
+	total := 0
+	for i, ids := range batches {
 		if ctx.Err() != nil {
-			if unfinished := params.owned(params.ResourceIds[i:]); len(unfinished) > 0 {
-				logger.Info("build ended by cancellation or shutdown; its unfinished ids are released without a backoff, their marks stay",
-					slog.Int("count", len(unfinished)), slog.String("error", ctx.Err().Error()))
-				idx.releaseOwners(ctx, unfinished)
+			var rest []string
+			for _, later := range batches[i:] {
+				rest = append(rest, later...)
 			}
+			b.endedUnfinished(ctx, rest)
 			return ctx.Err()
 		}
+		b.buildBatch(ctx, ids)
+		total += len(ids)
+	}
 
-		res := model.Resource{Type: params.ResourceType, Id: id}
-		token := params.OwnerTokens[id]
-		begun, err := idx.st.BeginBuild(ctx, res, token)
-		if err != nil {
-			failed++
-			fail(id, "failed to begin build", fmt.Errorf("begin build: %w", err))
-			continue
-		}
+	if b.failed > 0 {
+		b.logger.Warn("build complete with failures", slog.Int("total", total), slog.Int("failed", b.failed))
+	}
+	if b.cancelled {
+		return ctx.Err()
+	}
+	return nil
+}
 
+// endedUnfinished releases the owned ids of ids, which ctx's end left
+// unbuilt, without a backoff, logging them once at Info; their marks stay.
+func (b *batchBuild) endedUnfinished(ctx context.Context, ids []string) {
+	for _, id := range ids {
+		b.renewal.finished(id)
+	}
+	if unfinished := b.params.owned(ids); len(unfinished) > 0 {
+		b.logger.Info("build ended by cancellation or shutdown; its unfinished ids are released without a backoff, their marks stay",
+			slog.Int("count", len(unfinished)), slog.String("error", ctx.Err().Error()))
+		b.idx.releaseOwners(ctx, unfinished)
+	}
+}
+
+// batchBuild is one Build call's state across its batches.
+type batchBuild struct {
+	idx     *Indexer
+	params  BuildArgs
+	plans   []projection.Plan
+	renewal *buildRenewal
+	logger  *slog.Logger
+
+	// failed counts the call's failed ids; cancelled records a failure
+	// reached once ctx had ended, so Build returns ctx's error.
+	failed    int
+	cancelled bool
+	// followUps are the build follow-ups the call's finishes handed on,
+	// submitted together when the call ends.
+	followUps []Owned
+}
+
+// batchEntry is one begun id of a batch.
+type batchEntry struct {
+	id       string
+	res      model.Resource
+	token    int64
+	begun    BuildBegun
+	metadata map[string]string
+	outcome  idOutcome
+	// done is set once the id has finished or failed.
+	done bool
+}
+
+// metadataGroup is a batch's ids that fetch with one metadata.
+type metadataGroup struct {
+	metadata map[string]string
+	entries  []*batchEntry
+}
+
+// failedBatchLogIDs is how many of a failed batch's ids its Error line names.
+const failedBatchLogIDs = 10
+
+// buildBatch builds one chunk of ids. It begins them in one BeginBuilds,
+// groups them by fetch metadata — the row's for an owned id, the caller's
+// otherwise; maps compare by content, nil equal to empty — and asks every
+// plan about each group once (executeAllPlans). A failed BeginBuilds fails
+// the chunk, a failed plan call its group (failBatch). The ids every plan
+// answered are then written in buildOn's order.
+func (b *batchBuild) buildBatch(ctx context.Context, ids []string) {
+	begins := make([]Begin, len(ids))
+	for i, id := range ids {
+		begins[i] = Begin{Resource: model.Resource{Type: b.params.ResourceType, Id: id}, Token: b.params.OwnerTokens[id]}
+	}
+	begun, err := b.idx.st.BeginBuilds(ctx, BeginInsert, begins)
+	if err == nil && len(begun) != len(begins) {
+		err = fmt.Errorf("store answered %d of %d begins", len(begun), len(begins))
+	}
+	if err != nil {
+		b.failBatch(ctx, ids, nil, false, fmt.Errorf("begin build: %w", err))
+		return
+	}
+
+	var groups []*metadataGroup
+	entries := make([]*batchEntry, len(ids))
+	for i, id := range ids {
+		e := &batchEntry{id: id, res: begins[i].Resource, token: begins[i].Token, begun: begun[i]}
 		// An owned build runs with what the row holds when it begins, so one
 		// that waited in the pool queue or the sweep picks up metadata
 		// registered meanwhile; one that owns nothing runs with its caller's.
-		metadata := params.Metadata
-		if token != 0 {
-			metadata = begun.Metadata
+		e.metadata = b.params.Metadata
+		if e.token != 0 {
+			e.metadata = begun[i].Metadata
 		}
-
-		// TODO: Build multiple documents in a batch.
-		gone, err := idx.buildOne(ctx, plans, params.ResourceType, id, metadata, begun.BuildIdx, begun.Start)
-		if err != nil {
-			failed++
-			fail(id, "build failed", err)
-			continue
-		}
-
-		if gone {
-			// Race-safe as the finishes below: a change that moved stale_seq
-			// mid-build keeps the row, and an owner re-claims it for the
-			// follow-up — a build for a recreate. A token of 0 re-claims
-			// nothing.
-			renewal.finished(id)
-			fu, err := idx.st.DeleteResourceIfSeq(ctx, res, begun.StaleSeq, token)
-			if err != nil {
-				fail(id, "removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
-					fmt.Errorf("removing the row of a resource gone at source: %w", err))
-				continue
+		entries[i] = e
+		var g *metadataGroup
+		for _, cand := range groups {
+			if maps.Equal(cand.metadata, e.metadata) {
+				g = cand
+				break
 			}
-			idx.submitFollowUp(ctx, res, fu)
-			continue
 		}
-
-		if token == 0 {
-			// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
-			// including buildOne's own drift re-mark, which must survive this
-			// clear.
-			if err := idx.st.ClearStale(ctx, res, begun.StaleSeq); err != nil {
-				logger.Warn("clear stale failed; sweep may rebuild redundantly",
-					slog.String("id", id), slog.String("error", err.Error()))
-			}
-			continue
+		if g == nil {
+			g = &metadataGroup{metadata: e.metadata}
+			groups = append(groups, g)
 		}
-
-		// Race-safe the same way: a change that moved stale_seq mid-build —
-		// a registration this owner kept from submitting, or buildOne's own
-		// drift re-mark — re-claims the row for one follow-up instead.
-		renewal.finished(id)
-		fu, err := idx.st.FinishOwned(ctx, res, begun.StaleSeq, token)
-		if err != nil {
-			fail(id, "finishing owned build failed", fmt.Errorf("finish owned build: %w", err))
-			continue
-		}
-		idx.submitFollowUp(ctx, res, fu)
+		g.entries = append(g.entries, e)
 	}
 
-	if failed > 0 {
-		logger.Warn("build complete with failures", slog.Int("total", len(params.ResourceIds)), slog.Int("failed", failed))
+	// Every plan runs for a group before the batch writes anything: whether
+	// a row stays depends on every plan's outcome, and the drift check and
+	// the Parents (ADR 0006) are unioned over every plan's document.
+	var answered []*batchEntry
+	for _, g := range groups {
+		groupIDs := make([]string, len(g.entries))
+		for i, e := range g.entries {
+			groupIDs[i] = e.id
+		}
+		outcomes, err := executeAllPlans(ctx, b.plans, projection.BuildRequest{
+			ResourceType: b.params.ResourceType,
+			ResourceIDs:  groupIDs,
+			Metadata:     g.metadata,
+		})
+		if err != nil {
+			b.failBatch(ctx, groupIDs, g.metadata, true, err)
+			for _, e := range g.entries {
+				e.done = true
+			}
+			continue
+		}
+		for _, e := range g.entries {
+			e.outcome = outcomes[e.id]
+			answered = append(answered, e)
+		}
+	}
+	b.buildOn(ctx, answered)
+}
+
+// buildOn writes and finishes a batch's answered entries, each at its own
+// Build Sequence, in the order a single build's writes go:
+//
+//  1. Each id every plan returned nil for is deleted (handleDelete) and
+//     finishes with DeleteResourceIfSeq.
+//  2. The others' documents go in one BulkUpsert. A rejected item fails its
+//     id only; a version conflict is an OCC loss, which the backend doesn't
+//     report.
+//  3. Each nil version's document is deleted.
+//  4. Each id's edge sets are replaced (ReplaceEdges).
+//  5. The Parents of every id (ADR 0006) are marked in one scheduleBuild;
+//     then one drift check covers every id's fetched children, narrowing to
+//     the drifted roots on a hit, which are re-marked in one scheduleBuild.
+//     A failure of either fails every id not yet finished.
+//  6. Each id finishes: FinishOwned, or ClearStale for one that owns nothing.
+//
+// An id one step fails takes no further step.
+func (b *batchBuild) buildOn(ctx context.Context, entries []*batchEntry) {
+	resourceType := b.params.ResourceType
+	var standing []*batchEntry
+	for _, e := range entries {
+		switch {
+		case e.outcome.err != nil:
+			b.fail(ctx, e, "build failed", e.outcome.err)
+		case e.begun.BuildIdx <= 0:
+			b.fail(ctx, e, "build failed", fmt.Errorf("invalid occ version %d for %s/%s", e.begun.BuildIdx, resourceType, e.id))
+		case len(e.outcome.docs) == 0 && len(e.outcome.missing) > 0:
+			// 1. Every plan finds the resource gone at source — delete
+			// everywhere.
+			b.finishGone(ctx, e)
+		default:
+			standing = append(standing, e)
+		}
+	}
+
+	// 2. One bulk write of every standing id's documents, each at its own
+	// Build Sequence.
+	var items []BulkItem
+	for _, e := range standing {
+		for _, vd := range e.outcome.docs {
+			items = append(items, BulkItem{
+				Index:   IndexName(resourceType, vd.version),
+				ID:      e.id,
+				Doc:     vd.doc.Doc,
+				Version: e.begun.BuildIdx,
+			})
+		}
+	}
+	if len(items) > 0 {
+		failures, err := b.idx.es.BulkUpsert(ctx, items)
+		if err != nil {
+			// A request-level failure: nothing can be assumed written.
+			for _, e := range standing {
+				if len(e.outcome.docs) > 0 {
+					b.fail(ctx, e, "build failed", fmt.Errorf("bulk upsert of %s/%s: %w", resourceType, e.id, err))
+				}
+			}
+		}
+		rejected := make(map[string]BulkFailure, len(failures))
+		for _, f := range failures {
+			if _, seen := rejected[f.ID]; !seen {
+				rejected[f.ID] = f
+			}
+		}
+		for _, e := range standing {
+			if f, ok := rejected[e.id]; ok && !e.done {
+				b.fail(ctx, e, "build failed", fmt.Errorf("upsert %s/%s to %s rejected (%d): %s", resourceType, e.id, f.Index, f.Status, f.Reason))
+			}
+		}
+	}
+
+	// 3. The versions whose plans returned nil while others returned a
+	// document (ADR 0013): each such version's document goes, at the id's
+	// Build Sequence, while the row stays for the versions with one. A
+	// delete a newer document rejects is an OCC loss, which
+	// SearchBackend.Delete reports as nil; any error fails the id before its
+	// edges are replaced, leaving the mark, as a failed write does.
+	for _, e := range standing {
+		if e.done {
+			continue
+		}
+		for _, v := range e.outcome.missing {
+			indexName := IndexName(resourceType, v)
+			if err := b.idx.es.Delete(ctx, indexName, e.id, e.begun.BuildIdx); err != nil {
+				b.fail(ctx, e, "build failed", fmt.Errorf("delete %s/%s from %s, whose plan returned no data: %w", resourceType, e.id, indexName, err))
+				break
+			}
+		}
+	}
+
+	// 4. Store each version's edges at the id's Build Sequence — also for a
+	// version whose write or delete lost an OCC race: the Store keeps, per
+	// version, the set of the highest Build Sequence, as Elasticsearch keeps
+	// the document (ADR 0002). A version whose plan returned nil gets an
+	// empty set, which replaces its stored children; only declaring it would
+	// leave them. The build ran every configured plan, so it declares their
+	// versions, and the sets of versions the config no longer has are
+	// dropped. The same write stores the plans' report — the first non-empty
+	// one of the versions with a document, in plan order — as the row's
+	// metadata if the row has none, before the drift check and the cascade:
+	// a later owned build of the resource that no registration gave metadata
+	// fetches as it.
+	declared := make([]int, len(b.plans))
+	for i, p := range b.plans {
+		declared[i] = p.Version
+	}
+	for _, e := range standing {
+		if e.done {
+			continue
+		}
+		docs, missing := e.outcome.docs, e.outcome.missing
+		sets := make([]EdgeSet, 0, len(docs)+len(missing))
+		for _, vd := range docs {
+			sets = append(sets, EdgeSet{SchemaVersion: vd.version, Children: vd.doc.Relations})
+		}
+		for _, v := range missing {
+			sets = append(sets, EdgeSet{SchemaVersion: v})
+		}
+		if err := b.idx.st.ReplaceEdges(ctx, e.res, e.begun.BuildIdx, sets, declared, firstReport(docs)); err != nil {
+			b.fail(ctx, e, "build failed", fmt.Errorf("replace edges for %s/%s: %w", resourceType, e.id, err))
+		}
+	}
+
+	standing = slices.DeleteFunc(standing, func(e *batchEntry) bool { return e.done })
+	if len(standing) == 0 {
+		return
+	}
+
+	// 5. Reverse-relation discovery (ADR 0006): one mark-first schedule of
+	// the Parents the plans derived from the ids' own data, unioned across
+	// every id and every Schema Version's plan that returned a document. The
+	// mark carries none of the batch's metadata: a Parent's build runs with
+	// the Parent's own.
+	var parents []model.Resource
+	seenParents := make(map[model.Resource]bool)
+	for _, e := range standing {
+		for _, vd := range e.outcome.docs {
+			for _, p := range vd.doc.Parents {
+				if !seenParents[p] {
+					seenParents[p] = true
+					parents = append(parents, p)
+				}
+			}
+		}
+	}
+	if err := b.idx.scheduleBuild(ctx, parents); err != nil {
+		b.failAll(ctx, standing, err)
+		return
+	}
+	if err := b.checkDrift(ctx, standing); err != nil {
+		b.failAll(ctx, standing, err)
+		return
+	}
+
+	// 6. Each id finishes, seq-guarded by its own stale_seq.
+	for _, e := range standing {
+		b.finish(ctx, e)
+	}
+}
+
+// checkDrift is the ADR 0002 drift check of a batch's standing ids, on the
+// Change Sequence: one query over every child each id's plans fetched, each
+// measured from its id's start, the Change Sequence value its begin took
+// before the fetches. A child whose change_seq exceeds it had a change
+// accepted after the build started that the fetch may have missed — e.g. a
+// child only this build found, whose fanout ran before this build stored its
+// edge and so could not reach the root. On a hit the check narrows with one
+// query per id, as the rebuild flusher's does, and the drifted roots are
+// re-scheduled (mark first) in one scheduleBuild to converge. An owned build
+// is its root's live owner, so its re-mark submits nothing and its
+// FinishOwned runs the follow-up; an unowned one claims the root and submits
+// it, unless another build owns it. A root is not checked: its begin
+// precedes its own fetch, so a root change numbered below its start is seen
+// by the fetch, and one above it moved stale_seq, so the guarded finish
+// leaves the mark for the follow-up build. The re-mark leaves the roots'
+// metadata alone, so a registration that committed after the edge write
+// keeps its metadata for the follow-up (Q16).
+func (b *batchBuild) checkDrift(ctx context.Context, standing []*batchEntry) error {
+	var all []ChangeCheck
+	var checked []*batchEntry
+	perID := make(map[*batchEntry][]ChangeCheck)
+	for _, e := range standing {
+		for _, vd := range e.outcome.docs {
+			for _, r := range vd.doc.Relations {
+				perID[e] = append(perID[e], ChangeCheck{Resource: r, Start: e.begun.Start})
+			}
+		}
+		if len(perID[e]) > 0 {
+			checked = append(checked, e)
+			all = append(all, perID[e]...)
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	drift, err := b.idx.st.AnyChangedSince(ctx, all)
+	if err != nil {
+		return fmt.Errorf("drift check: %w", err)
+	}
+	if !drift {
+		return nil
+	}
+	var drifted []model.Resource
+	for _, e := range checked {
+		hit := true
+		if len(checked) > 1 {
+			if hit, err = b.idx.st.AnyChangedSince(ctx, perID[e]); err != nil {
+				return fmt.Errorf("drift check of %s/%s: %w", e.res.Type, e.id, err)
+			}
+		}
+		if hit {
+			b.logger.Info("child drift detected, re-enqueueing build", slog.String("id", e.id))
+			drifted = append(drifted, e.res)
+		}
+	}
+	if err := b.idx.scheduleBuild(ctx, drifted); err != nil {
+		return fmt.Errorf("re-schedule after drift: %w", err)
 	}
 	return nil
+}
+
+// finishGone deletes an id every plan returned nil for — its documents and
+// edge sets at its Build Sequence — and finishes it with
+// DeleteResourceIfSeq, which removes its row. Race-safe as the other
+// finishes: a change that moved stale_seq mid-build keeps the row, and an
+// owner re-claims it for the follow-up — a build for a recreate. A token of
+// 0 re-claims nothing.
+func (b *batchBuild) finishGone(ctx context.Context, e *batchEntry) {
+	if err := b.idx.handleDelete(ctx, RebuildPayload{ResourceType: e.res.Type, ResourceID: e.id}, e.begun.BuildIdx); err != nil {
+		b.fail(ctx, e, "build failed", err)
+		return
+	}
+	e.done = true
+	b.renewal.finished(e.id)
+	fu, err := b.idx.st.DeleteResourceIfSeq(ctx, e.res, e.begun.StaleSeq, e.token)
+	if err != nil {
+		b.fail(ctx, e, "removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
+			fmt.Errorf("removing the row of a resource gone at source: %w", err))
+		return
+	}
+	b.followUp(ctx, e.res, fu)
+}
+
+// finish ends a built id's build, guarded by its own stale_seq.
+func (b *batchBuild) finish(ctx context.Context, e *batchEntry) {
+	e.done = true
+	if e.token == 0 {
+		// Race-safe: a no-op if a newer change bumped stale_seq mid-build —
+		// including the batch's own drift re-mark, which must survive this
+		// clear.
+		if err := b.idx.st.ClearStale(ctx, e.res, e.begun.StaleSeq); err != nil {
+			b.logger.Warn("clear stale failed; sweep may rebuild redundantly",
+				slog.String("id", e.id), slog.String("error", err.Error()))
+		}
+		return
+	}
+	// Race-safe the same way: a change that moved stale_seq mid-build — a
+	// registration this owner kept from submitting, or the batch's own drift
+	// re-mark — re-claims the row for one follow-up instead.
+	b.renewal.finished(e.id)
+	fu, err := b.idx.st.FinishOwned(ctx, e.res, e.begun.StaleSeq, e.token)
+	if err != nil {
+		b.fail(ctx, e, "finishing owned build failed", fmt.Errorf("finish owned build: %w", err))
+		return
+	}
+	b.followUp(ctx, e.res, fu)
+}
+
+// followUp takes on the follow-up a finish handed on: a build is collected
+// for the call's one submission, a delete submitted now.
+func (b *batchBuild) followUp(ctx context.Context, res model.Resource, fu FollowUp) {
+	switch {
+	case fu.Token == 0:
+	case fu.Deleted:
+		b.idx.submitFollowUp(ctx, res, fu)
+	default:
+		b.followUps = append(b.followUps, Owned{Resource: res, Token: fu.Token})
+	}
+}
+
+// fail ends e's build after err: an owned id is released through
+// releaseFailed, which logs it with its attempt count; an id that owns
+// nothing is logged here as msg.
+func (b *batchBuild) fail(ctx context.Context, e *batchEntry, msg string, err error) {
+	e.done = true
+	b.failed++
+	if ctx.Err() != nil {
+		b.cancelled = true
+	}
+	b.renewal.finished(e.id)
+	if e.token == 0 {
+		b.logger.Warn(msg, slog.String("id", e.id), slog.String("error", err.Error()))
+		return
+	}
+	b.idx.releaseFailed(ctx, "build", []Owned{{Resource: e.res, Token: e.token}}, err)
+}
+
+// failAll fails every entry of standing after err, one id at a time.
+func (b *batchBuild) failAll(ctx context.Context, standing []*batchEntry, err error) {
+	for _, e := range standing {
+		b.fail(ctx, e, "build failed", err)
+	}
+}
+
+// failBatch fails every id of a batch whose BeginBuilds or plan call failed
+// with err. Once ctx has ended the failure is not the batch's: its owned ids
+// are released without a backoff, logged once at Info. Otherwise one Error
+// line names the type, the metadata (when the batch got as far as grouping
+// by it), the count, the first ids and the error, and the owned ids are
+// released with a backoff, their per-row lines at Debug.
+//
+// A batch of one id fails as that id alone (fail), its line naming its
+// attempt count as any single failure's does.
+func (b *batchBuild) failBatch(ctx context.Context, ids []string, metadata map[string]string, grouped bool, err error) {
+	if len(ids) == 1 {
+		res := model.Resource{Type: b.params.ResourceType, Id: ids[0]}
+		b.fail(ctx, &batchEntry{id: ids[0], res: res, token: b.params.OwnerTokens[ids[0]]}, "build failed", err)
+		return
+	}
+	b.failed += len(ids)
+	for _, id := range ids {
+		b.renewal.finished(id)
+	}
+	owned := b.params.owned(ids)
+	attrs := []any{slog.Int("count", len(ids)), slog.Any("ids", ids[:min(len(ids), failedBatchLogIDs)])}
+	if grouped {
+		attrs = append(attrs, slog.Any("metadata", metadata))
+	}
+	attrs = append(attrs, slog.String("error", err.Error()))
+	if ctx.Err() != nil {
+		b.cancelled = true
+		b.logger.Info("build batch ended by cancellation or shutdown; its owned ids are released without a backoff, their marks stay", attrs...)
+		b.idx.releaseOwners(ctx, owned)
+		return
+	}
+	b.logger.Error("build batch failed; every id in it failed, and its owned ids are released with a backoff for the stale sweep", attrs...)
+	b.idx.releaseFailedBatch(ctx, "build", owned, err)
 }
 
 // owned is the ownership params holds over ids: those with an owner token.
@@ -367,161 +787,6 @@ func firstReport(docs []versionedDoc) map[string]string {
 		}
 	}
 	return nil
-}
-
-// buildOne builds one resource at the Build Sequence occVersion, its plans
-// fetching with metadata. A plan's nil is its own version's answer
-// (ADR 0013): buildOne writes the document of each version whose plan
-// returned one, and deletes the document and empties the edge set of each
-// version whose plan returned nil, all at occVersion, keeping the row. gone
-// reports that every plan returned nil and the resource's documents and edge
-// sets were deleted instead; the caller removes its row.
-func (idx *Indexer) buildOne(ctx context.Context, plans []projection.Plan, resourceType, resourceID string, metadata map[string]string, occVersion, start int64) (gone bool, err error) {
-	if occVersion <= 0 {
-		return false, fmt.Errorf("invalid occ version %d for %s/%s", occVersion, resourceType, resourceID)
-	}
-
-	// Execute every version's plan before writing anything: whether the row
-	// stays depends on every plan's outcome, and the drift check and the
-	// Parents (ADR 0006) are unioned over every plan's document, not taken
-	// from the last.
-	outcomes, err := executeAllPlans(ctx, plans, projection.BuildRequest{
-		ResourceType: resourceType,
-		ResourceIDs:  []string{resourceID},
-		Metadata:     metadata,
-	})
-	if err != nil {
-		return false, err
-	}
-	outcome := outcomes[resourceID]
-	if outcome.err != nil {
-		return false, outcome.err
-	}
-	docs, missing := outcome.docs, outcome.missing
-
-	// Every plan finds the resource gone at source — delete everywhere.
-	if len(docs) == 0 && len(missing) > 0 {
-		if err := idx.handleDelete(ctx, RebuildPayload{
-			ResourceType: resourceType,
-			ResourceID:   resourceID,
-		}, occVersion); err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-
-	var allRelations []model.Resource
-	var parents []model.Resource
-	seenParents := make(map[model.Resource]bool)
-	for _, vd := range docs {
-		allRelations = append(allRelations, vd.doc.Relations...)
-		for _, p := range vd.doc.Parents {
-			if !seenParents[p] {
-				seenParents[p] = true
-				parents = append(parents, p)
-			}
-		}
-	}
-
-	for _, vd := range docs {
-		indexName := IndexName(resourceType, vd.version)
-		if err := idx.es.Upsert(ctx, indexName, resourceID, vd.doc.Doc, occVersion); err != nil {
-			// An OCC loss is benign: a concurrent build with a newer Build
-			// Sequence already wrote fresher data to this index. The
-			// seq-guarded finish (ClearStale or FinishOwned) keeps recovery
-			// correct if the winner served a different change.
-			if !errors.Is(err, ErrVersionConflict) {
-				return false, fmt.Errorf("upsert %s/%s to %s: %w", resourceType, resourceID, indexName, err)
-			}
-			slog.Debug("build superseded by newer write",
-				slog.String("type", resourceType), slog.String("id", resourceID), slog.String("index", indexName))
-		}
-	}
-	// The versions whose plans returned nil while others returned a document
-	// (ADR 0013): each such version's document goes, at this build's Build
-	// Sequence, while the row stays for the versions with one. A delete a
-	// newer document rejects is an OCC loss, which SearchBackend.Delete
-	// reports as nil; any error fails the build before its edges are
-	// replaced, leaving the mark, as a failed write does.
-	for _, v := range missing {
-		indexName := IndexName(resourceType, v)
-		if err := idx.es.Delete(ctx, indexName, resourceID, occVersion); err != nil {
-			return false, fmt.Errorf("delete %s/%s from %s, whose plan returned no data: %w", resourceType, resourceID, indexName, err)
-		}
-	}
-
-	// Store each version's edges at this build's Build Sequence — also for a
-	// version whose write or delete lost above: the Store keeps, per version,
-	// the set of the highest Build Sequence, as Elasticsearch keeps the
-	// document (ADR 0002). A version whose plan returned nil gets an empty
-	// set, which replaces its stored children; only declaring it would leave
-	// them. This build ran every configured plan, so it declares their
-	// versions, and the sets of versions the config no longer has are
-	// dropped.
-	sets := make([]EdgeSet, 0, len(docs)+len(missing))
-	for _, vd := range docs {
-		sets = append(sets, EdgeSet{SchemaVersion: vd.version, Children: vd.doc.Relations})
-	}
-	for _, v := range missing {
-		sets = append(sets, EdgeSet{SchemaVersion: v})
-	}
-	declared := make([]int, len(plans))
-	for i, p := range plans {
-		declared[i] = p.Version
-	}
-	// The same write stores the plans' report — the first non-empty one of
-	// the versions with a document, in plan order — as the row's metadata if
-	// the row has none, before the drift check and the cascade: a later owned
-	// build of the resource that no registration gave metadata fetches as
-	// it.
-	if err := idx.st.ReplaceEdges(ctx, model.Resource{Type: resourceType, Id: resourceID}, occVersion, sets, declared, firstReport(docs)); err != nil {
-		return false, fmt.Errorf("replace edges for %s/%s: %w", resourceType, resourceID, err)
-	}
-
-	// Reverse-relation discovery (ADR 0006): mark-first schedule of the
-	// Parents the Plans derived from the Child's own data, unioned across
-	// every Schema Version's plan that returned a document. The mark carries
-	// none of this build's metadata: a Parent's build runs with the Parent's
-	// own.
-	if err := idx.scheduleBuild(ctx, parents); err != nil {
-		return false, err
-	}
-
-	// Drift check (ADR 0002). start is the Change Sequence value BeginBuild
-	// took before the fetches. A child whose change_seq exceeds it had a
-	// change accepted after the build started that the fetch may have missed
-	// — e.g. a child only this build found, whose fanout ran before this
-	// build stored its edge and so could not reach us. Re-schedule (mark
-	// first) to converge. An owned build is the root's live
-	// owner, so its re-mark submits nothing and its FinishOwned runs the
-	// follow-up; an unowned one claims the root and submits it, unless
-	// another build owns it. The root is not checked: its BeginBuild precedes
-	// its own fetch, so a root change numbered below start is seen by the
-	// fetch, and one above it bumped stale_seq, so the guarded finish leaves
-	// the mark for the follow-up build. The re-mark leaves the root's
-	// metadata alone, so a registration that committed after the edge write
-	// keeps its metadata for the follow-up (Q16).
-	if len(allRelations) > 0 {
-		checks := make([]ChangeCheck, len(allRelations))
-		for i, r := range allRelations {
-			checks[i] = ChangeCheck{Resource: r, Start: start}
-		}
-		drift, err := idx.st.AnyChangedSince(ctx, checks)
-		if err != nil {
-			return false, fmt.Errorf("drift check for %s/%s: %w", resourceType, resourceID, err)
-		}
-		if drift {
-			slog.Info("child drift detected, re-enqueueing build",
-				slog.String("type", resourceType),
-				slog.String("id", resourceID),
-			)
-			if err := idx.scheduleBuild(ctx, []model.Resource{{Type: resourceType, Id: resourceID}}); err != nil {
-				return false, fmt.Errorf("re-schedule after drift for %s/%s: %w", resourceType, resourceID, err)
-			}
-		}
-	}
-
-	return false, nil
 }
 
 func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebuildResume) error {

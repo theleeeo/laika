@@ -90,7 +90,7 @@ func TestOwner_RegistrationsDuringABuild_CollapseIntoOneFollowUp(t *testing.T) {
 		}
 		mustRegister(t, idx, notify(id, ChangeUpdated, mdN(i)))
 	}
-	if begins := callsWithPrefix(st, "BeginBuild:product/P:"); len(begins) != 1 {
+	if begins := callsWithPrefix(st, "BeginBuilds:product/P:"); len(begins) != 1 {
 		t.Fatalf("registrations touching P while its build owns it must not submit P again: %v", st.callsSnapshot())
 	}
 
@@ -112,7 +112,7 @@ func TestOwner_RegistrationsDuringABuild_CollapseIntoOneFollowUp(t *testing.T) {
 	if r, _ := st.row(P); !maps.Equal(r.metadata, mdN(9)) {
 		t.Fatalf("the child's registration must leave P's metadata %v, P holds %v", mdN(9), r.metadata)
 	}
-	if st.indexOf(fmt.Sprintf("BeginBuild:product/P:%d", fu.Token)) == -1 ||
+	if st.indexOf(fmt.Sprintf("BeginBuilds:product/P:%d", fu.Token)) == -1 ||
 		st.indexOf(fmt.Sprintf("FinishOwned:product/P:%d:%d", fu.Token, fu.Token)) == -1 {
 		t.Fatalf("the follow-up must build and finish under the re-claimed token %d: %v", fu.Token, st.callsSnapshot())
 	}
@@ -156,7 +156,7 @@ func TestOwner_ChangeDuringAFollowUp_GetsAFollowUpOfItsOwn(t *testing.T) {
 		t.Fatalf("each finished build that saw a newer change must hand on one follow-up, got %v: %v", fus, st.callsSnapshot())
 	}
 	for i, fu := range fus {
-		if st.indexOf(fmt.Sprintf("BeginBuild:product/P:%d", fu.Token)) == -1 {
+		if st.indexOf(fmt.Sprintf("BeginBuilds:product/P:%d", fu.Token)) == -1 {
 			t.Fatalf("follow-up %d must build under its re-claimed token %d: %v", i, fu.Token, st.callsSnapshot())
 		}
 	}
@@ -188,7 +188,7 @@ func TestOwner_ShedSubmit_ReleasesItsClaim_SoTheNextRegistrationBuilds(t *testin
 
 	unhold()
 	waitIdle(t, idx)
-	if n := st.count("BeginBuild:product/1:"); n != 0 {
+	if n := len(begunIn(st.callsSnapshot(), "1")); n != 0 {
 		t.Fatalf("the shed build must not run: %v", st.callsSnapshot())
 	}
 
@@ -196,7 +196,7 @@ func TestOwner_ShedSubmit_ReleasesItsClaim_SoTheNextRegistrationBuilds(t *testin
 	waitIdle(t, idx)
 	r, _ = st.row(P)
 	tok2 := r.staleSeq
-	if st.indexOf(fmt.Sprintf("BeginBuild:product/1:%d", tok2)) == -1 ||
+	if st.indexOf(fmt.Sprintf("BeginBuilds:product/1:%d", tok2)) == -1 ||
 		st.indexOf(fmt.Sprintf("FinishOwned:product/1:%d:%d", tok2, tok2)) == -1 {
 		t.Fatalf("the next registration must claim (token %d) and build P: %v", tok2, st.callsSnapshot())
 	}
@@ -241,8 +241,8 @@ func TestOwner_DeleteFollowUp(t *testing.T) {
 			t.Fatalf("the guarded delete must hand on one build follow-up, got %v: %v", fus, st.callsSnapshot())
 		}
 		fu := fus[0]
-		begins := callsWithPrefix(st, "BeginBuild:product/R:")
-		if want := fmt.Sprintf("BeginBuild:product/R:%d", fu.Token); len(begins) != 1 || begins[0] != want {
+		begins := callsWithPrefix(st, "BeginBuilds:product/R:")
+		if want := fmt.Sprintf("BeginBuilds:product/R:%d", fu.Token); len(begins) != 1 || begins[0] != want {
 			t.Fatalf("R must be built exactly once, by the follow-up (%s), got %v: %v", want, begins, st.callsSnapshot())
 		}
 		if del, b := st.indexOf("DeleteResourceIfSeq:product/R:"), st.indexOf(begins[0]); del == -1 || b < del {
@@ -424,8 +424,8 @@ func TestOwner_SupersededDelete_DeletesNothingAndFinishesAsAMovedMark(t *testing
 			t.Fatalf("the finish must hand on one build follow-up, got %v: %v", fus, st.callsSnapshot())
 		}
 		fu := fus[0]
-		begins := callsWithPrefix(st, "BeginBuild:product/R:")
-		if want := fmt.Sprintf("BeginBuild:product/R:%d", fu.Token); len(begins) != 1 || begins[0] != want {
+		begins := callsWithPrefix(st, "BeginBuilds:product/R:")
+		if want := fmt.Sprintf("BeginBuilds:product/R:%d", fu.Token); len(begins) != 1 || begins[0] != want {
 			t.Fatalf("R must be built exactly once, by the follow-up (%s), got %v: %v", want, begins, st.callsSnapshot())
 		}
 		if st.indexOf(fmt.Sprintf("FinishOwned:product/R:%d:%d", fu.Token, fu.Token)) == -1 {
@@ -455,7 +455,7 @@ func TestOwner_SupersededDelete_DeletesNothingAndFinishesAsAMovedMark(t *testing
 		if fus := st.followUpsOf(R); len(fus) != 0 {
 			t.Fatalf("a delete that lost the row hands on nothing, got %v: %v", fus, st.callsSnapshot())
 		}
-		if n := st.count("BeginBuild:product/R:"); n != 0 {
+		if n := len(begunIn(st.callsSnapshot(), "R")); n != 0 {
 			t.Fatalf("the new owner builds R, not the lost delete: %v", st.callsSnapshot())
 		}
 		if r, ok := st.row(R); !ok || r.owner != stolen || !r.stale || r.deleted {
@@ -479,7 +479,7 @@ func TestOwner_SupersededDelete_DeletesNothingAndFinishesAsAMovedMark(t *testing
 		if fus := st.followUpsOf(R); len(fus) != 0 {
 			t.Fatalf("a gone row hands on nothing, got %v: %v", fus, st.callsSnapshot())
 		}
-		if n := st.count("BeginBuild:"); n != 0 {
+		if n := st.count("BeginBuilds:"); n != 0 {
 			t.Fatalf("nothing may be built: %v", st.callsSnapshot())
 		}
 	})
@@ -530,7 +530,7 @@ func TestOwner_DeleteOverAMovedMark_DeletesAndHandsOnADeleteFollowUp(t *testing.
 		if got, want := deletesOf(be, "R"), []string{"product_search_v1/R@42", fmt.Sprintf("product_search_v1/R@%d", bump)}; !slices.Equal(got, want) {
 			t.Fatalf("the delete and its follow-up each delete R's document at their own bump: got %v want %v", got, want)
 		}
-		if n := st.count("BeginBuild:product/R:"); n != 0 {
+		if n := len(begunIn(st.callsSnapshot(), "R")); n != 0 {
 			t.Fatalf("nothing may build R: %v", st.callsSnapshot())
 		}
 		if r, ok := st.row(R); ok {
@@ -664,7 +664,7 @@ func TestOwner_Sweep_BuildsAndDeletesUnderTheListedTokens(t *testing.T) {
 	}
 	waitIdle(t, idx)
 
-	for _, want := range []string{"BeginBuild:product/1:5", "FinishOwned:product/1:4:5", "DeleteResourceIfSeq:product/gone:9:10"} {
+	for _, want := range []string{"BeginBuilds:product/1:5", "FinishOwned:product/1:4:5", "DeleteResourceIfSeq:product/gone:9:10"} {
 		if st.indexOf(want) == -1 {
 			t.Fatalf("missing %s: %v", want, st.callsSnapshot())
 		}
@@ -675,7 +675,7 @@ func TestOwner_Sweep_BuildsAndDeletesUnderTheListedTokens(t *testing.T) {
 	// ListStale claimed the whole batch up front; each entry renews its lease
 	// when the pass reaches it, so a long pass doesn't let a later entry's
 	// claim lapse under it.
-	for _, e := range [][2]string{{"RenewOwners:product/1:5", "BeginBuild:product/1:5"}, {"RenewOwners:product/gone:10", "DeleteResourceIfSeq:product/gone:9:10"}} {
+	for _, e := range [][2]string{{"RenewOwners:product/1:5", "BeginBuilds:product/1:5"}, {"RenewOwners:product/gone:10", "DeleteResourceIfSeq:product/gone:9:10"}} {
 		if renew, serve := st.indexOf(e[0]), st.indexOf(e[1]); renew == -1 || renew > serve {
 			t.Fatalf("the sweep must renew %s before serving it: %v", e[0], st.callsSnapshot())
 		}
@@ -791,7 +791,7 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 		if r, ok := st.row(gone); !ok || r.owner != stolen() || !r.stale {
 			t.Errorf("the new owner (%d) must keep the row and its mark: %+v (exists %v)", stolen(), r, ok)
 		}
-		for _, want := range []string{"BeginBuild:product/1:5", "FinishOwned:product/1:4:5"} {
+		for _, want := range []string{"BeginBuilds:product/1:5", "FinishOwned:product/1:4:5"} {
 			if st.indexOf(want) == -1 {
 				t.Errorf("the entry after the lost one must still be served, missing %s: %v", want, st.callsSnapshot())
 			}
@@ -816,7 +816,7 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 		if tok := stolen(); tok == 0 {
 			t.Fatalf("setup: the sweep must renew the build entry before serving it: %v", st.callsSnapshot())
 		}
-		if n := st.count("BeginBuild:product/1:"); n != 0 {
+		if n := len(begunIn(st.callsSnapshot(), "1")); n != 0 {
 			t.Errorf("a lost build entry must not begin a build: %v", st.callsSnapshot())
 		}
 		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
@@ -828,7 +828,7 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 		if r, _ := st.row(lost); r.owner != stolen() || !r.stale {
 			t.Errorf("the new owner (%d) must keep the row and its mark: %+v", stolen(), r)
 		}
-		for _, want := range []string{"DeleteResourceIfSeq:product/gone:9:10", "BeginBuild:product/2:7", "FinishOwned:product/2:6:7"} {
+		for _, want := range []string{"DeleteResourceIfSeq:product/gone:9:10", "BeginBuilds:product/2:7", "FinishOwned:product/2:6:7"} {
 			if st.indexOf(want) == -1 {
 				t.Errorf("the entries after the lost one must still be served, missing %s: %v", want, st.callsSnapshot())
 			}
@@ -856,7 +856,7 @@ func TestOwner_Sweep_RenewError_SkipsTheEntryAndKeepsItsMark(t *testing.T) {
 	if st.count("RenewOwnersFailed:") == 0 {
 		t.Fatalf("setup: the sweep must try to renew: %v", st.callsSnapshot())
 	}
-	for _, p := range []string{"BeginBuild:", "FinishOwned:", "ClearStale:", "RemoveResource:", "DeleteResourceIfSeq:"} {
+	for _, p := range []string{"BeginBuilds:", "FinishOwned:", "ClearStale:", "RemoveResource:", "DeleteResourceIfSeq:"} {
 		if n := st.count(p); n != 0 {
 			t.Errorf("an entry whose renew failed must not be served, got %s: %v", p, st.callsSnapshot())
 		}
@@ -904,7 +904,7 @@ func TestOwner_Cascade_SubmitsOnlyWhatMarkStaleClaimed(t *testing.T) {
 	}
 	waitIdle(t, idx)
 
-	if n := st.count("BeginBuild:product/p1:"); n != 0 {
+	if n := len(begunIn(st.callsSnapshot(), "p1")); n != 0 {
 		t.Fatalf("p1 has a live owner; the cascade must not submit it: %v", st.callsSnapshot())
 	}
 	if got := st.owner(p1); got != owned[0].Token {
@@ -912,8 +912,8 @@ func TestOwner_Cascade_SubmitsOnlyWhatMarkStaleClaimed(t *testing.T) {
 	}
 	r, _ := st.row(p2)
 	tok := r.staleSeq
-	begins := callsWithPrefix(st, "BeginBuild:product/p2:")
-	if want := fmt.Sprintf("BeginBuild:product/p2:%d", tok); len(begins) != 1 || begins[0] != want {
+	begins := callsWithPrefix(st, "BeginBuilds:product/p2:")
+	if want := fmt.Sprintf("BeginBuilds:product/p2:%d", tok); len(begins) != 1 || begins[0] != want {
 		t.Fatalf("p2 must be built once under the token its mark claimed (%s), got %v: %v", want, begins, st.callsSnapshot())
 	}
 	if st.indexOf(fmt.Sprintf("FinishOwned:product/p2:%d:%d", tok, tok)) == -1 {
@@ -945,8 +945,8 @@ func TestOwner_DriftRemark(t *testing.T) {
 
 		r, _ := st.row(product("1"))
 		tok := r.staleSeq // the drift re-mark is the row's only mark
-		begins := callsWithPrefix(st, "BeginBuild:product/1:")
-		want := []string{"BeginBuild:product/1:0", fmt.Sprintf("BeginBuild:product/1:%d", tok)}
+		begins := callsWithPrefix(st, "BeginBuilds:product/1:")
+		want := []string{"BeginBuilds:product/1:0", fmt.Sprintf("BeginBuilds:product/1:%d", tok)}
 		if fmt.Sprint(begins) != fmt.Sprint(want) {
 			t.Fatalf("the direct build owns nothing and its re-build owns the claimed root: got %v want %v: %v", begins, want, st.callsSnapshot())
 		}
@@ -970,8 +970,8 @@ func TestOwner_DriftRemark(t *testing.T) {
 		if len(fus) != 1 {
 			t.Fatalf("the owned build's FinishOwned must yield the one follow-up, got %v: %v", fus, st.callsSnapshot())
 		}
-		begins := callsWithPrefix(st, "BeginBuild:product/1:")
-		want := []string{"BeginBuild:product/1:1", fmt.Sprintf("BeginBuild:product/1:%d", fus[0].Token)}
+		begins := callsWithPrefix(st, "BeginBuilds:product/1:")
+		want := []string{"BeginBuilds:product/1:1", fmt.Sprintf("BeginBuilds:product/1:%d", fus[0].Token)}
 		if fmt.Sprint(begins) != fmt.Sprint(want) {
 			t.Fatalf("exactly two builds — the registered one and its follow-up: got %v want %v: %v", begins, want, st.callsSnapshot())
 		}
@@ -1048,39 +1048,49 @@ func TestOwner_ShedFollowUp_ReleasesTheReclaim(t *testing.T) {
 
 // R5: a Build whose ctx ends before an owned id is finished releases the
 // unfinished ids' ownership on a context detached from the cancellation,
-// through ReleaseOwners: a cancellation is not a failure, so neither the
-// unreached id 2 nor id 1, whose build the cancellation cut short, is backed
-// off.
+// through ReleaseOwners, and returns ctx's error: a cancellation is not a
+// failure, so no id is backed off — neither one whose build the cancellation
+// cut short nor, in batches of one id, the unreached id 2, which is never
+// begun.
 func TestOwner_CancelledBuild_ReleasesUnfinishedOwnershipOnALiveCtx(t *testing.T) {
-	st := &recordingStore{}
-	idx := newHotPathIndexer(st, 2, 4)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	idx.plans["product"][0].Executer.(*staticExecuter).onExecute = cancel // during the first id's plan
+	for name, batchSize := range map[string]int{"one batch": 0, "a batch per id": 1} {
+		t.Run(name, func(t *testing.T) {
+			st := &recordingStore{}
+			idx := newHotPathIndexer(st, 2, 4)
+			if batchSize > 0 {
+				idx.buildBatchSize = batchSize
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			idx.plans["product"][0].Executer.(*staticExecuter).onExecute = cancel // during the first batch's plan
 
-	owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, time.Minute)
-	if err != nil || len(owned) != 2 {
-		t.Fatalf("claiming: %v %v", owned, err)
-	}
-	tokens := map[string]int64{owned[0].Id: owned[0].Token, owned[1].Id: owned[1].Token}
+			owned, err := st.MarkStale(t.Context(), []model.Resource{product("1"), product("2")}, time.Minute)
+			if err != nil || len(owned) != 2 {
+				t.Fatalf("claiming: %v %v", owned, err)
+			}
+			tokens := map[string]int64{owned[0].Id: owned[0].Token, owned[1].Id: owned[1].Token}
 
-	_ = idx.Build(ctx, BuildArgs{ResourceType: "product", ResourceIds: []string{"1", "2"}, OwnerTokens: tokens})
+			if err := idx.Build(ctx, BuildArgs{ResourceType: "product", ResourceIds: []string{"1", "2"}, OwnerTokens: tokens}); !errors.Is(err, context.Canceled) {
+				t.Fatalf("a cancelled build returns ctx's error, got %v", err)
+			}
 
-	for _, id := range []string{"1", "2"} {
-		if st.indexOf(fmt.Sprintf("ReleaseOwners:product/%s:%d", id, tokens[id])) == -1 || st.count("ReleaseOwnersFailed:product/"+id+":") != 0 {
-			t.Fatalf("the unfinished id %s must be released on a live ctx: %v", id, st.callsSnapshot())
-		}
+			for _, id := range []string{"1", "2"} {
+				if st.indexOf(fmt.Sprintf("ReleaseOwners:product/%s:%d", id, tokens[id])) == -1 || st.count("ReleaseOwnersFailed:product/"+id+":") != 0 {
+					t.Fatalf("the unfinished id %s must be released on a live ctx: %v", id, st.callsSnapshot())
+				}
+			}
+			if got := st.owner(product("2")); got != 0 {
+				t.Fatalf("id 2's ownership must be dropped, owner %d", got)
+			}
+			if n := st.count("ReleaseFailed"); n != 0 {
+				t.Fatalf("a cancelled build must not back any id off: %v", st.callsSnapshot())
+			}
+			if n := len(begunIn(st.callsSnapshot(), "2")); batchSize == 1 && n != 0 {
+				t.Fatalf("nothing may be built for id 2 after the cancellation: %v", st.callsSnapshot())
+			}
+			waitIdle(t, idx)
+		})
 	}
-	if got := st.owner(product("2")); got != 0 {
-		t.Fatalf("id 2's ownership must be dropped, owner %d", got)
-	}
-	if n := st.count("ReleaseFailed"); n != 0 {
-		t.Fatalf("a cancelled build must not back any id off: %v", st.callsSnapshot())
-	}
-	if n := st.count("BeginBuild:product/2:"); n != 0 {
-		t.Fatalf("nothing may be built for id 2 after the cancellation: %v", st.callsSnapshot())
-	}
-	waitIdle(t, idx)
 }
 
 // A direct Build carries no tokens: it owns nothing, finishes with ClearStale
@@ -1097,7 +1107,7 @@ func TestOwner_DirectBuild_OwnsNothing(t *testing.T) {
 	}
 	waitIdle(t, idx)
 
-	if st.indexOf("BeginBuild:product/1:0") == -1 || st.indexOf("ClearStale:product/1:1") == -1 {
+	if st.indexOf("BeginBuilds:product/1:0") == -1 || st.indexOf("ClearStale:product/1:1") == -1 {
 		t.Fatalf("a direct build begins unowned and finishes with ClearStale: %v", st.callsSnapshot())
 	}
 	for _, p := range []string{"FinishOwned", "RenewOwners", "ReleaseOwners"} {
@@ -1118,7 +1128,7 @@ func TestOwner_PoolTask_RenewsAtStart(t *testing.T) {
 		mustRegister(t, idx, notify("1", ChangeUpdated, nil))
 		waitIdle(t, idx)
 
-		renew, begin := st.indexOf("RenewOwners:product/1:1"), st.indexOf("BeginBuild:product/1:1")
+		renew, begin := st.indexOf("RenewOwners:product/1:1"), st.indexOf("BeginBuilds:product/1:1")
 		if renew == -1 || begin == -1 || renew > begin {
 			t.Fatalf("the build task must renew its ownership before BeginBuild: %v", st.callsSnapshot())
 		}
@@ -1177,7 +1187,7 @@ func TestOwner_PoolTask_SkipsWhatItLostBeforeDequeue(t *testing.T) {
 		if st.indexOf(fmt.Sprintf("RenewOwners:product/1:%d", tokens["1"])) == -1 {
 			t.Fatalf("setup: the task must renew at dequeue: %v", st.callsSnapshot())
 		}
-		if n := st.count("BeginBuild:product/1:"); n != 0 {
+		if n := len(begunIn(st.callsSnapshot(), "1")); n != 0 {
 			t.Errorf("the lost id must not begin a build: %v", st.callsSnapshot())
 		}
 		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
@@ -1190,7 +1200,7 @@ func TestOwner_PoolTask_SkipsWhatItLostBeforeDequeue(t *testing.T) {
 			t.Errorf("the new owner (%d) must keep the lost id's row and its mark: %+v", stolen, r)
 		}
 		tok2 := tokens["2"]
-		for _, want := range []string{fmt.Sprintf("BeginBuild:product/2:%d", tok2), fmt.Sprintf("FinishOwned:product/2:%d:%d", tok2, tok2)} {
+		for _, want := range []string{fmt.Sprintf("BeginBuilds:product/2:%d", tok2), fmt.Sprintf("FinishOwned:product/2:%d:%d", tok2, tok2)} {
 			if st.indexOf(want) == -1 {
 				t.Errorf("the id the task still holds must be built, missing %s: %v", want, st.callsSnapshot())
 			}
@@ -1255,7 +1265,7 @@ func TestOwner_PoolTask_RenewError_SkipsTheWorkAndKeepsTheMark(t *testing.T) {
 		if st.count("RenewOwnersFailed:product/1:") == 0 {
 			t.Fatalf("setup: the task must try to renew at dequeue: %v", st.callsSnapshot())
 		}
-		for _, p := range []string{"BeginBuild:", "FinishOwned:", "ClearStale:"} {
+		for _, p := range []string{"BeginBuilds:", "FinishOwned:", "ClearStale:"} {
 			if n := st.count(p); n != 0 {
 				t.Errorf("a task whose renew failed must not build or finish, got %s: %v", p, st.callsSnapshot())
 			}
@@ -1326,7 +1336,7 @@ func TestOwner_WaitForSlot_UnclaimedRegistrationDoesNotWait(t *testing.T) {
 
 	unhold()
 	waitIdle(t, idx)
-	if n := st.count("BeginBuild:product/1:"); n != 0 {
+	if n := len(begunIn(st.callsSnapshot(), "1")); n != 0 {
 		t.Fatalf("an unclaimed registration submits nothing: %v", st.callsSnapshot())
 	}
 	if got := st.owner(P); got != owned[0].Token {

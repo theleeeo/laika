@@ -49,7 +49,8 @@ func (s *rebuildRecordingStore) count(prefix string) int {
 // version loses with ErrVersionConflict, and a delete below it loses too,
 // returning nil and leaving the document (SearchBackend.Delete). deleteErrs
 // fails the delete of each "index/id" it names, deleting nothing. ops records
-// every write and delete as "upsert|delete index/id@version", in order.
+// every write — a bulk write's per item — and delete as
+// "upsert|delete index/id@version", in order.
 type versionedBackend struct {
 	mu         sync.Mutex
 	docs       map[string]int64
@@ -87,8 +88,16 @@ func (b *versionedBackend) Delete(_ context.Context, index, docID string, versio
 	return nil
 }
 
-func (b *versionedBackend) BulkUpsert(context.Context, []BulkItem) ([]BulkFailure, error) {
-	return nil, errors.New("versionedBackend: a build writes documents one by one")
+// BulkUpsert writes each item as Upsert does, recording it as an upsert; an
+// item below the stored version loses and, as the contract says, isn't
+// reported.
+func (b *versionedBackend) BulkUpsert(ctx context.Context, items []BulkItem) ([]BulkFailure, error) {
+	for _, it := range items {
+		if err := b.Upsert(ctx, it.Index, it.ID, it.Doc, it.Version); err != nil && !errors.Is(err, ErrVersionConflict) {
+			return nil, err
+		}
+	}
+	return nil, nil
 }
 
 func (b *versionedBackend) Search(context.Context, SearchRequest, string, *resource.VersionConfig) (SearchResponse, error) {
@@ -353,7 +362,7 @@ func TestBuild_AllPlansNil_DeletesAtTheBuildsSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := st.count("BeginBuild:product/1"); n != 1 {
+	if n := st.count("BeginBuilds:product/1"); n != 1 {
 		t.Fatalf("setup: the build begins once: %v", st.callsSnapshot())
 	}
 	assertDeletedAt(t, st, es, "1", 42)

@@ -72,7 +72,7 @@ func TestSweepStale_RebuildsMarksAndFinishesTombstones(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("swept count: got %d want 2", n)
 	}
-	if st.indexOf("BeginBuild:product/1") == -1 {
+	if st.indexOf("BeginBuilds:product/1") == -1 {
 		t.Fatalf("live stale entry must be rebuilt: %v", st.callsSnapshot())
 	}
 	if st.indexOf("DeleteResourceIfSeq:product/gone:9") == -1 {
@@ -194,7 +194,7 @@ func TestSweepStale_TombstoneOfDeconfiguredType_DoesNotWedgeSweep(t *testing.T) 
 	if st.indexOf("DeleteResourceIfSeq:ghost/g1:9") == -1 {
 		t.Fatalf("the de-configured tombstone must be finished, not left failing for the sweep to retry forever: %v", st.callsSnapshot())
 	}
-	if st.indexOf("BeginBuild:product/1") == -1 {
+	if st.indexOf("BeginBuilds:product/1") == -1 {
 		t.Fatalf("entries behind the tombstone must still be served: %v", st.callsSnapshot())
 	}
 }
