@@ -84,10 +84,12 @@ func (t *TestSuite) Test_FailedBuild_StaysStale_SweepRecovers() {
 	t.Require().NotNil(after)
 
 	// Provider recovers; the sweep must rebuild and clear the mark once the
-	// row's backoff has passed.
+	// row's backoff has passed. The mark is backdated too: stale_since is
+	// stamped on Postgres's clock and the threshold-0 cutoff is the host's,
+	// so a fresh mark could hide behind a container clock running ahead.
 	t.fakeProvider.SetError("a", "1", nil)
 	_, err = t.pool.Exec(t.T().Context(),
-		`UPDATE resources SET sweep_after = now() - interval '1 millisecond' WHERE type='a' AND id='1'`)
+		`UPDATE resources SET sweep_after = now() - interval '1 millisecond', stale_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
 	t.Require().NoError(err)
 
 	n, err := t.idx.SweepStale(t.T().Context(), 0, 100)

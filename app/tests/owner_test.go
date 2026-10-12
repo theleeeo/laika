@@ -343,6 +343,12 @@ func (t *TestSuite) Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired() {
 	t.Require().NoError(err)
 	t.Require().Len(owned, 1, "the crashed instance's mark claimed a/1")
 	t.Require().NotZero(owned[0].Token)
+	// The mark is old, so only the lease keeps the sweep off the row: a fresh
+	// stale_since, stamped on Postgres's clock, could hide from the threshold-0
+	// cutoff, taken on the host's, behind a container clock running ahead.
+	_, err = t.pool.Exec(ctx,
+		`UPDATE resources SET stale_since = now() - interval '1 hour' WHERE type='a' AND id='1'`)
+	t.Require().NoError(err)
 
 	n, err := t.idx.SweepStale(ctx, 0, 100)
 	t.Require().NoError(err)

@@ -380,6 +380,12 @@ func (t *TestSuite) Test_Migration_CutoverAcceptsAVersionsGap() {
 	for id := range excluded {
 		t.Require().NotNil(t.staleSince("m", id), "the backfill must mark %s for its nil", id)
 	}
+	// The marks are fresh, stamped on Postgres's clock, and the threshold-0
+	// cutoff is the host's: backdate them so a container clock running ahead
+	// can't hide them from the sweep.
+	_, err := t.pool.Exec(ctx,
+		`UPDATE resources SET stale_since = now() - interval '1 hour' WHERE type='m' AND stale_since IS NOT NULL`)
+	t.Require().NoError(err)
 	swept, err := x.SweepStale(ctx, 0, 100)
 	t.Require().NoError(err)
 	t.Require().Equal(len(excluded), swept)
