@@ -335,3 +335,84 @@ func assertReleasedOnALiveCtx(t *testing.T, st *recordingStore, res model.Resour
 		t.Fatalf("the released row must have no owner, got %d", got)
 	}
 }
+
+// A registration of several batches whose tasks the pool refuses — shed on a
+// full queue, or a WaitForSlot wait ended by ctx — releases the ownership of
+// every id of every refused batch through ReleaseOwners, on a live ctx and
+// without a backoff, and leaves each mark for the sweep: five products in
+// batches of two are three refused tasks, none of which runs.
+func TestRegisterChanges_RefusedBatches_ReleaseEveryIDOfEveryBatch(t *testing.T) {
+	ids := []string{"1", "2", "3", "4", "5"}
+	var ns []Notification
+	for _, id := range ids {
+		ns = append(ns, Notification{ResourceType: "product", ResourceID: id, Kind: ChangeUpdated})
+	}
+	newIndexer := func(st *recordingStore) *Indexer {
+		return mustNew(Config{
+			Resources:      testResources(),
+			Plans:          map[string][]projection.Plan{"product": {{Version: 1, Executer: &recordingExecuter{}}}},
+			ES:             &fakeBackend{},
+			Store:          st,
+			PoolSize:       1,
+			QueueSize:      1,
+			BuildBatchSize: 2,
+		})
+	}
+	assertAllReleased := func(t *testing.T, st *recordingStore) {
+		t.Helper()
+		for _, id := range ids {
+			r, _ := st.row(product(id))
+			assertReleasedOnALiveCtx(t, st, product(id), r.staleSeq)
+			if !r.stale {
+				t.Errorf("the refused build's mark of %s must stay for the sweep: %+v", id, r)
+			}
+		}
+		if n := st.count("ReleaseFailed"); n != 0 {
+			t.Errorf("a refused batch did not fail and must not back its rows off: %v", st.callsSnapshot())
+		}
+		if st.indexOf("BeginBuilds") != -1 || st.indexOf("RenewOwners") != -1 {
+			t.Errorf("no refused batch may run: %v", st.callsSnapshot())
+		}
+	}
+
+	t.Run("shed", func(t *testing.T) {
+		st := &recordingStore{}
+		idx := newIndexer(st)
+		release := make(chan struct{})
+		holdPoolFull(t, idx, func(context.Context) { <-release })
+
+		if _, err := idx.RegisterChanges(t.Context(), ns); err != nil {
+			t.Fatal(err)
+		}
+		close(release)
+		if err := idx.WaitForIdle(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		assertAllReleased(t, st)
+	})
+
+	t.Run("WaitForSlot wait ended by ctx", func(t *testing.T) {
+		st := &recordingStore{marked: make(chan struct{}, 8)}
+		idx := newIndexer(st)
+		release := make(chan struct{})
+		holdPoolFull(t, idx, func(context.Context) { <-release })
+
+		ctx, cancel := context.WithCancel(t.Context())
+		errc := make(chan error, 1)
+		go func() {
+			_, err := idx.RegisterChanges(ctx, ns, WaitForSlot())
+			errc <- err
+		}()
+		within(t, st.marked, "the batch's statement")
+		stillBlocked(t, errc, "a WaitForSlot batch on a pressured pool")
+		cancel()
+		if err := within(t, errc, "the batch after cancel"); err != nil {
+			t.Fatalf("a wait ended by ctx must return nil — the marks already landed: %v", err)
+		}
+		close(release)
+		if err := idx.WaitForIdle(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		assertAllReleased(t, st)
+	})
+}

@@ -58,7 +58,8 @@ type Config struct {
 
 	// PoolSize bounds the number of concurrent inline build tasks. A build
 	// task holds a batch — one type's ids, up to its batch size (see
-	// BuildBatchSize) — and a delete task one id. Default 10.
+	// BuildBatchSize and BuildBatchSizes) — and a delete task one id.
+	// Default 10.
 	PoolSize int
 
 	// QueueSize bounds the number of accepted-but-not-yet-running inline
