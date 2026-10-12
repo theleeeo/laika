@@ -20,9 +20,10 @@
 > tombstone renews its ownership when the pass reaches it, and each batch
 > renews as a whole: a batch with nothing still held is skipped, and the
 > held ids are built together in list order. A failed renewal releases the
-> tombstone's or the whole batch's ownership without a backoff. A batch that
-> fails as a whole is logged once, by `Build` (ADR 0014), so a sweep that
-> retries a failed batch logs its rows at Debug.
+> tombstone's or the whole batch's ownership without a backoff. A batch whose
+> `BeginBuilds` fails, or a plan call for a metadata group of several ids, is
+> logged once, by `Build` (ADR 0014), so a sweep batch that fails so again
+> logs one Error line, its rows at Debug.
 
 > **Note (2026-10-12, runbook step L5.6):** a build runs a **batch**
 > ([ADR 0014](0014-builds-run-in-per-type-batches.md)). `Indexer.Build` cuts

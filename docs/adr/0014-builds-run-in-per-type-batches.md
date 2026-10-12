@@ -15,11 +15,13 @@ _Accepted, 2026-10-08. Built by runbook steps L5.1–L5.7._
 >   laika-dev's `docs/seams.md`), but no longer go as one build of the type.
 > - **A batch of one id is no longer every sweep build.** A sweep pass and a
 >   registration's page build batches of several ids, so a sweep-retried
->   batch that fails as a whole logs the batch's one Error line, its rows at
->   Debug with their attempt counts; a row stuck in such a batch no longer
+>   batch whose begin, or a plan call for a metadata group of several ids,
+>   fails logs one Error line, its rows at Debug with their attempt counts;
+>   a row stuck failing in such a batch's group of several ids no longer
 >   gets a line of its own at Error from its fifth attempt (seams S64). A
 >   batch of one id — a single notification, a lone follow-up, a type with
->   one id in a pass — still fails as that id.
+>   one id in a pass — or an id alone in its metadata group still fails as
+>   that id.
 
 > **Note (2026-10-12, runbook step L5.6):** as built, six details refine
 > the decision.
