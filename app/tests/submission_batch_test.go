@@ -78,6 +78,9 @@ func (t *TestSuite) requireSubmissionBatchesBuilt(reqs map[string][][]string, wh
 			for _, id := range ids {
 				fields, _ := t.docSource(core.IndexName(typ, v), id)["fields"].(map[string]any)
 				t.Require().Equal(typ+"-"+id, fields["f1"], "%s must land %s/%s's v%d document", what, typ, id, v)
+				if v == 2 {
+					t.Require().Equal("second-"+id, fields["f2"], "%s must land %s/%s's v2 document with its v2 field", what, typ, id)
+				}
 			}
 		}
 		for _, id := range ids {
