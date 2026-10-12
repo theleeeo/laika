@@ -54,6 +54,16 @@ func (p *planRequests) take(resourceType string, version int) [][]string {
 	return out
 }
 
+// takeAll returns every wrapped plan's requests recorded so far, by
+// "type/v<version>", and forgets them.
+func (p *planRequests) takeAll() map[string][][]string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := p.reqs
+	p.reqs = nil
+	return out
+}
+
 type recordingExecuter struct {
 	inner aggregation.Executer[projection.BuildRequest, projection.BuildDoc]
 	key   string
@@ -184,11 +194,13 @@ func (t *TestSuite) runBatchScenario(size int, ids []string) batchRun {
 	return run
 }
 
-// requireOncePerBatch checks reqs asks each of ids once, in requests of at
-// most size ids, as few as the batches of size make.
+// requireOncePerBatch checks reqs, one plan's requests, asks each of ids
+// once, in requests of at most size ids, as few as the batches of size make.
+// It holds whatever order the requests came in, so batches built
+// concurrently on the pool check alike.
 func (t *TestSuite) requireOncePerBatch(reqs [][]string, ids []string, size int, what string) {
 	want := (len(ids) + size - 1) / size
-	t.Require().Len(reqs, want, "%s with batch size %d: a's plan must be asked once per batch of %d ids, got requests %v", what, size, size, reqs)
+	t.Require().Len(reqs, want, "%s with batch size %d: the plan must be asked once per batch of %d ids, got requests %v", what, size, size, reqs)
 	var asked []string
 	for _, r := range reqs {
 		t.Require().LessOrEqual(len(r), size, "%s with batch size %d: request %v holds more ids than a batch", what, size, r)
