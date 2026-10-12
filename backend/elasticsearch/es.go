@@ -281,7 +281,7 @@ func (c *Client) BulkUpsert(ctx context.Context, items []core.BulkItem) ([]core.
 	if err != nil {
 		return nil, fmt.Errorf("parse bulk response: %w", err)
 	}
-	slog.Info("bulk upserted docs", "count", len(items), "rejected", len(failures))
+	slog.Debug("bulk upserted docs", "count", len(items), "rejected", len(failures))
 	return failures, nil
 }
 
