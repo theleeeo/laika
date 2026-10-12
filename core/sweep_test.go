@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -106,7 +107,8 @@ func (e *requestExecuter) Execute(_ context.Context, req projection.BuildRequest
 // Each stale entry is an owned build, and it fetches with the metadata its
 // row holds when the build begins (BuildBegun.Metadata) — the same a build
 // the registration submitted would have run with; a row without metadata
-// builds with none.
+// builds with none. Entries of one batch whose rows hold different metadata
+// are begun together and still fetched each with its own row's metadata.
 func TestSweepStale_BuildsEachEntryWithItsRowsMetadata(t *testing.T) {
 	st := &staleListingStore{
 		entries: []StaleResource{
@@ -149,6 +151,9 @@ func TestSweepStale_BuildsEachEntryWithItsRowsMetadata(t *testing.T) {
 		if !maps.Equal(got[id], md) || (md == nil && got[id] != nil) {
 			t.Fatalf("build for product/%s ran with %v, want %v (all: %v)", id, got[id], md, got)
 		}
+	}
+	if got := callsWithPrefix(&st.recordingStore, "BeginBuilds:"); !slices.Equal(got, []string{"BeginBuilds:product/1:4,product/2:5,product/3:6"}) {
+		t.Fatalf("the three entries must be one batch, begun together, got %v", got)
 	}
 	for _, id := range []string{"1", "2", "3"} {
 		if st.indexOf(fmt.Sprintf("FinishOwned:product/%s:", id)) == -1 {
@@ -519,5 +524,71 @@ func TestSweepStale_FailedBuild_ChangeRegisteredMeanwhile_IsNotBackedOff(t *test
 	}
 	if _, ok := rec["attempts"]; ok {
 		t.Fatalf("the line must not carry an attempt count: %v", rec)
+	}
+}
+
+// A pass serves its tombstones first, each on its own, and then its build
+// entries in per-type batches of the type's batch size, one Build each: 250
+// build entries at the default batch size of 100 are three Builds of 100, 100
+// and 50 ids, each begun in one BeginBuilds under its entries' listed tokens,
+// in list order. Each batch renews its ownership when the pass reaches it,
+// not before the batch ahead of it has run.
+func TestSweepStale_BuildsItsEntriesInBatchesOfTheTypesBatchSize(t *testing.T) {
+	ids := productIDs(250)
+	var entries []StaleResource
+	for i, id := range ids {
+		if i == 0 || i == 150 {
+			entries = append(entries, StaleResource{Resource: product(fmt.Sprintf("gone%d", i)), StaleSeq: int64(5000 + i), Token: int64(6000 + i), Deleted: true})
+		}
+		entries = append(entries, StaleResource{Resource: product(id), StaleSeq: int64(1 + i), Token: int64(1000 + i)})
+	}
+	st := &staleListingStore{entries: entries}
+	idx, ex, _ := newCaptureIndexer(st, 2, 4)
+
+	n, err := idx.SweepStale(t.Context(), 5*time.Minute, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, idx)
+
+	if n != 252 {
+		t.Fatalf("swept count: got %d want 252", n)
+	}
+	if got := callsWithPrefix(&st.recordingStore, "BeginDelete:"); !slices.Equal(got, []string{"BeginDelete:product/gone0:6000", "BeginDelete:product/gone150:6150"}) {
+		t.Fatalf("each tombstone must be deleted once under its token, in list order, got %v", got)
+	}
+	begins := callsWithPrefix(&st.recordingStore, "BeginBuilds:")
+	if len(begins) != 3 {
+		t.Fatalf("want three Builds, each begun in one BeginBuilds, got %d: %v", len(begins), begins)
+	}
+	for b, want := range [][2]int{{0, 100}, {100, 200}, {200, 250}} {
+		names := make([]string, 0, want[1]-want[0])
+		for i := want[0]; i < want[1]; i++ {
+			names = append(names, fmt.Sprintf("product/%s:%d", ids[i], 1000+i))
+		}
+		if got := "BeginBuilds:" + strings.Join(names, ","); begins[b] != got {
+			t.Fatalf("batch %d must begin ids %d..%d under their tokens, got %s", b, want[0], want[1]-1, begins[b])
+		}
+	}
+	if reqs := ex.requests(); len(reqs) != 3 {
+		t.Fatalf("the plan must be asked once per batch, got %d requests", len(reqs))
+	}
+	calls := st.callsSnapshot()
+	firstBuild := st.indexOf("BeginBuilds:")
+	for _, d := range []string{"DeleteResourceIfSeq:product/gone0:5000:6000", "DeleteResourceIfSeq:product/gone150:5150:6150"} {
+		if at := st.indexOf(d); at == -1 || at > firstBuild {
+			t.Fatalf("the tombstones must be finished before the first batch is built, %s at %d, first BeginBuilds at %d: %v", d, at, firstBuild, calls)
+		}
+	}
+	for b, first := range []int{100, 200} {
+		renew := st.indexOf(fmt.Sprintf("RenewOwners:product/%s:%d", ids[first], 1000+first))
+		if prev := slices.Index(calls, begins[b]); renew < prev {
+			t.Fatalf("batch %d must renew after batch %d has begun (renew at %d, its BeginBuilds at %d)", b+1, b, renew, prev)
+		}
+	}
+	for _, id := range ids {
+		if r, _ := st.row(product(id)); r.stale || r.owner != 0 {
+			t.Fatalf("product/%s must be built, its mark and ownership cleared: %+v", id, r)
+		}
 	}
 }

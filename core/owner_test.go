@@ -672,9 +672,9 @@ func TestOwner_Sweep_BuildsAndDeletesUnderTheListedTokens(t *testing.T) {
 	if st.count("ClearStale:product/1:") != 0 {
 		t.Fatalf("an owned sweep build finishes with FinishOwned, not ClearStale: %v", st.callsSnapshot())
 	}
-	// ListStale claimed the whole batch up front; each entry renews its lease
-	// when the pass reaches it, so a long pass doesn't let a later entry's
-	// claim lapse under it.
+	// ListStale claimed every entry up front; each tombstone and each build
+	// batch renews its lease when the pass reaches it, so a long pass doesn't
+	// let a later entry's claim lapse under it.
 	for _, e := range [][2]string{{"RenewOwners:product/1:5", "BeginBuilds:product/1:5"}, {"RenewOwners:product/gone:10", "DeleteResourceIfSeq:product/gone:9:10"}} {
 		if renew, serve := st.indexOf(e[0]), st.indexOf(e[1]); renew == -1 || renew > serve {
 			t.Fatalf("the sweep must renew %s before serving it: %v", e[0], st.callsSnapshot())
@@ -759,8 +759,8 @@ func stealOnRenew(st *recordingStore, res model.Resource, deleted bool) func() i
 // A sweep entry whose ownership another owner took between ListStale and the
 // pass reaching it — its lease lapsed and a change claimed the row — is
 // skipped: a lost tombstone deletes nothing, a lost build entry builds
-// nothing. The new owner keeps the row and its mark, and the entries after
-// it are still served.
+// nothing. The new owner keeps the row and its mark, and the other entries —
+// the rest of a lost build entry's batch among them — are still served.
 func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 	t.Run("lost tombstone", func(t *testing.T) {
 		gone := product("gone")
@@ -798,12 +798,13 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 		}
 	})
 
-	t.Run("lost build entry", func(t *testing.T) {
-		lost := product("1")
+	t.Run("lost build entry inside a batch", func(t *testing.T) {
+		lost := product("2")
 		st := &staleListingStore{entries: []StaleResource{
-			{Resource: lost, StaleSeq: 4, Token: 5},
+			{Resource: product("1"), StaleSeq: 4, Token: 5},
 			{Resource: product("gone"), StaleSeq: 9, Token: 10, Deleted: true},
-			{Resource: product("2"), StaleSeq: 6, Token: 7},
+			{Resource: lost, StaleSeq: 6, Token: 7},
+			{Resource: product("3"), StaleSeq: 11, Token: 12},
 		}}
 		stolen := stealOnRenew(&st.recordingStore, lost, false)
 		idx, ex, be := newCaptureIndexer(st, 2, 4)
@@ -816,70 +817,122 @@ func TestOwner_Sweep_SkipsAnEntryWhoseOwnershipWasLost(t *testing.T) {
 		if tok := stolen(); tok == 0 {
 			t.Fatalf("setup: the sweep must renew the build entry before serving it: %v", st.callsSnapshot())
 		}
-		if n := len(begunIn(st.callsSnapshot(), "1")); n != 0 {
+		if n := len(begunIn(st.callsSnapshot(), "2")); n != 0 {
 			t.Errorf("a lost build entry must not begin a build: %v", st.callsSnapshot())
 		}
-		if reqs := ex.requestsFor("1"); len(reqs) != 0 {
+		if reqs := ex.requestsFor("2"); len(reqs) != 0 {
 			t.Errorf("a lost build entry must not run its plan: %v", reqs)
 		}
-		if ops := esOpsOn(be, "1"); len(ops) != 0 {
+		if ops := esOpsOn(be, "2"); len(ops) != 0 {
 			t.Errorf("a lost build entry must not write to ES: %v", ops)
 		}
 		if r, _ := st.row(lost); r.owner != stolen() || !r.stale {
 			t.Errorf("the new owner (%d) must keep the row and its mark: %+v", stolen(), r)
 		}
-		for _, want := range []string{"DeleteResourceIfSeq:product/gone:9:10", "BeginBuilds:product/2:7", "FinishOwned:product/2:6:7"} {
+		// The batch's held ids are still built, together, in one Build.
+		if got := callsWithPrefix(&st.recordingStore, "BeginBuilds:"); !slices.Equal(got, []string{"BeginBuilds:product/1:5,product/3:12"}) {
+			t.Errorf("the batch's other ids must be built in one Build under their tokens, got %v", got)
+		}
+		for _, want := range []string{"DeleteResourceIfSeq:product/gone:9:10", "FinishOwned:product/1:4:5", "FinishOwned:product/3:11:12"} {
 			if st.indexOf(want) == -1 {
-				t.Errorf("the entries after the lost one must still be served, missing %s: %v", want, st.callsSnapshot())
+				t.Errorf("the other entries must still be served, missing %s: %v", want, st.callsSnapshot())
 			}
 		}
 	})
 }
 
-// A sweep entry whose renew fails is not served — the sweep can't tell it
-// still owns the row — and its mark or tombstone stays for the next pass. Its
-// ownership is released through ReleaseOwners, without a backoff, so the next
-// change or sweep needn't wait for the lease.
-func TestOwner_Sweep_RenewError_SkipsTheEntryAndKeepsItsMark(t *testing.T) {
-	st := &staleListingStore{entries: []StaleResource{
-		{Resource: product("1"), StaleSeq: 4, Token: 5},
-		{Resource: product("gone"), StaleSeq: 9, Token: 10, Deleted: true},
-	}}
-	st.renewErr = errors.New("db down")
-	idx, ex, be := newCaptureIndexer(st, 2, 4)
+// renewFailingStore fails every RenewOwners naming a resource in failFor, as
+// a done ctx or a lost connection fails it, and serves the rest as
+// staleListingStore does.
+type renewFailingStore struct {
+	staleListingStore
+	failFor map[model.Resource]bool
+}
+
+func (s *renewFailingStore) RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error) {
+	if !slices.ContainsFunc(owned, func(o Owned) bool { return s.failFor[o.Resource] }) {
+		return s.staleListingStore.RenewOwners(ctx, owned)
+	}
+	for _, o := range owned {
+		s.record("RenewOwnersFailed:%s/%s:%d", o.Type, o.Id, o.Token)
+	}
+	return nil, errors.New("db down")
+}
+
+// A sweep batch whose renew fails is not served — the sweep can't tell it
+// still owns any of its rows — and the marks of all its entries stay for the
+// next pass. Their ownership is released through ReleaseOwners, without a
+// backoff, so the next change or sweep needn't wait for the lease. A tombstone
+// whose own renew fails is skipped the same way. The other batches and
+// tombstones are still served.
+func TestOwner_Sweep_RenewError_SkipsTheBatchAndKeepsItsMarks(t *testing.T) {
+	st := &renewFailingStore{
+		staleListingStore: staleListingStore{entries: []StaleResource{
+			{Resource: product("1"), StaleSeq: 4, Token: 5},
+			{Resource: product("gone"), StaleSeq: 9, Token: 10, Deleted: true},
+			{Resource: product("2"), StaleSeq: 6, Token: 7},
+			{Resource: product("3"), StaleSeq: 11, Token: 12},
+			{Resource: product("kept"), StaleSeq: 13, Token: 14, Deleted: true},
+		}},
+		failFor: map[model.Resource]bool{product("2"): true, product("gone"): true},
+	}
+	ex, be := &recordingExecuter{}, &captureBackend{}
+	idx := mustNew(Config{
+		Resources:       testResources(),
+		Plans:           map[string][]projection.Plan{"product": {{Version: 1, Executer: ex}}},
+		ES:              be,
+		Store:           st,
+		PoolSize:        2,
+		QueueSize:       4,
+		BuildBatchSizes: map[string]int{"product": 2},
+	})
 
 	if _, err := idx.SweepStale(t.Context(), 5*time.Minute, 100); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, idx)
 
-	if st.count("RenewOwnersFailed:") == 0 {
-		t.Fatalf("setup: the sweep must try to renew: %v", st.callsSnapshot())
-	}
-	for _, p := range []string{"BeginBuilds:", "FinishOwned:", "ClearStale:", "RemoveResource:", "DeleteResourceIfSeq:"} {
-		if n := st.count(p); n != 0 {
-			t.Errorf("an entry whose renew failed must not be served, got %s: %v", p, st.callsSnapshot())
+	for _, want := range []string{"RenewOwnersFailed:product/1:5", "RenewOwnersFailed:product/2:7", "RenewOwnersFailed:product/gone:10"} {
+		if st.indexOf(want) == -1 {
+			t.Fatalf("setup: the sweep must try to renew the batch [1 2] and the tombstone gone, missing %s: %v", want, st.callsSnapshot())
 		}
 	}
-	if reqs := ex.requestsFor("1"); len(reqs) != 0 {
-		t.Errorf("an entry whose renew failed must not run its plan: %v", reqs)
+	for _, id := range []string{"1", "2", "gone"} {
+		if n := len(begunIn(st.callsSnapshot(), id)); n != 0 {
+			t.Errorf("product/%s's renew failed; it must not begin a build: %v", id, st.callsSnapshot())
+		}
+		for _, p := range []string{"FinishOwned:", "ClearStale:", "BeginDelete:", "RemoveResource:", "DeleteResourceIfSeq:"} {
+			if n := st.count(p + "product/" + id + ":"); n != 0 {
+				t.Errorf("product/%s's renew failed; it must not be served, got %s: %v", id, p, st.callsSnapshot())
+			}
+		}
+		if reqs := ex.requestsFor(id); len(reqs) != 0 {
+			t.Errorf("product/%s's renew failed; it must not run its plan: %v", id, reqs)
+		}
+		if ops := esOpsOn(be, id); len(ops) != 0 {
+			t.Errorf("product/%s's renew failed; it must not touch ES: %v", id, ops)
+		}
 	}
-	if ops := append(esOpsOn(be, "1"), esOpsOn(be, "gone")...); len(ops) != 0 {
-		t.Errorf("an entry whose renew failed must not touch ES: %v", ops)
-	}
-	if r, _ := st.row(product("1")); !r.stale || r.owner != 0 {
-		t.Errorf("the build entry's mark must stay and its ownership be released: %+v", r)
+	for _, id := range []string{"1", "2"} {
+		if r, _ := st.row(product(id)); !r.stale || r.owner != 0 {
+			t.Errorf("product/%s's mark must stay and its ownership be released: %+v", id, r)
+		}
 	}
 	if r, ok := st.row(product("gone")); !ok || !r.stale || !r.deleted || r.owner != 0 {
 		t.Errorf("the tombstone must stay and its ownership be released: %+v (exists %v)", r, ok)
 	}
-	for _, want := range []string{"ReleaseOwners:product/1:5", "ReleaseOwners:product/gone:10"} {
+	for _, want := range []string{"ReleaseOwners:product/1:5", "ReleaseOwners:product/2:7", "ReleaseOwners:product/gone:10"} {
 		if st.indexOf(want) == -1 {
 			t.Errorf("missing %s: %v", want, st.callsSnapshot())
 		}
 	}
 	if n := st.count("ReleaseFailed"); n != 0 {
 		t.Errorf("a failed renewal is not a failed build and must not back the row off: %v", st.callsSnapshot())
+	}
+	for _, want := range []string{"BeginBuilds:product/3:12", "FinishOwned:product/3:11:12", "DeleteResourceIfSeq:product/kept:13:14"} {
+		if st.indexOf(want) == -1 {
+			t.Errorf("the other batch and tombstone must still be served, missing %s: %v", want, st.callsSnapshot())
+		}
 	}
 }
 
