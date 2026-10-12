@@ -40,9 +40,11 @@ import (
 //	pool.queue_size        → POOL_QUEUE_SIZE
 //	pool.queue_high_water  → POOL_QUEUE_HIGH_WATER
 //	pool.owner_lease       → POOL_OWNER_LEASE
+//	build_batch_size       → BUILD_BATCH_SIZE
 //
-// forward_walks has no env var: it is a list, which doesn't map onto env
-// vars, and it is read from the file without viper (see readForwardWalks).
+// forward_walks and build_batch_sizes have no env vars: a list and a map by
+// resource type don't map onto env vars, and both are read from the file
+// without viper (see readSection).
 type appConfig struct {
 	GRPC               grpcConfig     `mapstructure:"grpc"`
 	ES                 esConfig       `mapstructure:"es"`
@@ -53,8 +55,16 @@ type appConfig struct {
 	Temporal           temporalConfig `mapstructure:"temporal"`
 	Sweep              sweepConfig    `mapstructure:"sweep"`
 	Pool               poolConfig     `mapstructure:"pool"`
-	// ForwardWalks is read from the file by readForwardWalks, not by viper,
-	// and has no env overrides.
+	// BuildBatchSize is how many ids a build asks a plan about at once
+	// (core.Config.BuildBatchSize). 0 means core's default, 100.
+	BuildBatchSize int `mapstructure:"build_batch_size"`
+	// BuildBatchSizes overrides BuildBatchSize by resource type
+	// (core.Config.BuildBatchSizes); an entry of 0 takes BuildBatchSize. It
+	// is read from the file by readSection, not by viper, and has no env
+	// overrides.
+	BuildBatchSizes map[string]int `mapstructure:"-"`
+	// ForwardWalks is read from the file by readSection, not by viper, and
+	// has no env overrides.
 	ForwardWalks []forwardWalkConfig `mapstructure:"-"`
 }
 
@@ -178,6 +188,7 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	v.SetDefault("pool.queue_size", 100)
 	v.SetDefault("pool.queue_high_water", 0)
 	v.SetDefault("pool.owner_lease", "0s")
+	v.SetDefault("build_batch_size", 0)
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := errors.AsType[viper.ConfigFileNotFoundError](err); !ok && !errors.Is(err, os.ErrNotExist) {
@@ -191,11 +202,14 @@ func loadAppConfig(configFilePath string) (appConfig, error) {
 	}
 
 	if v.InConfig("forward_walks") {
-		walks, err := readForwardWalks(configFilePath)
-		if err != nil {
+		if err := readSection(configFilePath, "forward_walks", &cfg.ForwardWalks); err != nil {
 			return appConfig{}, err
 		}
-		cfg.ForwardWalks = walks
+	}
+	if v.InConfig("build_batch_sizes") {
+		if err := readSection(configFilePath, "build_batch_sizes", &cfg.BuildBatchSizes); err != nil {
+			return appConfig{}, err
+		}
 	}
 
 	// ES_ADDRS may arrive as a comma-separated string when set via env var.
@@ -236,36 +250,35 @@ func getStringSlice(v *viper.Viper, key string) []string {
 	}
 }
 
-// readForwardWalks decodes the forward_walks section of the YAML config file
-// at path. Viper lowercases every map key it reads, those inside list items
-// included, which would turn a metadata key such as tenantId into tenantid;
-// decoding the section itself keeps each key as written. The section is
-// decoded strictly, so a misspelled key is an error rather than a walk that
-// silently isn't configured; the rest of the file is viper's.
-func readForwardWalks(path string) ([]forwardWalkConfig, error) {
+// readSection decodes the section key of the YAML config file at path into
+// out. Viper lowercases every map key it reads, those inside list items
+// included, which would turn a resource type such as Product into product and
+// a forward walk's metadata key such as tenantId into tenantid; decoding the
+// section itself keeps each key as written. The section is decoded strictly,
+// so a misspelled key is an error rather than a setting that silently isn't
+// applied; the rest of the file is viper's.
+func readSection(path, key string, out any) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read app config forward_walks: %w", err)
+		return fmt.Errorf("read app config %s: %w", key, err)
 	}
-	var file struct {
-		ForwardWalks ast.Node `yaml:"forward_walks"`
-	}
+	var file map[string]ast.Node
 	if err := yaml.Unmarshal(raw, &file); err != nil {
 		switch strings.ToLower(filepath.Ext(path)) {
 		case ".yml", ".yaml", ".json":
-			return nil, fmt.Errorf("decode app config forward_walks: %w", err)
+			return fmt.Errorf("decode app config %s: %w", key, err)
 		default:
-			return nil, fmt.Errorf("decode app config forward_walks (the section needs a YAML config file): %w", err)
+			return fmt.Errorf("decode app config %s (the section needs a YAML config file): %w", key, err)
 		}
 	}
-	if file.ForwardWalks == nil {
+	node, ok := file[key]
+	if !ok || node == nil {
 		// Viper found the section matching case-insensitively (InConfig), but
-		// it isn't spelled forward_walks: an error, not walks left out.
-		return nil, errors.New("decode app config forward_walks: write the section's key as forward_walks, in lower case")
+		// it isn't spelled key: an error, not a section left out.
+		return fmt.Errorf("decode app config %s: write the section's key as %s, in lower case", key, key)
 	}
-	var walks []forwardWalkConfig
-	if err := yaml.NodeToValue(file.ForwardWalks, &walks, yaml.DisallowUnknownField()); err != nil {
-		return nil, fmt.Errorf("decode app config forward_walks: %w", err)
+	if err := yaml.NodeToValue(node, out, yaml.DisallowUnknownField()); err != nil {
+		return fmt.Errorf("decode app config %s: %w", key, err)
 	}
-	return walks, nil
+	return nil
 }

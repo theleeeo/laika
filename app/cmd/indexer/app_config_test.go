@@ -455,3 +455,131 @@ forward_walks:
 		t.Fatalf("forward_walks = %#v, want the one enabled entry", cfg.ForwardWalks)
 	}
 }
+
+// build_batch_size (core.Config.BuildBatchSize) defaults to 0, core's default,
+// loads from the file, and is overridden by BUILD_BATCH_SIZE, with or without
+// a file.
+func TestLoadAppConfig_BuildBatchSize(t *testing.T) {
+	t.Setenv("BUILD_BATCH_SIZE", "")
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.BuildBatchSize != 0 {
+		t.Errorf("build_batch_size default = %d, want 0 (core's default)", cfg.BuildBatchSize)
+	}
+
+	t.Setenv("BUILD_BATCH_SIZE", "40")
+	cfg, err = loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig with env only: %v", err)
+	}
+	if cfg.BuildBatchSize != 40 {
+		t.Errorf("BUILD_BATCH_SIZE without a file = %d, want 40", cfg.BuildBatchSize)
+	}
+	t.Setenv("BUILD_BATCH_SIZE", "")
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	if err := os.WriteFile(configPath, []byte("build_batch_size: 250\n"), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig from file: %v", err)
+	}
+	if cfg.BuildBatchSize != 250 {
+		t.Errorf("build_batch_size from file = %d, want 250", cfg.BuildBatchSize)
+	}
+
+	t.Setenv("BUILD_BATCH_SIZE", "20")
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig with env: %v", err)
+	}
+	if cfg.BuildBatchSize != 20 {
+		t.Errorf("BUILD_BATCH_SIZE override = %d, want 20", cfg.BuildBatchSize)
+	}
+}
+
+// build_batch_sizes (core.Config.BuildBatchSizes) is decoded from the file's
+// own section, so a resource type keeps its case.
+func TestLoadAppConfig_BuildBatchSizes(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	content := []byte(`
+build_batch_size: 100
+build_batch_sizes:
+  Product: 50
+  order: 0
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+
+	cfg, err := loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	want := map[string]int{"Product": 50, "order": 0}
+	if !reflect.DeepEqual(cfg.BuildBatchSizes, want) {
+		t.Fatalf("build_batch_sizes = %#v, want %#v (resource types keep their case)", cfg.BuildBatchSizes, want)
+	}
+	if cfg.BuildBatchSize != 100 {
+		t.Errorf("build_batch_size beside build_batch_sizes = %d, want 100", cfg.BuildBatchSize)
+	}
+}
+
+func TestLoadAppConfig_BuildBatchSizesAbsentByDefault(t *testing.T) {
+	cfg, err := loadAppConfig("does-not-exist.yml")
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.BuildBatchSizes != nil {
+		t.Fatalf("build_batch_sizes without a file = %#v, want none", cfg.BuildBatchSizes)
+	}
+
+	configPath := filepath.Join(t.TempDir(), "indexer.yml")
+	if err := os.WriteFile(configPath, []byte("build_batch_size: 10\n"), 0o600); err != nil {
+		t.Fatalf("write config file: %v", err)
+	}
+	cfg, err = loadAppConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadAppConfig: %v", err)
+	}
+	if cfg.BuildBatchSizes != nil {
+		t.Fatalf("build_batch_sizes in a file without the section = %#v, want none", cfg.BuildBatchSizes)
+	}
+}
+
+func TestLoadAppConfig_BuildBatchSizesInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		section string
+	}{
+		{name: "size that isn't a number", section: `
+build_batch_sizes:
+  product: many
+`},
+		{name: "list where the mapping belongs", section: `
+build_batch_sizes:
+  - product: 50
+`},
+		{name: "section key in another case", section: `
+Build_Batch_Sizes:
+  product: 50
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath := filepath.Join(t.TempDir(), "indexer.yml")
+			if err := os.WriteFile(configPath, []byte(tc.section), 0o600); err != nil {
+				t.Fatalf("write config file: %v", err)
+			}
+			cfg, err := loadAppConfig(configPath)
+			if err == nil {
+				t.Fatalf("loadAppConfig = %#v, want an error", cfg.BuildBatchSizes)
+			}
+			if strings.Contains(err.Error(), "needs a YAML config file") {
+				t.Errorf("error %q blames the file format of a YAML file", err)
+			}
+		})
+	}
+}

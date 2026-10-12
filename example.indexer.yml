@@ -22,7 +22,9 @@
 #   pool.queue_size     -> POOL_QUEUE_SIZE
 #   pool.queue_high_water -> POOL_QUEUE_HIGH_WATER
 #   pool.owner_lease    -> POOL_OWNER_LEASE
-# forward_walks has no env vars: it is a list, which doesn't map onto them.
+#   build_batch_size    -> BUILD_BATCH_SIZE
+# forward_walks and build_batch_sizes have no env vars: a list and a map by
+# resource type don't map onto them.
 
 # The surface is split across two listeners. Both serve gRPC, gRPC-Web, and the
 # Connect protocol (HTTP POST + JSON) over HTTP/2 cleartext (h2c).
@@ -98,6 +100,17 @@ pool:
   queue_size: 100
   queue_high_water: 0
   owner_lease: "0s"
+
+# A build — an inline one, the sweep's, or a rebuild by ids — asks each plan
+# about its ids in batches of build_batch_size ids of one type at once; 0 means
+# 100. build_batch_sizes overrides it by resource type, since sources differ in
+# the batches they serve; an entry of 0 takes build_batch_size, and an entry
+# for a type resources.yml doesn't configure is an error. A source's own read
+# limit is for the provider to chunk to, not this. Resource types keep their
+# case. No env override for build_batch_sizes (see above).
+build_batch_size: 0
+# build_batch_sizes:
+#   product: 50
 
 # Scheduled forward walks: each enabled entry walks its resource type from the
 # source on a schedule, so a resource created or changed without a notification

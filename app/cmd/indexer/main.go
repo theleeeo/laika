@@ -134,6 +134,8 @@ func main() {
 		OwnerLease:      cfg.Pool.OwnerLease,
 		SweepBackoff:    cfg.Sweep.Backoff,
 		SweepBackoffMax: cfg.Sweep.BackoffMax,
+		BuildBatchSize:  cfg.BuildBatchSize,
+		BuildBatchSizes: cfg.BuildBatchSizes,
 		ForwardWalks:    forwardWalks,
 	})
 	if err != nil {
