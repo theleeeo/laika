@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/theleeeo/laika/model"
 	"github.com/theleeeo/laika/projection"
@@ -38,7 +40,14 @@ type RebuildArgs struct {
 // Build builds each of params' ids. An id with an owner token (OwnerTokens)
 // is an owned inline build: BeginBuild renews its lease, its fetches run with
 // the row's metadata as BeginBuild returns it, and a success finishes it with
-// FinishOwned, submitting the follow-up FinishOwned hands on. An id without
+// FinishOwned, submitting the follow-up FinishOwned hands on. While the call
+// runs, every owned id it hasn't finished — the ones still waiting for their
+// turn included — is renewed (RenewOwners) every third of the OwnerLease,
+// from one interval after the call starts until the id finishes, so a build
+// of any length keeps its rows (ADR 0014). A failed renewal is logged and
+// retried at the next tick, releasing nothing; an id a renewal reports lost
+// is renewed no more and built on, its finish matching nothing, as a lapsed
+// build's does. The renewal stops before Build returns. An id without
 // one owns nothing: it fetches with params.Metadata and finishes with
 // ClearStale. A plan's nil is its own Schema Version's answer (ADR 0013): an
 // id some of whose plans returned a document and others nil has those
@@ -73,10 +82,16 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		return err
 	}
 
+	// Every owned id keeps its lease while the call runs, renewed every third
+	// of the lease until it finishes; the renewal stops before Build returns.
+	renewal := idx.startBuildRenewal(ctx, params.owned(params.ResourceIds))
+	defer renewal.stop()
+
 	// fail ends id's build after err: an owned id is released through
 	// releaseFailed, which logs it with its attempt count; an id that owns
 	// nothing is logged here as msg.
 	fail := func(id, msg string, err error) {
+		renewal.finished(id)
 		owned := params.owned([]string{id})
 		if len(owned) == 0 {
 			logger.Warn(msg, slog.String("id", id), slog.String("error", err.Error()))
@@ -126,6 +141,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 			// mid-build keeps the row, and an owner re-claims it for the
 			// follow-up — a build for a recreate. A token of 0 re-claims
 			// nothing.
+			renewal.finished(id)
 			fu, err := idx.st.DeleteResourceIfSeq(ctx, res, begun.StaleSeq, token)
 			if err != nil {
 				fail(id, "removing the row of a resource gone at source failed; it stays until a build of it finds the resource gone again",
@@ -150,6 +166,7 @@ func (idx *Indexer) Build(ctx context.Context, params BuildArgs) error {
 		// Race-safe the same way: a change that moved stale_seq mid-build —
 		// a registration this owner kept from submitting, or buildOne's own
 		// drift re-mark — re-claims the row for one follow-up instead.
+		renewal.finished(id)
 		fu, err := idx.st.FinishOwned(ctx, res, begun.StaleSeq, token)
 		if err != nil {
 			fail(id, "finishing owned build failed", fmt.Errorf("finish owned build: %w", err))
@@ -173,6 +190,121 @@ func (params BuildArgs) owned(ids []string) []Owned {
 		}
 	}
 	return out
+}
+
+const (
+	renewDuringBuildFailedMsg = "renewing an owned build's leases failed; retried at the next tick"
+	renewDuringBuildLostMsg   = "build ownership lost while building; the build goes on, its finish matches nothing and the new owner's build serves the resource"
+)
+
+// buildRenewal renews the leases of an owned Build call's ids while the call
+// runs (ADR 0014), so a build of any length keeps them: a delete registered
+// meanwhile only marks the row, and the owner's follow-up deletes after the
+// write. Its set is the call's owned ids not yet finished; one leaves it when
+// Build finishes it (finished) or a renewal reports it lost. A nil
+// buildRenewal — a call that owns nothing — renews nothing.
+type buildRenewal struct {
+	idx    *Indexer
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu  sync.Mutex
+	set map[string]Owned // by id: a Build call is of one type
+}
+
+// startBuildRenewal starts renewing owned in a goroutine of its own, every
+// third of the OwnerLease, the first one interval from now (BeginBuild renews
+// each id as it begins), until ctx ends or stop. It returns nil, starting
+// nothing, when owned is empty.
+func (idx *Indexer) startBuildRenewal(ctx context.Context, owned []Owned) *buildRenewal {
+	if len(owned) == 0 {
+		return nil
+	}
+	r := &buildRenewal{idx: idx, done: make(chan struct{}), set: make(map[string]Owned, len(owned))}
+	for _, o := range owned {
+		r.set[o.Id] = o
+	}
+	ctx, r.cancel = context.WithCancel(ctx)
+	// A floor keeps an absurdly short lease from a ticker of zero, which
+	// panics.
+	ticks, stopTicker := idx.renewTicker(max(idx.ownerLease/3, time.Millisecond))
+	go func() {
+		defer close(r.done)
+		defer stopTicker()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticks:
+				r.renew(ctx)
+			}
+		}
+	}()
+	return r
+}
+
+// renew renews the set's ownerships once. A failed renewal is logged and
+// changes nothing: the next tick retries the same set, and nothing is
+// released or skipped — unlike renewOwners at a dequeue or a sweep entry,
+// which hold work back until it runs. An id the renewal reports lost leaves
+// the set, logged once; its build goes on, and its finish matches nothing.
+// One finished while the renewal ran isn't reported.
+func (r *buildRenewal) renew(ctx context.Context) {
+	r.mu.Lock()
+	owned := make([]Owned, 0, len(r.set))
+	for _, o := range r.set {
+		owned = append(owned, o)
+	}
+	r.mu.Unlock()
+	if len(owned) == 0 {
+		return
+	}
+
+	held, err := r.idx.st.RenewOwners(ctx, owned)
+	if err != nil {
+		if ctx.Err() == nil {
+			slog.Warn(renewDuringBuildFailedMsg, slog.Int("count", len(owned)), slog.String("error", err.Error()))
+		}
+		return
+	}
+	kept := make(map[Owned]bool, len(held))
+	for _, o := range held {
+		kept[o] = true
+	}
+	var lost []Owned
+	r.mu.Lock()
+	for _, o := range owned {
+		if kept[o] || r.set[o.Id] != o {
+			continue
+		}
+		delete(r.set, o.Id)
+		lost = append(lost, o)
+	}
+	r.mu.Unlock()
+	for _, o := range lost {
+		slog.Info(renewDuringBuildLostMsg,
+			slog.String("type", o.Type), slog.String("id", o.Id), slog.Int64("token", o.Token))
+	}
+}
+
+// finished takes id out of the set: Build is finishing it, or has failed or
+// released it.
+func (r *buildRenewal) finished(id string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	delete(r.set, id)
+	r.mu.Unlock()
+}
+
+// stop ends the renewal and waits for it, so none outlives the Build call.
+func (r *buildRenewal) stop() {
+	if r == nil {
+		return
+	}
+	r.cancel()
+	<-r.done
 }
 
 // versionedDoc pairs a plan's Schema Version with the document it built.

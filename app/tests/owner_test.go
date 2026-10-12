@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -364,4 +366,90 @@ func (t *TestSuite) Test_Owner_SweepSkipsLiveLease_BuildsOnceExpired() {
 	seq, since := t.ownerColumns("a", "1")
 	t.Require().Nil(seq, "the sweep build's finish drops the ownership")
 	t.Require().Nil(since)
+}
+
+// Test_Owner_SlowOwnedBuild_KeepsItsOwnership_SoADeleteWaitsForItsWrite: X
+// runs with a one-second OwnerLease, so its owned build renews every third of
+// a second, and a/1's index forgets a deleted document's version after one
+// second (index.gc_deletes). The interleaving, forced through the provider's
+// FetchRelated gate:
+//
+//  1. a/1 is created and built on X ("v1").
+//  2. a/1 changes ("v2") and X claims it: its owned build B fetches a/1 and is
+//     held in FetchRelated(b), well past the lease.
+//  3. a/1 is deleted at the source and its ChangeDeleted registered on X. B's
+//     renewals kept its lease live, so the registration only marks the row a
+//     tombstone: it claims nothing, no inline delete runs, and a/1's document
+//     is still there.
+//  4. The test waits past gc_deletes, then releases B: B writes "v2" at its
+//     Build Sequence, and its FinishOwned sees the moved mark and re-claims
+//     the row for a follow-up, a delete since the row is a tombstone, which
+//     deletes the document at a higher Build Sequence and then the row.
+//
+// Without the renewal B's lease lapsed in step 2: the registration claimed
+// the row and its inline delete hard-deleted the document and the row; B's
+// late write, below the delete's sequence, was then accepted once gc_deletes
+// had passed, and a/1 came back. The checks in step 3 are non-fatal, so such
+// a failure still reports that end state.
+func (t *TestSuite) Test_Owner_SlowOwnedBuild_KeepsItsOwnership_SoADeleteWaitsForItsWrite() {
+	t.setResourceConfig(DefaultResourceConfig)
+	ctx := t.T().Context()
+	const lease, gcDeletes = time.Second, time.Second
+
+	res, err := t.esClient.Indices.PutSettings(
+		strings.NewReader(fmt.Sprintf(`{"index":{"gc_deletes":"%dms"}}`, gcDeletes.Milliseconds())),
+		t.esClient.Indices.PutSettings.WithIndex(core.IndexName("a", 1)))
+	t.Require().NoError(err)
+	t.Require().False(res.IsError(), "setting gc_deletes: %s", res.Status())
+	res.Body.Close()
+
+	x := t.newIndexer(DefaultResourceConfig, core.Config{OwnerLease: lease})
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	// 1.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "v1"})
+	t.Require().NoError(x.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeCreated, Version: 1,
+	}))
+	t.Require().NoError(x.WaitForIdle(waitCtx))
+	t.Require().True(t.docExists("a", "1"))
+
+	// 2. The deferred release frees B if the test fails before step 4.
+	t.fakeProvider.SetResource("a", "1", map[string]any{"id": "1", "field1": "v2"})
+	gate := t.fakeProvider.SetFetchGate("a1-slow")
+	defer t.fakeProvider.ReleaseFetchGate("a1-slow")
+	t.Require().NoError(x.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeUpdated, Version: 2,
+		Metadata: map[string]string{"test_related_gate": "a1-slow", "test_related_gate_resource": "b"},
+	}))
+	t.awaitGate(gate, "B, the owned build of a/1, to reach its FetchRelated(b) gate")
+	ownerSeq, _ := t.ownerColumns("a", "1")
+	t.Require().NotNil(ownerSeq, "B owns a/1")
+	time.Sleep(lease * 5 / 2)
+
+	// 3.
+	t.fakeProvider.DeleteResource("a", "1")
+	t.Require().NoError(x.RegisterChange(ctx, core.Notification{
+		ResourceType: "a", ResourceID: "1", Kind: core.ChangeDeleted,
+	}))
+	var deleted bool
+	var owner *int64
+	err = t.pool.QueryRow(ctx,
+		`SELECT deleted, owner_seq FROM resources WHERE type='a' AND id='1'`).Scan(&deleted, &owner)
+	if t.Assert().NoError(err, "the delete keeps a/1's row") {
+		t.Assert().True(deleted, "the delete marks a/1's row a tombstone")
+		if t.Assert().NotNil(owner, "the delete leaves a/1 owned") {
+			t.Assert().Equal(*ownerSeq, *owner, "the delete claims nothing: B still owns a/1")
+		}
+	}
+	t.Assert().True(t.docExists("a", "1"), "no inline delete runs while B owns a/1")
+
+	// 4.
+	time.Sleep(gcDeletes * 2)
+	t.fakeProvider.ReleaseFetchGate("a1-slow")
+	t.Require().NoError(x.WaitForIdle(waitCtx))
+
+	t.Require().Equal(0, t.resourceRowCount("a", "1"), "B's follow-up delete removes the row")
+	t.Require().False(t.docExists("a", "1"), "B's follow-up delete removes the document B wrote, and past gc_deletes it stays gone")
 }

@@ -79,16 +79,18 @@ type Config struct {
 
 	// OwnerLease is how long a claimed build owner holds its resource
 	// without renewing: a mark of a row whose owner renewed (claim, a pool
-	// task's dequeue, the sweep reaching its entry, BeginBuild, BeginDelete)
-	// within it doesn't submit another inline build. A holder whose renewal
-	// at dequeue or at its sweep entry finds the ownership lost — the lease
-	// lapsed and another owner claimed the row under a newer mark — does
-	// nothing for it. Size it above an inline build's or delete's queue wait
-	// plus its run: a build or delete that outlives it costs a duplicate
-	// build or delete, which the Build Sequence orders — except a build that
-	// a delete overtakes and that writes more than Elasticsearch's
-	// index.gc_deletes after it, which brings the deleted document back
-	// (seams S16). Default 30s.
+	// task's dequeue, the sweep reaching its entry, BeginBuild, BeginDelete,
+	// and an owned build every third of it while it runs) within it doesn't
+	// submit another inline build. A holder whose renewal at dequeue or at
+	// its sweep entry finds the ownership lost — the lease lapsed and another
+	// owner claimed the row under a newer mark — does nothing for it. Size it
+	// above an inline build's or delete's queue wait, and above a delete's
+	// run: an owned build renews itself while it runs, but a delete doesn't.
+	// A delete that outlives it, or an owned build whose renewals fail or
+	// whose process stalls past it, costs a duplicate build or delete, which
+	// the Build Sequence orders — except a build that a delete overtakes and
+	// that writes more than Elasticsearch's index.gc_deletes after it, which
+	// brings the deleted document back (seams S16). Default 30s.
 	OwnerLease time.Duration
 
 	// SweepBackoff is how long the StaleSweep leaves a resource after its
@@ -165,6 +167,10 @@ type Indexer struct {
 	rebuildChunkSize int
 
 	ownerLease time.Duration
+	// renewTicker starts the ticker an owned Build renews its leases on,
+	// every third of ownerLease, and returns its channel and its stop; tests
+	// replace it with ticks they send.
+	renewTicker func(d time.Duration) (<-chan time.Time, func())
 
 	// sweepBackoff is Config.SweepBackoff and SweepBackoffMax with their
 	// defaults applied: every Store.ReleaseFailed gets it.
@@ -257,6 +263,10 @@ func New(cfg Config) (*Indexer, error) {
 	idx.ownerLease = cfg.OwnerLease
 	if idx.ownerLease <= 0 {
 		idx.ownerLease = defaultOwnerLease
+	}
+	idx.renewTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		t := time.NewTicker(d)
+		return t.C, t.Stop
 	}
 
 	idx.sweepBackoff = SweepBackoff{Base: cfg.SweepBackoff, Max: cfg.SweepBackoffMax}

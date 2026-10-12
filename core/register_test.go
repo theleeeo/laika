@@ -82,9 +82,12 @@ type recordingStore struct {
 	// lock, with the ownerships it was given: a test can hand a row to
 	// another owner just before its holder renews it. renewErr fails every
 	// RenewOwners as a done ctx does: it records RenewOwnersFailed per entry
-	// and returns the error.
-	onRenew  func([]Owned)
-	renewErr error
+	// and returns the error. afterRenew, when set, runs at the end of every
+	// RenewOwners, outside the lock: a test can wait for a renewal it
+	// triggered to have reached the store.
+	onRenew    func([]Owned)
+	renewErr   error
+	afterRenew func()
 	// replaced records every ReplaceEdges call, in order; replaceErr fails
 	// every ReplaceEdges, which then stores no metadata. onReplace, when set,
 	// runs inside every ReplaceEdges, outside the lock and before it stores
@@ -445,6 +448,9 @@ func (s *recordingStore) ListResources(_ context.Context, resourceType, after st
 func (s *recordingStore) RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error) {
 	if s.onRenew != nil {
 		s.onRenew(owned)
+	}
+	if s.afterRenew != nil {
+		defer s.afterRenew()
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

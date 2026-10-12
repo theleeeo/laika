@@ -96,9 +96,11 @@ type Store interface {
 	// still the row's owner token, leaves the others alone, and returns the
 	// renewed ones: the ownerships still held. One it didn't renew is lost —
 	// another owner claimed the row under a newer mark, or a token-less clear
-	// (ClearStale) or a hard delete dropped it — and its holder does nothing
-	// for it. A pool task calls it when it is dequeued, the sweep before
-	// serving each entry.
+	// (ClearStale) or a hard delete dropped it. A pool task calls it when it
+	// is dequeued and the sweep before serving each entry, and neither does
+	// anything for a lost one; an owned Build calls it every third of the
+	// lease while it runs, for the ids it hasn't finished, and builds a lost
+	// one on, renewing it no more.
 	RenewOwners(ctx context.Context, owned []Owned) ([]Owned, error)
 	// ReleaseOwners drops every given ownership whose token is still the
 	// row's owner token, leaving the stale mark, with no backoff: owned work
