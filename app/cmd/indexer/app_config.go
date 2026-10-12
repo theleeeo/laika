@@ -135,12 +135,14 @@ type sweepConfig struct {
 }
 
 type poolConfig struct {
-	// Size bounds concurrent inline builds.
+	// Size bounds concurrent inline build tasks, each a batch of one type's
+	// ids, up to its batch size, or one delete.
 	Size int `mapstructure:"size"`
-	// QueueSize bounds accepted-but-not-yet-running inline builds; a full
-	// queue sheds new submissions to the sweep.
+	// QueueSize bounds accepted-but-not-yet-running inline tasks, counting
+	// batches, as Size does, not ids; a full queue sheds new submissions to
+	// the sweep.
 	QueueSize int `mapstructure:"queue_size"`
-	// QueueHighWater is the queued-build count at or above which the pool is
+	// QueueHighWater is the queued-task count at or above which the pool is
 	// under pressure (core.Config.QueueHighWater). 0 means core's default,
 	// 80% of QueueSize. Only WaitForSlot registrations pace on it, and the
 	// app's RPCs never wait (ADR 0008), so it has no effect here yet.
@@ -150,8 +152,9 @@ type poolConfig struct {
 	// change to the resource on any instance submits no second build, and the
 	// owner runs one follow-up for it. 0 means core's default, 30s. A
 	// running build renews it, so size it above a build's or delete's queue
-	// wait and a delete's run; core.Config's OwnerLease says what a shorter
-	// one costs.
+	// wait — about QueueSize / Size batch builds, so it grows with the batch
+	// size — and a delete's run; core.Config's OwnerLease says what a
+	// shorter one costs.
 	OwnerLease time.Duration `mapstructure:"owner_lease"`
 }
 

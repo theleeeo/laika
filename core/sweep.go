@@ -21,8 +21,9 @@ import (
 // build or delete releases its ownership through Store.ReleaseFailed, which
 // backs the row off, so a later sweep retries it once the backoff has passed
 // (ListStale skips it until then) and a row that keeps failing never holds
-// the head of the backlog. A failed renewal releases the ownership of the tombstone or
-// whole batch it covered without a backoff, and the next sweep retries them.
+// the head of the backlog. A failed renewal releases the ownership of the
+// tombstone or whole batch it covered without a backoff, and the next sweep
+// retries them.
 //
 // This is the safety net behind the inline build pool (ADR 0008). It runs as
 // the body of the StaleSweep Temporal activity; embedders without Temporal

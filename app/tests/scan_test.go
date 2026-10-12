@@ -76,8 +76,8 @@ func (t *TestSuite) setScanConfig(cfgs resource.Configs) {
 }
 
 // registerChunk is the most notifications one RegisterChanges call of the
-// seeding carries before it drains: under the suite's QueueSize of 1,000, so
-// no build is shed to the sweep.
+// seeding carries before it drains: a handful of batch tasks, far under the
+// suite's QueueSize of 1,000 tasks, so no build is shed to the sweep.
 const registerChunk = 500
 
 // seedBuilt stores each id's data in the fake provider and builds them all

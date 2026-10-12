@@ -56,8 +56,9 @@ type RebuildArgs struct {
 // build's does. The renewal stops before Build returns. An id without one
 // owns nothing: it fetches with params.Metadata and finishes with
 // ClearStale. The build follow-ups the call's finishes hand on are collected
-// and submitted together, as one owned build, before Build returns; a
-// delete follow-up is submitted as its finish hands it on.
+// and submitted together when Build returns, per type in tasks of at most
+// the type's batch size (submitOwnedBuilds); a delete follow-up is submitted
+// as its finish hands it on.
 //
 // A plan's nil is its own Schema Version's answer (ADR 0013): an id some of
 // whose plans returned a document and others nil has those documents
@@ -698,7 +699,7 @@ func (idx *Indexer) startBuildRenewal(ctx context.Context, owned []Owned) *build
 
 // renew renews the set's ownerships once. A failed renewal is logged and
 // changes nothing: the next tick retries the same set, and nothing is
-// released or skipped — unlike renewOwners at a dequeue or a sweep entry,
+// released or skipped — unlike renewOwners at a dequeue or in the sweep,
 // which hold work back until it runs. An id the renewal reports lost leaves
 // the set, logged once; its build goes on, and its finish matches nothing.
 // One finished while the renewal ran isn't reported.
