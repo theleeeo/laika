@@ -540,7 +540,8 @@ func (idx *Indexer) rebuild(ctx context.Context, params RebuildArgs, resume rebu
 // the type's batch size at a time: each batch is begun in one BeginBuilds in
 // BeginInsert, every token 0, and each selected plan is asked about it once.
 // A batch whose BeginBuilds or plan call fails fails each of its ids, logged
-// once for the batch.
+// once for the batch; one the rebuild's context ended instead salvages what
+// was begun and returns the context's error.
 func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error {
 	logger := slog.With(slog.String("type", params.ResourceType))
 
@@ -585,6 +586,12 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 			err = fmt.Errorf("the store returned %d begun builds for %d ids", len(begun), len(ids))
 		}
 		if err != nil {
+			// A begin the rebuild's end cut short is no failed batch: its
+			// ids were never begun, and a retry of the rebuild builds them.
+			if ctx.Err() != nil {
+				fl.salvage(ctx)
+				return ctx.Err()
+			}
 			failBatch("failed to begin a batch of builds", ids, err)
 			continue
 		}
@@ -597,14 +604,20 @@ func (idx *Indexer) rebuildByIDs(ctx context.Context, params RebuildArgs) error 
 		// Same existence rule as the live path (buildOne, ADR 0013): every
 		// selected plan runs for the batch first, and each plan's outcome is
 		// its own version's — a nil deletes that version's document and
-		// empties its edge set, never another version's. An id no plan
-		// answered gets no outcome, never a nil, and finish marks it.
+		// empties its edge set, never another version's. An id a plan left
+		// unanswered gets an error from executePlan, never a nil, and fails.
 		outcomes, err := executeAllPlans(ctx, plans, projection.BuildRequest{
 			ResourceType: params.ResourceType,
 			ResourceIDs:  ids,
 			Metadata:     params.Metadata,
 		})
 		if err != nil {
+			// A plan call the rebuild's end cut short is no failed batch:
+			// salvage marks the batch's begun ids with the rest.
+			if ctx.Err() != nil {
+				fl.salvage(ctx)
+				return ctx.Err()
+			}
 			failBatch("plan execution failed for a batch", ids, err)
 			continue
 		}

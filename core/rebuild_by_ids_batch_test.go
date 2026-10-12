@@ -203,6 +203,9 @@ func TestRebuildByIDs_AFailedBatch_FailsEachOfItsIDsWithOneLogLine(t *testing.T)
 				t.Fatalf("want one log line for the failed batch, got %d: %v", len(lines), lines)
 			}
 			line := lines[0]
+			if line["level"] != "ERROR" {
+				t.Fatalf("the failed batch's line must be an Error, got %v", line["level"])
+			}
 			if line["type"] != "product" || line["count"] != float64(batch) {
 				t.Fatalf("the line must name the type and the count %d: %v", batch, line)
 			}
@@ -237,4 +240,134 @@ func begunIn(calls []string, id string) []int {
 		}
 	}
 	return at
+}
+
+// A type's BuildBatchSizes entry, not BuildBatchSize, sizes its targeted
+// rebuild's batches: 120 ids at an override of 50 begin in batches of 50, 50
+// and 20, and each plan is asked about each batch once.
+func TestRebuildByIDs_ATypesBatchSizeOverride_SizesItsBatches(t *testing.T) {
+	st := &rebuildRecordingStore{}
+	v1 := &requestLog{exec: &staticExecuter{docs: []projection.BuildDoc{productDoc("x")}}}
+	idx := mustNew(Config{
+		Resources:       twoVersionResources(),
+		Plans:           map[string][]projection.Plan{"product": {{Version: 1, Executer: v1}}},
+		ES:              &captureBackend{},
+		Store:           st,
+		BuildBatchSize:  100,
+		BuildBatchSizes: map[string]int{"product": 50},
+	})
+	ids := productIDs(120)
+
+	if err := idx.RebuildNow(t.Context(), []ResourceSelector{{ResourceType: "product", ResourceIDs: ids}}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := [][]string{ids[:50], ids[50:100], ids[100:]}
+	if begins := beginBuildsCalls(st); !slices.EqualFunc(begins, want, slices.Equal[[]string]) {
+		t.Fatalf("want BeginBuilds of 50, 50 and 20 ids, got sizes %v", batchSizes(begins))
+	}
+	var asked [][]string
+	for _, r := range v1.reqs {
+		asked = append(asked, r.ResourceIDs)
+	}
+	if !slices.EqualFunc(asked, want, slices.Equal[[]string]) {
+		t.Fatalf("the plan must be asked about each batch once, got sizes %v", batchSizes(asked))
+	}
+}
+
+// cancelOnBeginBuilds is the rebuild store, but its BeginBuilds from the
+// from-th call on (1-based) ends the rebuild's context and fails as the real
+// store does on a done context.
+type cancelOnBeginBuilds struct {
+	*rebuildRecordingStore
+	from   int
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnBeginBuilds) BeginBuilds(ctx context.Context, mode BeginMode, begins []Begin) ([]BuildBegun, error) {
+	s.calls++
+	if s.calls >= s.from {
+		s.cancel()
+		return nil, ctx.Err()
+	}
+	return s.rebuildRecordingStore.BeginBuilds(ctx, mode, begins)
+}
+
+// A batch whose BeginBuilds or plan call fails because the rebuild's context
+// ended is the cancellation's, not the batch's: the rebuild returns ctx's
+// error — retryable, not a RebuildMarkedFailuresError — with no Error line,
+// and salvage marks what it had begun and not settled, in one mark, rather
+// than each id failing on its own.
+func TestRebuildByIDs_ABatchCutShortByItsContext_ReturnsCtxsErrorAndSalvages(t *testing.T) {
+	cases := map[string]struct {
+		run    func(t *testing.T, st *rebuildRecordingStore) error
+		marked []string
+	}{
+		// Batches of 2: 1 and 2 are begun and asked, then 3's BeginBuilds
+		// ends the context.
+		"BeginBuilds": {
+			run: func(t *testing.T, st *rebuildRecordingStore) error {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				store := &cancelOnBeginBuilds{rebuildRecordingStore: st, from: 2, cancel: cancel}
+				idx := newBatchedRebuildIndexer(store, &captureBackend{}, 2, askedAbout("", nil))
+				return idx.RebuildNow(ctx, []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2", "3"}}})
+			},
+			marked: []string{"1", "2"},
+		},
+		// One batch of 1 and 2, whose plan ends the context and fails with
+		// its error.
+		"the plan call": {
+			run: func(t *testing.T, st *rebuildRecordingStore) error {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				cancelling := executerFunc(func(ctx context.Context, _ projection.BuildRequest) <-chan aggregation.ExecutionResult[projection.BuildDoc] {
+					cancel()
+					ch := make(chan aggregation.ExecutionResult[projection.BuildDoc], 1)
+					ch <- aggregation.ExecutionResult[projection.BuildDoc]{Err: ctx.Err()}
+					close(ch)
+					return ch
+				})
+				idx := newBatchedRebuildIndexer(st, &captureBackend{}, 0, cancelling)
+				return idx.RebuildNow(ctx, []ResourceSelector{{ResourceType: "product", ResourceIDs: []string{"1", "2"}}})
+			},
+			marked: []string{"1", "2"},
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			logs := captureDefaultLogs(t)
+			st := &rebuildRecordingStore{}
+
+			err := c.run(t, st)
+
+			var me *RebuildMarkedFailuresError
+			if !errors.Is(err, context.Canceled) || errors.As(err, &me) {
+				t.Fatalf("a rebuild its context cut short must return ctx's error, got %T: %v", err, err)
+			}
+			for _, rec := range logs.records(t) {
+				if rec["level"] == "ERROR" {
+					t.Fatalf("a cancellation is no failed batch, but logged: %v", rec)
+				}
+			}
+			st.mu.Lock()
+			marks := slices.Clone(st.markLeases)
+			st.mu.Unlock()
+			if len(marks) != 1 {
+				t.Fatalf("salvage marks what was begun in one call, got %d marks: %v", len(marks), st.callsSnapshot())
+			}
+			calls := st.callsSnapshot()
+			var got []string
+			for _, call := range calls {
+				if id, ok := strings.CutPrefix(call, "MarkStale:product/"); ok {
+					got = append(got, id)
+				}
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, c.marked) {
+				t.Fatalf("salvage must mark %v, got %v: %v", c.marked, got, calls)
+			}
+		})
+	}
 }
